@@ -1,0 +1,43 @@
+{
+  "title": "AI SPM — Engineering",
+  "uid": "spm-engineering",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1, "type": "timeseries",
+      "title": "Model Risk Score Over Time",
+      "gridPos": {"x":0,"y":0,"w":12,"h":8},
+      "targets": [{"expr": "spm_model_risk_score", "legendFormat": "{{model_id}}"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 2, "type": "stat",
+      "title": "Enforcement Actions (Total)",
+      "gridPos": {"x":12,"y":0,"w":6,"h":4},
+      "targets": [{"expr": "sum(spm_enforcement_actions_total)", "instant": true}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 3, "type": "gauge",
+      "title": "Snapshot Lag (seconds)",
+      "gridPos": {"x":18,"y":0,"w":6,"h":4},
+      "targets": [{"expr": "spm_snapshot_lag_seconds", "instant": true}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [
+        {"color":"green","value":0},{"color":"yellow","value":60},{"color":"red","value":300}
+      ]}}},
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 4, "type": "table",
+      "title": "Model Lifecycle Status",
+      "gridPos": {"x":0,"y":8,"w":24,"h":8},
+      "targets": [{
+        "rawSql": "SELECT name, version, tenant_id, status, risk_tier, approved_by, updated_at FROM model_registry ORDER BY updated_at DESC LIMIT 50",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    }
+  ]
+}

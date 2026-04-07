@@ -1,0 +1,138 @@
+[
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "GOVERN",
+    "category": "GOVERN-1.1",
+    "subcategory": "Policies and procedures for AI risk management are in place",
+    "cpm_control": "OPA:prompt_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "GOVERN",
+    "category": "GOVERN-1.2",
+    "subcategory": "AI risk management framework includes human oversight",
+    "cpm_control": "freeze_controller:spm:admin_required",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "GOVERN",
+    "category": "GOVERN-2.1",
+    "subcategory": "Model approval records with human sign-off",
+    "cpm_control": "model_registry:approved_by_required",
+    "evaluation_rule": "model_approved_exists"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "GOVERN",
+    "category": "GOVERN-3.1",
+    "subcategory": "Tool execution authorization with OPA policy",
+    "cpm_control": "OPA:tool_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "GOVERN",
+    "category": "GOVERN-4.1",
+    "subcategory": "Output sanitization and content policy",
+    "cpm_control": "OPA:output_policy.rego",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MAP",
+    "category": "MAP-1.1",
+    "subcategory": "AI risks identified via multi-dimension risk fusion",
+    "cpm_control": "processor:7_dimension_risk_fusion",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MAP",
+    "category": "MAP-2.1",
+    "subcategory": "Adversarial threat mapping via MITRE ATLAS",
+    "cpm_control": "flink_cep:mitre_atlas_ttp_mapping",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MAP",
+    "category": "MAP-3.1",
+    "subcategory": "Model risk classification via risk tiers",
+    "cpm_control": "model_registry:risk_tier_assigned",
+    "evaluation_rule": "models_have_risk_tier"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MAP",
+    "category": "MAP-4.1",
+    "subcategory": "RAG provenance and retrieval trust scoring",
+    "cpm_control": "retrieval_gateway:sha256_provenance",
+    "evaluation_rule": "risk_fusion_active"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MEASURE",
+    "category": "MEASURE-1.1",
+    "subcategory": "Continuous per-model posture snapshots",
+    "cpm_control": "spm_aggregator:posture_snapshots",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MEASURE",
+    "category": "MEASURE-2.1",
+    "subcategory": "Content screening rate via Guard Model",
+    "cpm_control": "guard_model:llama_guard_screen",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MEASURE",
+    "category": "MEASURE-3.1",
+    "subcategory": "Output guard block and redact counts",
+    "cpm_control": "output_guard:two_pass_scan",
+    "evaluation_rule": "snapshots_recent"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MEASURE",
+    "category": "MEASURE-4.1",
+    "subcategory": "Platform metrics exposed via Prometheus",
+    "cpm_control": "prometheus:metrics_scraping",
+    "evaluation_rule": "prometheus_reachable"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MANAGE",
+    "category": "MANAGE-1.1",
+    "subcategory": "Automated model enforcement on risk threshold breach",
+    "cpm_control": "spm_api:enforcement_engine",
+    "evaluation_rule": "enforcement_action_exists"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MANAGE",
+    "category": "MANAGE-2.1",
+    "subcategory": "Manual freeze control via authenticated admin",
+    "cpm_control": "freeze_controller:rs256_admin_freeze",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MANAGE",
+    "category": "MANAGE-3.1",
+    "subcategory": "Human approval gate for side-effect tool execution",
+    "cpm_control": "executor:human_approval_gate",
+    "evaluation_rule": "opa_policy_loaded"
+  },
+  {
+    "framework": "NIST_AI_RMF",
+    "function": "MANAGE",
+    "category": "MANAGE-4.1",
+    "subcategory": "Model lifecycle deprecation and retirement workflow",
+    "cpm_control": "model_registry:lifecycle_state_machine",
+    "evaluation_rule": "enforcement_action_exists"
+  }
+]

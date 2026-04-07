@@ -1,0 +1,5 @@
+kafka-python==2.0.2
+redis==5.1.0
+cryptography==43.0.3
+requests==2.32.3
+pydantic==2.9.2

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { font-family: Arial, sans-serif; margin: 40px; color: #222; }
+  h1 { color: #1a3a5c; border-bottom: 2px solid #1a3a5c; padding-bottom: 8px; }
+  h2 { color: #2c5f8a; margin-top: 24px; }
+  .meta { color: #666; font-size: 0.9em; margin-bottom: 24px; }
+  .coverage { font-size: 2em; font-weight: bold; color: #1a7a4a; }
+  .function { border: 1px solid #ddd; border-radius: 4px; padding: 16px; margin: 12px 0; }
+  ul { margin: 8px 0; padding-left: 20px; }
+  li { margin: 4px 0; }
+</style>
+</head>
+<body>
+  <h1>NIST AI Risk Management Framework — Compliance Report</h1>
+  <div class="meta">Generated: {{generated_at}}</div>
+  <p>Overall Coverage: <span class="coverage">{{overall_coverage_pct}}%</span></p>
+  {{functions}}
+</body>
+</html>

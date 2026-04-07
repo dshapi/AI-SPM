@@ -1,0 +1,350 @@
+version: "3.9"
+
+x-common-env: &common-env
+  KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+  OPA_URL: http://opa:8181
+  JWT_ALGORITHM: RS256
+  JWT_ISSUER: ${JWT_ISSUER:-cpm-platform}
+  JWT_PRIVATE_KEY_PATH: /keys/private.pem
+  JWT_PUBLIC_KEY_PATH: /keys/public.pem
+  TENANTS: ${TENANTS:-t1}
+  KAFKA_ENABLE_ACLS: ${KAFKA_ENABLE_ACLS:-false}
+  KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-3}
+  GUARD_MODEL_URL: http://guard-model:8200
+  GUARD_MODEL_ENABLED: ${GUARD_MODEL_ENABLED:-true}
+  GUARD_MODEL_TIMEOUT: ${GUARD_MODEL_TIMEOUT:-2.0}
+  RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
+  CEP_SHORT_WINDOW_SEC: ${CEP_SHORT_WINDOW_SEC:-120}
+  CEP_LONG_WINDOW_SEC: ${CEP_LONG_WINDOW_SEC:-3600}
+  CEP_SHORT_THRESHOLD: ${CEP_SHORT_THRESHOLD:-5}
+  CEP_LONG_THRESHOLD: ${CEP_LONG_THRESHOLD:-15}
+  CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+  CEP_SESSION_HISTORY_SIZE: ${CEP_SESSION_HISTORY_SIZE:-10}
+  MEMORY_SESSION_TTL_SEC: ${MEMORY_SESSION_TTL_SEC:-3600}
+  MEMORY_LONGTERM_TTL_SEC: ${MEMORY_LONGTERM_TTL_SEC:-2592000}
+  MEMORY_SYSTEM_TTL_SEC: ${MEMORY_SYSTEM_TTL_SEC:-86400}
+  OUTPUT_GUARD_LLM_ENABLED: ${OUTPUT_GUARD_LLM_ENABLED:-true}
+  OUTPUT_GUARD_LLM_URL: http://guard-model:8200
+  POSTURE_ALLOW_THRESHOLD: ${POSTURE_ALLOW_THRESHOLD:-0.30}
+  POSTURE_ESCALATE_THRESHOLD: ${POSTURE_ESCALATE_THRESHOLD:-0.70}
+  POSTURE_BLOCK_THRESHOLD: ${POSTURE_BLOCK_THRESHOLD:-0.70}
+  SERVICE_VERSION: "3.0.0"
+  ENVIRONMENT: ${ENVIRONMENT:-production}
+  KEYS_DIR: /keys
+
+x-key-vol: &key-vol
+  - ./keys:/keys:ro
+
+x-depends-platform: &depends-platform
+  startup-orchestrator:
+    condition: service_completed_successfully
+
+services:
+  # ── Infrastructure ──────────────────────────────────────────────────────────
+
+  kafka-controller:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: cpm-kafka-controller
+    hostname: kafka-controller
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: controller
+      KAFKA_LISTENERS: CONTROLLER://:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-controller:9093
+      CLUSTER_ID: CPMPlatformV3ClusterID01
+
+  kafka-broker:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: cpm-kafka-broker
+    hostname: kafka-broker
+    depends_on: [kafka-controller]
+    ports: ["19092:19092"]
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:9092,EXTERNAL://localhost:19092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-controller:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: CPMPlatformV3ClusterID01
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cpm-redis
+    ports: ["6379:6379"]
+    command: ["redis-server", "--save", "", "--loglevel", "warning", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  opa:
+    image: openpolicyagent/opa:0.70.0
+    container_name: cpm-opa
+    command: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "/policies"]
+    volumes:
+      - ./opa/policies:/policies:ro
+    ports: ["8181:8181"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8181/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Startup orchestrator — runs once, provisions everything ────────────────
+
+  startup-orchestrator:
+    build: {context: ., dockerfile: services/startup_orchestrator/Dockerfile}
+    container_name: cpm-startup-orchestrator
+    environment:
+      <<: *common-env
+      KEYS_DIR: /keys-rw
+      JWT_PRIVATE_KEY_PATH: /keys-rw/private.pem
+      JWT_PUBLIC_KEY_PATH: /keys-rw/public.pem
+    volumes:
+      - ./keys:/keys-rw  # read-write so orchestrator can generate keys
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_healthy
+    restart: "no"
+
+  # ── Application services ───────────────────────────────────────────────────
+
+  guard-model:
+    build: {context: ., dockerfile: services/guard_model/Dockerfile}
+    container_name: cpm-guard-model
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8200:8200"]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8200/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      <<: *depends-platform
+
+  api:
+    build: {context: ., dockerfile: services/api/Dockerfile}
+    container_name: cpm-api
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8080:8080"]
+    depends_on:
+      <<: *depends-platform
+      guard-model:
+        condition: service_healthy
+
+  retrieval-gateway:
+    build: {context: ., dockerfile: services/retrieval_gateway/Dockerfile}
+    container_name: cpm-retrieval
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  processor:
+    build: {context: ., dockerfile: services/processor/Dockerfile}
+    container_name: cpm-processor
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  policy-decider:
+    build: {context: ., dockerfile: services/policy_decider/Dockerfile}
+    container_name: cpm-policy-decider
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  agent:
+    build: {context: ., dockerfile: services/agent/Dockerfile}
+    container_name: cpm-agent
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  memory-service:
+    build: {context: ., dockerfile: services/memory_service/Dockerfile}
+    container_name: cpm-memory
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  executor:
+    build: {context: ., dockerfile: services/executor/Dockerfile}
+    container_name: cpm-executor
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  tool-parser:
+    build: {context: ., dockerfile: services/tool_parser/Dockerfile}
+    container_name: cpm-tool-parser
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  output-guard:
+    build: {context: ., dockerfile: services/output_guard/Dockerfile}
+    container_name: cpm-output-guard
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+      guard-model:
+        condition: service_healthy
+
+  freeze-controller:
+    build: {context: ., dockerfile: services/freeze_controller/Dockerfile}
+    container_name: cpm-freeze
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8090:8090"]
+    depends_on:
+      <<: *depends-platform
+
+  policy-simulator:
+    build: {context: ., dockerfile: services/policy_simulator/Dockerfile}
+    container_name: cpm-policy-sim
+    environment: *common-env
+    volumes: *key-vol
+    ports: ["8091:8091"]
+    depends_on:
+      <<: *depends-platform
+
+  flink-cep:
+    build: {context: ., dockerfile: services/flink_cep/Dockerfile}
+    container_name: cpm-flink-cep
+    environment: *common-env
+    volumes: *key-vol
+    depends_on:
+      <<: *depends-platform
+
+  # ── AI SPM Platform ──────────────────────────────────────────────────────────
+
+  spm-db:
+    image: postgres:16-alpine
+    container_name: cpm-spm-db
+    environment:
+      POSTGRES_DB: spm
+      POSTGRES_USER: spm_rw
+      POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
+    volumes:
+      - spm-db-data:/var/lib/postgresql/data
+      - ./spm/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  spm-api:
+    build:
+      context: .
+      dockerfile: services/spm_api/Dockerfile
+    container_name: cpm-spm-api
+    ports: ["8092:8092"]
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      FREEZE_CONTROLLER_URL: http://freeze-controller:8090
+      SPM_SERVICE_JWT: ""
+      PROMETHEUS_URL: http://prometheus:9090
+      CPM_API_URL: http://api:8080
+      POLICY_SIMULATOR_URL: http://policy-simulator:8091
+    volumes:
+      - ./keys:/keys:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8092/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      spm-db:
+        condition: service_healthy
+      <<: *depends-platform
+
+  spm-aggregator:
+    build:
+      context: .
+      dockerfile: services/spm_aggregator/Dockerfile
+    container_name: cpm-spm-aggregator
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      SPM_API_URL: http://spm-api:8092
+      SPM_MODEL_BLOCK_THRESHOLD: ${SPM_MODEL_BLOCK_THRESHOLD:-0.85}
+      SPM_SNAPSHOT_INTERVAL_SEC: ${SPM_SNAPSHOT_INTERVAL_SEC:-300}
+      SPM_ENFORCEMENT_WINDOW: ${SPM_ENFORCEMENT_WINDOW:-3}
+    depends_on:
+      spm-db:
+        condition: service_healthy
+      spm-api:
+        condition: service_healthy
+      <<: *depends-platform
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cpm-prometheus
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: cpm-grafana
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_JWT_ENABLED: "true"
+      GF_AUTH_JWT_HEADER_NAME: "X-JWT-Assertion"
+      GF_AUTH_JWT_URL_LOGIN: "false"
+      GF_AUTH_JWT_JWK_SET_URL: "http://spm-api:8092/jwks"
+      GF_AUTH_JWT_USERNAME_CLAIM: "sub"
+      GF_AUTH_JWT_ROLE_ATTRIBUTE_PATH: "contains(roles[*], 'spm:admin') && 'Admin' || 'Viewer'"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      spm-api:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+
+volumes:
+  spm-db-data:
+  grafana-data:
