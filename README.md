@@ -17,7 +17,7 @@ By implementing AI-SPM, organizations can proactively protect their AI systems f
 ## ℹ️ Project Information
 
 - **👤 Author:** Dany Shapiro
-  - [https://linkedin.com/in/danyshapiro](https://linkedin.com/in/danyshapiro)
+  - [![linkedin](https://www.readmecodegen.com/api/social-icon?name=linkedin&size=16&link=https%3A%2F%2Flinkedin.com%2Fin%2Fdanyshapiro)](https://linkedin.com/in/danyshapiro) https://www.linkedin.com/in/danyshapiro/
 - **📦 Version:** 1.0.0
 - **📄 License:** Apache-2.0
 - **📂 Repository:** [https://github.com/dshapi/AI-SPM](https://github.com/dshapi/AI-SPM)
@@ -253,10 +253,9 @@ Features not yet implemented — candidates for the next sprint:
 5. [Verify the Platform](#verify-the-platform)
 6. [Access the UI & Dashboards](#access-the-ui--dashboards)
 7. [Run the Smoke Test](#run-the-smoke-test)
-8. [Optional: Add Your Logo](#optional-add-your-logo)
-9. [Stopping & Cleaning Up](#stopping--cleaning-up)
-10. [Troubleshooting](#troubleshooting)
-11. [Environment Reference](#environment-reference)
+8. [Stopping & Cleaning Up](#stopping--cleaning-up)
+9. [Troubleshooting](#troubleshooting)
+10. [Environment Reference](#environment-reference)
 
 ---
 
@@ -413,21 +412,6 @@ A passing run ends with:
 ```
 ✓ Smoke test PASSED
 ```
-
----
-
-## Optional: Add Your Logo
-
-The UI looks for a PNG logo at `ui/public/logo.png`. If the file is not present it falls back to a CSS sphere.
-
-To use your own logo:
-
-```bash
-cp /path/to/your/logo.png ui/public/logo.png
-docker compose up -d --build ui
-```
-
-Recommended: square PNG, at least 256 × 256 px, transparent background.
 
 ---
 
@@ -579,10 +563,9 @@ make clean           # Wipe all data and keys
 5. [Verify the Platform](#verify-the-platform)
 6. [Access the UI & Dashboards](#access-the-ui--dashboards)
 7. [Run the Smoke Test](#run-the-smoke-test)
-8. [Optional: Add Your Logo](#optional-add-your-logo)
-9. [Stopping & Cleaning Up](#stopping--cleaning-up)
-10. [Troubleshooting](#troubleshooting)
-11. [Environment Reference](#environment-reference)
+8. [Stopping & Cleaning Up](#stopping--cleaning-up)
+9. [Troubleshooting](#troubleshooting)
+10. [Environment Reference](#environment-reference)
 
 ---
 
@@ -739,21 +722,6 @@ A passing run ends with:
 ```
 ✓ Smoke test PASSED
 ```
-
----
-
-## Optional: Add Your Logo
-
-The UI looks for a PNG logo at `ui/public/logo.png`. If the file is not present it falls back to a CSS sphere.
-
-To use your own logo:
-
-```bash
-cp /path/to/your/logo.png ui/public/logo.png
-docker compose up -d --build ui
-```
-
-Recommended: square PNG, at least 256 × 256 px, transparent background.
 
 ---
 
