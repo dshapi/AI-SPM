@@ -56,6 +56,63 @@ export async function sendMessage(prompt, sessionId) {
   }
 }
 
+export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, onDone, onError }) {
+  const token = await getToken()
+
+  let res
+  try {
+    res = await fetch(`${BASE}/chat/stream`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ prompt, session_id: sessionId }),
+    })
+  } catch (e) {
+    onError(new Error('Network error: ' + e.message))
+    return
+  }
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}))
+    const detail = err.detail
+    const msg = typeof detail === 'object' && detail !== null
+      ? (detail.error || JSON.stringify(detail))
+      : (detail || `Request failed (${res.status})`)
+    onError(new Error(msg))
+    return
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() // keep any incomplete line
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        try {
+          const event = JSON.parse(line.slice(6))
+          if (event.type === 'token')  onToken(event.text)
+          else if (event.type === 'badge')  onBadge(event.text)
+          else if (event.type === 'done')   onDone(event)
+          else if (event.type === 'error')  onError(new Error(event.message))
+        } catch { /* malformed SSE line — skip */ }
+      }
+    }
+  } catch (e) {
+    onError(new Error('Stream read error: ' + e.message))
+  }
+}
+
 // ── Mock responses for offline / no-API mode ─────────────────────────────────
 const MOCK = [
   "I'm here to help. What would you like to know?",

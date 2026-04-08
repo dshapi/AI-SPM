@@ -2,7 +2,7 @@ import { useState, useRef, useCallback } from 'react'
 import Header from './components/Header.jsx'
 import ChatView from './components/ChatView.jsx'
 import ChatInput from './components/ChatInput.jsx'
-import { sendMessage } from './api.js'
+import { sendMessageStream } from './api.js'
 
 const MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku' },
@@ -37,45 +37,81 @@ export default function App() {
     })
   }, [])
 
+  // Refs for the character-drip typer — survive re-renders without stale closures
+  const charQueueRef  = useRef([])   // pending characters to drip
+  const displayedRef  = useRef('')   // what's currently shown
+  const badgesRef     = useRef([])   // tool badges received so far
+  const timerRef      = useRef(null) // interval handle
+  const streamDoneRef = useRef(false)// has the SSE stream finished?
+
+  const buildDisplay = (text, streaming) => {
+    const badgeLine = badgesRef.current.map(b => `\`${b}\``).join('  ')
+    const body = badgeLine ? `${badgeLine}\n\n${text}` : text
+    updateLastAssistant(body, streaming)
+  }
+
+  const startTyper = useCallback(() => {
+    if (timerRef.current) return
+    timerRef.current = setInterval(() => {
+      if (charQueueRef.current.length === 0) {
+        // Queue empty — if stream is done, finalize
+        if (streamDoneRef.current) {
+          clearInterval(timerRef.current)
+          timerRef.current = null
+          buildDisplay(displayedRef.current, false)
+          setLoading(false)
+        }
+        return
+      }
+      // Drip one character at a time
+      displayedRef.current += charQueueRef.current.shift()
+      buildDisplay(displayedRef.current, true)
+    }, 18) // ~55 chars/sec — feels like fast typing
+  }, [updateLastAssistant])
+
   const handleSend = useCallback(async (text) => {
     if (!text.trim() || loading) return
     setError(null)
-
     if (!inChat) setInChat(true)
+
+    // Reset typer state for new message
+    charQueueRef.current  = []
+    displayedRef.current  = ''
+    badgesRef.current     = []
+    streamDoneRef.current = false
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
 
     appendMessage('user', text)
     setLoading(true)
     appendMessage('assistant', '', true)
 
-    try {
-      const result = await sendMessage(text, _sessionId)
-
-      const words = result.text.split(' ')
-      let revealed = ''
-      let idx = 0
-
-      const tick = () => {
-        if (idx >= words.length) {
-          updateLastAssistant(result.text, false)
+    sendMessageStream(text, _sessionId, {
+      onToken: (chunk) => {
+        // Push each character into the queue — typer drips them one by one
+        charQueueRef.current.push(...chunk.split(''))
+        startTyper()
+      },
+      onBadge: (badge) => {
+        badgesRef.current.push(badge)
+        buildDisplay(displayedRef.current, true)
+      },
+      onDone: () => {
+        streamDoneRef.current = true
+        // If typer already drained the queue, finalize immediately
+        if (charQueueRef.current.length === 0) {
+          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+          buildDisplay(displayedRef.current, false)
           setLoading(false)
-          return
         }
-
-        const chunk = Math.min(3, words.length - idx)
-        revealed += (revealed ? ' ' : '') + words.slice(idx, idx + chunk).join(' ')
-        idx += chunk
-
-        updateLastAssistant(revealed, true)
-        setTimeout(tick, 28 + Math.random() * 20)
-      }
-
-      tick()
-    } catch (e) {
-      updateLastAssistant(`⚠️ ${e.message}`, false)
-      setError(e.message)
-      setLoading(false)
-    }
-  }, [loading, inChat, appendMessage, updateLastAssistant])
+      },
+      onError: (e) => {
+        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+        updateLastAssistant(`⚠️ ${e.message}`, false)
+        setError(e.message)
+        setLoading(false)
+      },
+    })
+  }, [loading, inChat, appendMessage, updateLastAssistant, startTyper])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

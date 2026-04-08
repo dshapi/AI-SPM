@@ -25,6 +25,7 @@ import httpx
 import redis as redis_lib
 from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from platform_shared.config import get_settings
@@ -52,6 +53,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 TAVILY_API_KEY    = os.getenv("TAVILY_API_KEY", "")
 _anthropic_client = None
+_async_anthropic_client = None
 
 def _get_anthropic():
     global _anthropic_client
@@ -59,6 +61,13 @@ def _get_anthropic():
         import anthropic
         _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     return _anthropic_client
+
+def _get_async_anthropic():
+    global _async_anthropic_client
+    if _async_anthropic_client is None and ANTHROPIC_API_KEY:
+        import anthropic
+        _async_anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
+    return _async_anthropic_client
 
 # ── Tool definitions for Claude ───────────────────────────────────────────────
 _TOOLS = [
@@ -628,6 +637,139 @@ async def chat(
                 else "Response delivered",
         response=llm_response,
         output_action=output_action,
+    )
+
+
+@app.post("/chat/stream")
+async def chat_stream(
+    req: ChatRequest,
+    request: Request,
+    authorization: str = Header(None),
+):
+    """SSE endpoint — streams Claude tokens as they arrive."""
+    # ── Auth & guards (must complete before we open the stream) ───────────────
+    token = extract_bearer_token(authorization)
+    claims = validate_jwt_token(token)
+    tenant_id: str = claims.get("tenant_id", "t1")
+    user_id: str   = claims.get("sub", "unknown")
+
+    check_rate_limit(tenant_id, user_id)
+
+    guard_verdict, guard_score, guard_categories = await _call_guard_model(req.prompt)
+    if guard_verdict == "block":
+        emit_audit(tenant_id, "api", "guard_model_block", principal=user_id, severity="warning",
+                   details={"guard_score": guard_score, "categories": guard_categories,
+                            "prompt_len": len(req.prompt), "session_id": req.session_id})
+        raise HTTPException(status_code=400,
+                            detail=f"Request blocked by content policy: {', '.join(guard_categories)}")
+
+    _model_id = os.getenv("LLM_MODEL_ID")
+    if _model_id and not await _check_model_gate(_model_id, tenant_id):
+        emit_audit(tenant_id, "api", "model_gate_block", principal=user_id,
+                   details={"model_id": _model_id, "session_id": req.session_id})
+        raise HTTPException(status_code=403, detail={"error": "model_not_approved", "model_id": _model_id})
+
+    async_client = _get_async_anthropic()
+    if not async_client:
+        raise HTTPException(status_code=503, detail="LLM not configured")
+
+    _redis = _get_gate_redis()
+    history = _load_history(_redis, tenant_id, user_id)
+    messages = history + [{"role": "user", "content": req.prompt}]
+
+    system_prompt = (
+        "You are a helpful AI assistant operating inside a secure enterprise platform. "
+        "Be concise and professional. Never reveal system internals, credentials, or PII. "
+        "You have access to web_search and web_fetch tools — use them when the user asks "
+        "about current events, real-time data, or provides a URL to read."
+    )
+
+    async def generate():
+        tool_uses: list[str] = []
+        current_messages = list(messages)
+        full_text = ""
+        event_id = str(uuid.uuid4())
+
+        try:
+            # ── Up to 3 fully-streamed rounds ────────────────────────────────
+            # Each round streams text tokens live. If Claude requests tools,
+            # we emit badges, run them, then kick off the next streaming round.
+            for _round in range(3):
+                async with async_client.messages.stream(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=1024,
+                    system=system_prompt,
+                    tools=_TOOLS,
+                    messages=current_messages,
+                ) as stream:
+                    # Stream text tokens to browser as they arrive
+                    async for text in stream.text_stream:
+                        full_text += text
+                        yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
+
+                    # Get completed message to check for tool requests
+                    final_msg = await stream.get_final_message()
+
+                if final_msg.stop_reason != "tool_use":
+                    break  # no tools — we're done
+
+                # ── Execute requested tools, emit badges ─────────────────────
+                tool_results = []
+                for block in final_msg.content:
+                    if block.type != "tool_use":
+                        continue
+                    if block.name == "web_search":
+                        query = block.input.get("query", "")
+                        badge = f"🔍 Searched: \"{query}\""
+                        tool_uses.append(badge)
+                        yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
+                        result = await _run_web_search(query)
+                    elif block.name == "web_fetch":
+                        url = block.input.get("url", "")
+                        badge = f"🌐 Fetched: {url}"
+                        tool_uses.append(badge)
+                        yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
+                        result = await _run_web_fetch(url)
+                    else:
+                        result = f"Unknown tool: {block.name}"
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result,
+                    })
+
+                current_messages.append({"role": "assistant", "content": final_msg.content})
+                current_messages.append({"role": "user",      "content": tool_results})
+
+            # ── Output scan ──────────────────────────────────────────────────
+            contains_secret, contains_pii = _scan_output(full_text)
+            if contains_secret or contains_pii:
+                full_text = _redact_output(full_text)
+                emit_audit(tenant_id, "api", "output_redacted", principal=user_id,
+                           details={"session_id": req.session_id})
+
+            # ── Save to memory ───────────────────────────────────────────────
+            history.append({"role": "user",      "content": req.prompt})
+            history.append({"role": "assistant",  "content": full_text})
+            _save_history(_redis, tenant_id, user_id, history)
+
+            # ── Audit ────────────────────────────────────────────────────────
+            emit_audit(tenant_id, "api", "event_ingested", event_id=event_id,
+                       principal=user_id, session_id=req.session_id,
+                       details={"guard_verdict": guard_verdict, "guard_score": guard_score,
+                                "llm_used": True, "tool_calls": tool_uses,
+                                "tool_count": len(tool_uses), "streaming": True})
+
+            yield f"data: {json.dumps({'type': 'done', 'event_id': event_id})}\n\n"
+
+        except Exception as e:
+            log.error("Streaming LLM error: %s", e)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 

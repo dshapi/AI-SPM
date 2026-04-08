@@ -2813,7 +2813,7 @@ Session replay — ability to replay a full conversation in the audit UI for inc
 
 AI Capabilities
 
-Real streaming — right now Claude's full response arrives then gets word-by-word simulated. True token streaming would make it feel much faster
+DONE- Real streaming — right now Claude's full response arrives then gets word-by-word simulated. True token streaming would make it feel much faster
 RAG pipeline — the retrieval gateway exists but isn't connected to Claude. Connecting it would let you ground answers in your own documents
 
 DONE- Conversation memory — the memory service is running but Claude doesn't remember previous sessions. Wiring it in would give persistent context across conversations
@@ -2827,3 +2827,21 @@ A/B model routing — split traffic between two approved models (e.g. 80% Sonnet
 Token & cost dashboard — Grafana panel showing API spend per day/user/tenant
 
 The three highest-impact ones that would most impress in a demo are real streaming, human-in-the-loop escalation, and automated compliance PDF reports. Want to pick one to build next?
+
+
+Planned features not yet implemented, ordered by complexity.
+
+| # | Feature | Description | Complexity |
+|---|---|---|---|
+| 1 | **Webhook notifications** | POST to Slack / Teams / PagerDuty on enforcement events (block, freeze, escalation) | Low |
+| 2 | **Audit log export** | Download audit trail as CSV or PDF directly from the UI | Low |
+| 3 | **Usage cost tracking** | Track Anthropic API spend per tenant and user in the SPM dashboard | Low |
+| 4 | **Multi-LLM provider support** | Add OpenAI and Gemini as LLM backends alongside Anthropic | Medium |
+| 5 | **RBAC for the UI** | Admin vs auditor vs read-only roles with separate views and permissions | Medium |
+| 6 | **Model versioning & rollback** | Track model versions in SPM registry, automatically roll back on risk spike | Medium |
+| 7 | **Real-time alert panel** | Live feed of enforcement events in the Orbyx UI (no Grafana required) | Medium |
+| 8 | **Custom policy builder UI** | Visual editor for posture rules without editing Rego directly | High |
+| 9 | **Anomaly detection baselines** | Per-user behavioral baseline, flag and escalate deviations automatically | High |
+| 10 | **SSO / SAML integration** | Enterprise login via Okta / Azure AD / Google Workspace | High |
+
+---
