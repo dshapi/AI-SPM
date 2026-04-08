@@ -4,7 +4,7 @@ AI security posture management (AI-SPM) is a comprehensive approach to maintaini
 
 By implementing AI-SPM, organizations can proactively protect their AI systems from threats, minimize data exposure, and maintain the trustworthiness of their AI applications.
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)) ![Version](https://img.shields.io/badge/version-1.0.0-blue) ![Language](https://img.shields.io/badge/language-python-yellow) ![GitHub](https://img.shields.io/badge/GitHub-dshapi/AI-SPM-black?logo=github) ![Build Status](https://img.shields.io/github/actions/workflow/status/dshapi/AI-SPM/ci.yml?branch=main)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) ![Version](https://img.shields.io/badge/version-1.0.0-blue) ![Language](https://img.shields.io/badge/language-python-yellow) ![GitHub](https://img.shields.io/badge/GitHub-dshapi/AI-SPM-black?logo=github) ![Build Status](https://img.shields.io/github/actions/workflow/status/dshapi/AI-SPM/ci.yml?branch=main)
 
 ## 📋 Table of Contents
 
