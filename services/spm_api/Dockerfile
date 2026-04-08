@@ -1,6 +1,7 @@
 FROM python:3.11-slim
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpango-1.0-0 libcairo2 libgdk-pixbuf2.0-0 libffi-dev \
+    libpango-1.0-0 libcairo2 libffi-dev libglib2.0-0 libfontconfig1 libharfbuzz0b \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY services/spm_api/requirements.txt .

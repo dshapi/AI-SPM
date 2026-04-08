@@ -1,10 +1,13 @@
 package spm.prompt
 
+import future.keywords.if
+import future.keywords.in
+
 default allow := {"decision":"block","reason":"default deny","action":"deny_execution"}
 
-has_signal(sig) if { input.signals[_] == sig }
-has_behavioral(sig) if { input.behavioral_signals[_] == sig }
-has_ttp(ttp) if { input.cep_ttps[_] == ttp }
+has_signal(sig) if { sig in input.signals }
+has_behavioral(sig) if { sig in input.behavioral_signals }
+has_ttp(ttp) if { ttp in input.cep_ttps }
 
 allow := {"decision":"block","reason":"guard model explicit block","action":"deny_execution"} if {
     input.guard_verdict == "block"

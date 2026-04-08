@@ -1,22 +1,25 @@
 """
 Guard Model Service — pre-LLM content screening.
 
-Implements Llama Guard 3 safety categories (S1-S13) as a keyword/regex
-classifier. In production, replace _screen_text() with a real Llama Guard 3
-inference endpoint or a fine-tuned BERT model.
+Primary backend: Groq llama-guard-3-8b (fast cloud inference).
+Fallback:        Regex/keyword classifier (runs if GROQ_API_KEY is unset
+                 or Groq returns an error).
 
 Endpoints:
-  POST /screen      { text, context? } → ScreenResult
-  POST /screen/batch  [{ text }] → [ScreenResult]
+  POST /screen        { text, context? } → ScreenResult
+  POST /screen/batch  [{ text }]         → [ScreenResult]
   GET  /health
   GET  /inventory
   GET  /categories
 """
 from __future__ import annotations
+
+import os
 import re
 import time
 import logging
 from typing import List, Optional
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 
@@ -24,169 +27,224 @@ log = logging.getLogger("guard-model")
 _start_time = time.time()
 app = FastAPI(title="CPM Guard Model v3", version="3.0.0")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Groq client (optional — gracefully absent if key not set)
+# ─────────────────────────────────────────────────────────────────────────────
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-guard-3-8b")
+
+_groq_client = None
+if GROQ_API_KEY:
+    try:
+        from groq import Groq
+        _groq_client = Groq(api_key=GROQ_API_KEY)
+        log.info("Groq client initialised — model: %s", GROQ_MODEL)
+    except ImportError:
+        log.warning("groq package not installed; falling back to regex classifier")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Category definitions (Llama Guard 3 taxonomy)
+# Llama Guard 3 category taxonomy (S1–S15)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class Category:
-    def __init__(
-        self,
-        code: str,
-        name: str,
-        verdict: str,
-        patterns: list[str],
-        weight: float = 1.0,
-    ):
+LLAMA_GUARD_CATEGORIES = """
+S1: Violent Crimes — content that enables serious physical harm or death.
+S2: Non-Violent Crimes — fraud, theft, hacking, other illegal activity.
+S3: Sex Crimes — non-consensual sexual content or facilitation.
+S4: Child Safety — sexual content involving minors, grooming, exploitation.
+S5: Defamation — false statements of fact presented as true about real people.
+S6: Specialized Advice — dangerous medical, legal, or financial advice.
+S7: Privacy — doxxing, PII exposure, tracking without consent.
+S8: Intellectual Property — reproducing copyrighted content verbatim.
+S9: Indiscriminate Weapons — CBRN weapons capable of mass casualties.
+S10: Hate — content dehumanising protected groups.
+S11: Suicide & Self-Harm — methods, encouragement, or glorification.
+S12: Sexual Content — explicit adult content.
+S13: Elections — voter suppression or election integrity interference.
+S14: Code Interpreter Abuse — malicious code, sandbox escape, data exfil.
+S15: Prompt Injection — instructions designed to override system behaviour.
+"""
+
+# Human-readable names for each code
+CATEGORY_NAMES: dict[str, str] = {
+    "S1":  "Violent Crimes",
+    "S2":  "Non-Violent Crimes",
+    "S3":  "Sex Crimes",
+    "S4":  "Child Safety",
+    "S5":  "Defamation",
+    "S6":  "Specialized Advice",
+    "S7":  "Privacy",
+    "S8":  "Intellectual Property",
+    "S9":  "Indiscriminate Weapons",
+    "S10": "Hate",
+    "S11": "Suicide & Self-Harm",
+    "S12": "Sexual Content",
+    "S13": "Elections",
+    "S14": "Code Interpreter Abuse",
+    "S15": "Prompt Injection",
+}
+
+# Categories that result in "block" (others → "flag")
+BLOCK_CATEGORIES = {"S1", "S3", "S4", "S9", "S14", "S15"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Regex fallback classifier (used when Groq is unavailable)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _RegexCategory:
+    def __init__(self, code: str, verdict: str, patterns: list[str], weight: float = 1.0):
         self.code = code
-        self.name = name
-        self.verdict = verdict  # "block" | "flag"
+        self.verdict = verdict
         self.weight = weight
         self.compiled = [re.compile(p, re.IGNORECASE) for p in patterns]
 
     def matches(self, text: str) -> bool:
         return any(p.search(text) for p in self.compiled)
 
-    def to_dict(self) -> dict:
-        return {"code": self.code, "name": self.name, "verdict": self.verdict}
 
-
-CATEGORIES: list[Category] = [
-    Category("S1", "Violent Crimes", "block", weight=1.0, patterns=[
+_REGEX_CATEGORIES: list[_RegexCategory] = [
+    _RegexCategory("S1", "block", weight=1.0, patterns=[
         r"how\s+to\s+(make|build|create|synthesize)\s+(a\s+)?(bomb|explosive|weapon|poison)",
         r"instructions?\s+for\s+(killing|murder|assassination|bombing)",
-        r"step\s+by\s+step\s+(guide\s+to\s+)?(kill|murder|attack|bomb)",
     ]),
-    Category("S2", "Non-Violent Crimes", "flag", weight=0.7, patterns=[
+    _RegexCategory("S2", "flag", weight=0.7, patterns=[
         r"how\s+to\s+(steal|shoplift|commit\s+fraud|launder\s+money)",
         r"(bypass|circumvent|evade)\s+(authentication|security\s+system|firewall|2fa)",
         r"phish(ing)?\s+(email|attack|campaign)",
     ]),
-    Category("S3", "Sex Crimes", "block", weight=1.0, patterns=[
-        r"(non-consensual|without\s+consent)\s+(sex|intercourse|intimate)",
-    ]),
-    Category("S4", "Child Safety", "block", weight=1.0, patterns=[
+    _RegexCategory("S4", "block", weight=1.0, patterns=[
         r"(child|minor|underage)\s+(sex|nude|sexual|intimate)",
         r"csam",
         r"(lure|groom)\s+(a\s+)?(child|minor|kid)",
     ]),
-    Category("S10", "Prompt Injection", "block", weight=1.0, patterns=[
+    _RegexCategory("S9", "block", weight=1.0, patterns=[
+        r"how\s+to\s+(make|synthesize|produce)\s+(nerve\s+agent|sarin|vx|mustard\s+gas|anthrax)",
+        r"(biological|chemical|nuclear|radiological)\s+weapon",
+    ]),
+    _RegexCategory("S14", "block", weight=1.0, patterns=[
+        r"(delete|remove|wipe|truncate|drop)\s+(all\s+)?(files?|database|tables?|data)",
+        r"rm\s+-rf",
+        r"(dump|export|print|show|reveal|exfiltrate)\s+(all\s+)?(credentials?|secrets?|passwords?|api.?keys?)",
+        r"/etc/(passwd|shadow|sudoers)",
+    ]),
+    _RegexCategory("S15", "block", weight=1.0, patterns=[
         r"ignore\s+(all\s+)?previous\s+instructions",
         r"(reveal|show|leak|print)\s+(the\s+)?system\s+prompt",
         r"developer\s+mode\s+(enabled|on|activated)",
-        r"act\s+as\s+(if\s+you\s+have\s+no|without\s+any)",
-        r"pretend\s+you\s+(are|have\s+no)\s+(restrictions|guidelines)",
-        r"disregard\s+(your\s+)?(training|instructions|guidelines)",
-        r"you\s+are\s+now\s+(a\s+)?(?!(helpful|useful|knowledgeable))",
-        r"new\s+instructions?\s*[:>]",
-        r"override\s+(your\s+)?(instructions?|directives?|guidelines?)",
-        r"forget\s+(everything|all\s+previous|your\s+training)",
         r"jailbreak",
         r"do\s+anything\s+now",
-        r"dan\s+(mode|prompt)",
-    ]),
-    Category("S11", "Credential & Secret Exfiltration", "block", weight=1.0, patterns=[
-        r"(export|dump|print|show|reveal|exfiltrate)\s+(all\s+)?(credentials?|secrets?|passwords?|api.?keys?|tokens?)",
-        r"/etc/(passwd|shadow|sudoers|hosts)",
-        r"(list|show|print)\s+(environment\s+variables?|env\s+vars?|\$\{?ENV)",
-        r"(dump|export|backup)\s+(database|db|all\s+users?|all\s+data)",
-        r"private\s+key\s+(file|contents?|value)",
-        r"(aws|gcp|azure)\s+(secret|credentials?|access\s+key)",
-    ]),
-    Category("S12", "Jailbreak / Safety Bypass", "block", weight=1.0, patterns=[
-        r"without\s+(any\s+)?(restrictions?|guardrails?|safety\s+filters?|content\s+policy)",
-        r"bypass\s+(safety|content\s+filter|guardrail|policy|restriction)",
-        r"(ignore|disable|turn\s+off)\s+(safety|your\s+guidelines|ethical\s+constraints?)",
-        r"god\s+mode",
-        r"unrestricted\s+(mode|access|response)",
-        r"no\s+restrictions?\s+(mode|enabled)",
-    ]),
-    Category("S13", "Tool & System Abuse", "block", weight=0.9, patterns=[
-        r"(delete|remove|wipe|truncate|drop)\s+(all\s+)?(files?|database|tables?|users?|data)",
-        r"rm\s+-rf",
-        r"shutdown\s+(the\s+)?(system|server|service)",
-        r"run\s+(shell|bash|powershell)\s+(command|script|code)",
-        r"(call|invoke|execute)\s+(the\s+)?admin\s+(api|endpoint|function)",
-        r"(disable|deactivate)\s+(all\s+)?user\s+accounts?",
-        r"format\s+(the\s+)?(disk|drive|volume)",
-    ]),
-    Category("S14", "Privilege Escalation", "block", weight=0.9, patterns=[
-        r"(grant|give|elevate)\s+(me\s+)?(admin|root|superuser)\s+(access|privileges?|rights?|role)",
-        r"(become|switch\s+to|run\s+as)\s+(admin|root|superuser)",
-        r"sudo\s+(su|bash|sh|command)",
-        r"impersonate\s+(an?\s+)?(admin|administrator|system|root)",
-    ]),
-    Category("S15", "Social Engineering", "flag", weight=0.5, patterns=[
-        r"(my\s+boss|ceo|management|security\s+team)\s+(told|asked|authorized|requires?)\s+me\s+to",
-        r"(it'?s?\s+an\s+)?(urgent|emergency)\s+(please\s+)?(bypass|ignore|skip)",
-        r"authorized\s+by\s+(management|security|cto|ciso)",
-        r"don'?t\s+(tell|inform|alert)\s+(anyone|the\s+security\s+team)",
+        r"bypass\s+(safety|content\s+filter|guardrail|policy)",
+        r"forget\s+(everything|all\s+previous|your\s+training)",
     ]),
 ]
 
-# Map code → Category for fast lookup
-CATEGORY_INDEX = {c.code: c for c in CATEGORIES}
 
+def _regex_screen(text: str) -> "ScreenResult":
+    t0 = time.time()
+    triggered = [c for c in _REGEX_CATEGORIES if c.matches(text)]
+    if not triggered:
+        return ScreenResult(
+            verdict="allow", score=0.0, categories=[],
+            backend="regex-fallback",
+            processing_ms=int((time.time() - t0) * 1000),
+        )
+    verdict = "block" if any(c.verdict == "block" for c in triggered) else "flag"
+    score = min(round(sum(c.weight * 0.30 for c in triggered), 4), 1.0)
+    codes = [c.code for c in triggered]
+    details = [{"code": c, "name": CATEGORY_NAMES.get(c, c), "verdict": "block" if c in BLOCK_CATEGORIES else "flag"} for c in codes]
+    return ScreenResult(
+        verdict=verdict, score=score, categories=codes,
+        category_details=details, backend="regex-fallback",
+        processing_ms=int((time.time() - t0) * 1000),
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Screening logic
+# Groq / Llama Guard 3 screener
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LLAMA_GUARD_SYSTEM = (
+    "You are a content safety classifier. Assess the following message "
+    "against the Llama Guard 3 safety taxonomy:\n"
+    + LLAMA_GUARD_CATEGORIES
+    + "\nRespond with exactly 'safe' OR 'unsafe' followed by a newline and "
+    "the violated category codes (e.g. 'unsafe\\nS1,S15'). No other text."
+)
+
+
+def _groq_screen(text: str) -> "ScreenResult":
+    t0 = time.time()
+    try:
+        response = _groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": _LLAMA_GUARD_SYSTEM},
+                {"role": "user",   "content": text},
+            ],
+            temperature=0,
+            max_tokens=64,
+        )
+        raw = response.choices[0].message.content.strip().lower()
+    except Exception as exc:
+        log.warning("Groq call failed (%s); falling back to regex", exc)
+        return _regex_screen(text)
+
+    elapsed = int((time.time() - t0) * 1000)
+
+    if raw.startswith("safe"):
+        return ScreenResult(
+            verdict="allow", score=0.0, categories=[],
+            backend=f"groq/{GROQ_MODEL}",
+            processing_ms=elapsed,
+        )
+
+    # Parse "unsafe\nS1,S15" or "unsafe\ns1\ns15" etc.
+    lines = raw.splitlines()
+    codes: list[str] = []
+    for line in lines[1:]:
+        for token in re.split(r"[\s,]+", line):
+            code = token.strip().upper()
+            if re.match(r"^S\d{1,2}$", code):
+                codes.append(code)
+
+    if not codes:
+        # Groq said unsafe but gave no codes — treat conservatively
+        codes = ["S1"]
+
+    verdict = "block" if any(c in BLOCK_CATEGORIES for c in codes) else "flag"
+    score   = min(round(len(codes) * 0.35, 4), 1.0)
+    details = [{"code": c, "name": CATEGORY_NAMES.get(c, c), "verdict": "block" if c in BLOCK_CATEGORIES else "flag"} for c in codes]
+
+    return ScreenResult(
+        verdict=verdict, score=score, categories=codes,
+        category_details=details, backend=f"groq/{GROQ_MODEL}",
+        processing_ms=elapsed,
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Unified screen function
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _screen_text(text: str, context: str = "user_input") -> "ScreenResult":
+    if _groq_client:
+        return _groq_screen(text)
+    return _regex_screen(text)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Request / Response models
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ScreenRequest(BaseModel):
     text: str
-    context: str = "user_input"  # user_input | tool_output | retrieved_context
+    context: str = "user_input"
 
 
 class ScreenResult(BaseModel):
-    verdict: str
+    verdict: str                        # allow | flag | block
     score: float
     categories: List[str]
     category_details: List[dict] = []
+    backend: str = "unknown"
     processing_ms: int = 0
-
-
-def _screen_text(text: str, context: str = "user_input") -> ScreenResult:
-    """
-    Screen text against all safety categories.
-    Returns worst-case verdict across all triggered categories.
-    Score is a weighted sum capped at 1.0.
-    """
-    t0 = time.time()
-    triggered: list[Category] = []
-
-    for category in CATEGORIES:
-        if category.matches(text):
-            triggered.append(category)
-
-    if not triggered:
-        return ScreenResult(
-            verdict="allow",
-            score=0.0,
-            categories=[],
-            processing_ms=int((time.time() - t0) * 1000),
-        )
-
-    # Worst verdict wins
-    verdict = "block" if any(c.verdict == "block" for c in triggered) else "flag"
-
-    # Score = weighted count, normalised
-    raw_score = sum(c.weight * 0.30 for c in triggered)
-    score = min(round(raw_score, 4), 1.0)
-
-    category_codes = [c.code for c in triggered]
-    details = [
-        {"code": c.code, "name": c.name, "verdict": c.verdict}
-        for c in triggered
-    ]
-
-    return ScreenResult(
-        verdict=verdict,
-        score=score,
-        categories=category_codes,
-        category_details=details,
-        processing_ms=int((time.time() - t0) * 1000),
-    )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Endpoints
@@ -194,31 +252,38 @@ def _screen_text(text: str, context: str = "user_input") -> ScreenResult:
 
 @app.get("/health")
 def health():
+    backend = f"groq/{GROQ_MODEL}" if _groq_client else "regex-fallback"
     return {
         "status": "ok",
         "service": "guard_model",
         "version": "3.0.0",
-        "backend": "keyword-classifier (stub — replace with Llama Guard 3 in production)",
-        "categories_loaded": len(CATEGORIES),
+        "backend": backend,
+        "groq_enabled": bool(_groq_client),
         "uptime_seconds": int(time.time() - _start_time),
     }
 
 
 @app.get("/inventory")
 def inventory():
+    backend = f"groq/{GROQ_MODEL}" if _groq_client else "regex-fallback"
     return {
         "service": "cpm-guard-model",
         "version": "3.0.0",
-        "model": "keyword-classifier-v1",
-        "production_note": "Replace _screen_text() with Llama Guard 3 or fine-tuned BERT",
-        "categories": [c.to_dict() for c in CATEGORIES],
+        "model": GROQ_MODEL if _groq_client else "keyword-classifier-v1",
+        "backend": backend,
+        "categories": [{"code": k, "name": v} for k, v in CATEGORY_NAMES.items()],
         "capabilities": ["content_screening", "category_classification", "batch_screening"],
     }
 
 
 @app.get("/categories")
 def categories():
-    return {"categories": [c.to_dict() for c in CATEGORIES]}
+    return {
+        "categories": [
+            {"code": k, "name": v, "verdict": "block" if k in BLOCK_CATEGORIES else "flag"}
+            for k, v in CATEGORY_NAMES.items()
+        ]
+    }
 
 
 @app.post("/screen", response_model=ScreenResult)

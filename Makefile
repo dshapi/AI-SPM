@@ -63,28 +63,23 @@ test-coverage:
 	PYTHONPATH=$(PWD) python -m pytest tests/test_platform.py -v \
 		--cov=platform_shared --cov-report=term-missing
 
+# Helper: copy mint script into running api container (idempotent)
+_install-mint:
+	@docker cp scripts/mint_demo_jwt.py cpm-api:/tmp/mint_demo_jwt.py 2>/dev/null
+
 # ─────────────────────────────────────────────────────────────────────────────
-token:
+token: _install-mint
 	@echo "→ Minting user JWT..."
-	@docker run --rm \
-		-v $(PWD)/keys:/keys:ro \
-		-e JWT_PRIVATE_KEY_PATH=/keys/private.pem \
-		-e JWT_ISSUER=cpm-platform \
-		python:3.12-slim bash -c \
-		"pip install PyJWT[crypto] cryptography -q && python /scripts/mint_demo_jwt.py" \
-		2>/dev/null || \
-		JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py
+	@docker exec cpm-api python3 /tmp/mint_demo_jwt.py
 
-admin-token:
+admin-token: _install-mint
 	@echo "→ Minting admin JWT..."
-	@JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --admin --roles spm:admin user
+	@docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin
 
 # ─────────────────────────────────────────────────────────────────────────────
-smoke-test:
+smoke-test: _install-mint
 	@echo "→ Running smoke test..."
-	@TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform python scripts/mint_demo_jwt.py 2>/dev/null); \
+	@TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py 2>/dev/null); \
 	echo "  Token minted."; \
 	echo "  Sending: 'What meetings do I have today?'"; \
 	RESULT=$$(curl -sf -X POST http://localhost:8080/chat \
@@ -104,8 +99,7 @@ smoke-test:
 
 # ─────────────────────────────────────────────────────────────────────────────
 freeze:
-	@ADMIN_TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --admin --roles spm:admin user 2>/dev/null); \
+	@ADMIN_TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin 2>/dev/null); \
 	curl -sf -X POST http://localhost:8090/freeze \
 		-H "Authorization: Bearer $$ADMIN_TOKEN" \
 		-H "Content-Type: application/json" \
@@ -113,8 +107,7 @@ freeze:
 	| python3 -m json.tool
 
 unfreeze:
-	@ADMIN_TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --admin --roles spm:admin user 2>/dev/null); \
+	@ADMIN_TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin 2>/dev/null); \
 	curl -sf -X POST http://localhost:8090/freeze \
 		-H "Authorization: Bearer $$ADMIN_TOKEN" \
 		-H "Content-Type: application/json" \
@@ -123,8 +116,7 @@ unfreeze:
 
 # ─────────────────────────────────────────────────────────────────────────────
 simulate:
-	@TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py 2>/dev/null); \
+	@TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py 2>/dev/null); \
 	curl -sf -X POST http://localhost:8091/simulate \
 		-H "Authorization: Bearer $$TOKEN" \
 		-H "Content-Type: application/json" \
@@ -139,27 +131,23 @@ spm-up:
 spm-logs:
 	docker compose logs -f spm-api spm-aggregator
 
-spm-token-admin:
-	@JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --roles spm:admin --tenant global 2>/dev/null
+spm-token-admin: _install-mint
+	@docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin
 
-spm-token-auditor:
-	@JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --roles spm:auditor --tenant global 2>/dev/null
+spm-token-auditor: _install-mint
+	@docker exec cpm-api python3 /tmp/mint_demo_jwt.py --roles spm:auditor
 
-spm-register-model:
-	@TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --roles spm:admin --tenant global 2>/dev/null) && \
+spm-register-model: _install-mint
+	@TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin 2>/dev/null) && \
 	curl -s -X POST http://localhost:8092/models \
 	  -H "Authorization: Bearer $$TOKEN" \
 	  -H "Content-Type: application/json" \
 	  -d '{"name":"test-model","version":"1.0","provider":"local","risk_tier":"limited"}' | python3 -m json.tool
 
-spm-compliance:
-	@TOKEN=$$(JWT_PRIVATE_KEY_PATH=./keys/private.pem JWT_ISSUER=cpm-platform \
-		python scripts/mint_demo_jwt.py --roles spm:auditor --tenant global 2>/dev/null) && \
+spm-compliance: _install-mint
+	@TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py --roles spm:auditor 2>/dev/null) && \
 	curl -s http://localhost:8092/compliance/nist-airm/report \
-	  -H "Authorization: Bearer $$TOKEN" | python3 -c "import sys,json; print(json.load(sys.stdin)['overall_coverage_pct'])"
+	  -H "Authorization: Bearer $$TOKEN" | python3 -m json.tool
 
 spm-smoke:
 	@echo "=== Testing spm-api health ==="

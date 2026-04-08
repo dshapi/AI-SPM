@@ -1,5 +1,7 @@
 package spm.output
 
+import future.keywords.if
+
 default allow := {"decision":"allow","reason":"output allowed"}
 
 allow := {"decision":"block","reason":"secret or credential detected in output"} if {

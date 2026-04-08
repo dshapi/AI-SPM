@@ -25,8 +25,10 @@ logging.basicConfig(
 log = logging.getLogger("spm-aggregator")
 
 # Prometheus metrics (initialized in main())
-_enforce_count = None
-_snapshot_lag = None
+_enforce_count    = None
+_snapshot_lag     = None
+_risk_score       = None
+_coverage_pct     = None
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -193,6 +195,12 @@ def process_posture_enriched(conn, msg: Dict) -> None:
     if _snapshot_lag:
         _snapshot_lag.set(0)  # reset lag after successful write
 
+    if _risk_score:
+        _risk_score.labels(
+            model_id=model_id or "unknown",
+            tenant_id=tenant_id,
+        ).set(msg.get("posture_score", 0.0))
+
     if model_id:
         rolling = get_rolling_avg(conn, model_id, tenant_id)
         if rolling is not None and rolling > BLOCK_THRESHOLD:
@@ -227,7 +235,6 @@ def wait_for_kafka(max_wait: int = 120) -> KafkaConsumer:
                 auto_offset_reset="latest",
                 enable_auto_commit=True,
                 value_deserializer=lambda v: json.loads(v.decode("utf-8")),
-                consumer_timeout_ms=1000,
             )
             log.info("Kafka connected, subscribed to %d topics", len(topics))
             return consumer
@@ -246,8 +253,53 @@ def main() -> None:
     _snapshot_lag  = Gauge("spm_snapshot_lag_seconds",   "Seconds since last snapshot write")
     _enforce_count = Counter("spm_enforcement_actions_total", "Enforcement actions taken",
                              ["action", "tenant_id"])
+    global _risk_score
+    _risk_score    = Gauge("spm_model_risk_score", "Latest posture risk score",
+                           ["model_id", "tenant_id"])
+    global _coverage_pct
+    _coverage_pct  = Gauge("spm_compliance_coverage_pct", "NIST AI RMF compliance coverage %",
+                           ["function"])
     start_http_server(9091)
     log.info("Prometheus metrics server started on :9091")
+
+    # Background thread: refresh compliance coverage every 30s
+    import threading
+    def _refresh_coverage(db_conn):
+        while True:
+            try:
+                with db_conn.cursor() as cur:
+                    cur.execute("""
+                        SELECT function,
+                               ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'satisfied')
+                                     / NULLIF(COUNT(*), 0), 1) AS pct
+                        FROM compliance_evidence
+                        GROUP BY function
+                    """)
+                    rows = cur.fetchall()
+                    total_satisfied = 0
+                    total_count = 0
+                    for func, pct in rows:
+                        _coverage_pct.labels(function=func).set(float(pct or 0))
+                    cur.execute("""
+                        SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE status = 'satisfied')
+                                     / NULLIF(COUNT(*), 0), 1)
+                        FROM compliance_evidence
+                    """)
+                    overall = cur.fetchone()[0]
+                    _coverage_pct.labels(function="OVERALL").set(float(overall or 0))
+                    db_conn.commit()
+            except Exception as exc:
+                log.warning("Coverage refresh failed: %s", exc)
+                try:
+                    db_conn.rollback()
+                except Exception:
+                    pass
+            time.sleep(30)
+
+    cov_conn = get_db_conn()
+    t = threading.Thread(target=_refresh_coverage, args=(cov_conn,), daemon=True)
+    t.start()
+    log.info("Compliance coverage refresh thread started")
 
     conn = None
 

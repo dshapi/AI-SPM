@@ -2,6 +2,7 @@
 package model_policy
 
 import future.keywords.if
+import future.keywords.in
 
 # Default deny
 default allow = false

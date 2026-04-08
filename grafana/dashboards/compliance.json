@@ -9,7 +9,7 @@
       "id": 1, "type": "gauge",
       "title": "NIST AI RMF Overall Coverage %",
       "gridPos": {"x":0,"y":0,"w":6,"h":6},
-      "targets": [{"expr": "avg(spm_compliance_coverage_pct)", "instant": true}],
+      "targets": [{"expr": "spm_compliance_coverage_pct{function=\"OVERALL\"}", "instant": true}],
       "fieldConfig": {"defaults": {"min":0,"max":100,"unit":"percent","thresholds":{"steps":[
         {"color":"red","value":0},{"color":"yellow","value":50},{"color":"green","value":80}
       ]}}},

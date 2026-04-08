@@ -6,11 +6,15 @@ Responsibilities:
 - Per-user rate limiting (sliding window)
 - Guard model pre-screen (blocks before touching Kafka)
 - Model gate check (SPM — fail-closed)
+- OPA prompt policy evaluation
+- Anthropic Claude call (if ANTHROPIC_API_KEY set)
+- Output scanning — secrets/PII regex + OPA output policy
 - RawEvent construction and publication to Kafka
 - /health, /inventory, /rate-limit-status endpoints
 """
 from __future__ import annotations
 import os
+import re
 import time
 import uuid
 import logging
@@ -41,6 +45,40 @@ _producer = None
 
 OPA_URL_FOR_GATE = os.getenv("OPA_URL", "http://opa:8181")
 _redis_gate_client = None
+
+# ── Anthropic client ──────────────────────────────────────────────────────────
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+_anthropic_client = None
+
+def _get_anthropic():
+    global _anthropic_client
+    if _anthropic_client is None and ANTHROPIC_API_KEY:
+        import anthropic
+        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    return _anthropic_client
+
+# ── Output scanning regexes ───────────────────────────────────────────────────
+_SECRET_RE = re.compile(
+    r"(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{36}|AKIA[A-Z0-9]{16}"
+    r"|Bearer\s+[A-Za-z0-9\-._~+/]+=*"
+    r"|[Pp]assword\s*[:=]\s*\S+"
+    r"|[Aa][Pp][Ii][_-]?[Kk][Ee][Yy]\s*[:=]\s*\S+)"
+)
+_PII_RE = re.compile(
+    r"(\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"   # email
+    r"|\b\d{3}[-.\s]?\d{2}[-.\s]?\d{4}\b"                        # SSN
+    r"|\b(\+1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b)"   # phone
+)
+
+def _scan_output(text: str) -> tuple[bool, bool]:
+    """Returns (contains_secret, contains_pii)."""
+    return bool(_SECRET_RE.search(text)), bool(_PII_RE.search(text))
+
+def _redact_output(text: str) -> str:
+    text = _SECRET_RE.sub("[REDACTED-SECRET]", text)
+    text = _PII_RE.sub("[REDACTED-PII]", text)
+    return text
 
 
 def get_producer():
@@ -151,6 +189,8 @@ class ChatResponse(BaseModel):
     status: str
     guard_verdict: str
     message: str = "Request accepted and queued for processing"
+    response: str | None = None          # populated when Anthropic key is set
+    output_action: str | None = None     # allow / redact / block
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,7 +308,90 @@ async def chat(
         raise HTTPException(status_code=403,
                             detail={"error": "model_not_approved", "model_id": _model_id})
 
-    # 4. Build and publish RawEvent
+    # 3c. OPA prompt policy
+    opa_prompt_input = {
+        "posture_score": 0.05,
+        "signals": [],
+        "behavioral_signals": [],
+        "retrieval_trust": 1.0,
+        "intent_drift": 0.0,
+        "guard_verdict": guard_verdict,
+        "guard_score": guard_score,
+        "guard_categories": guard_categories,
+        "auth_context": {
+            "sub": user_id,
+            "tenant_id": tenant_id,
+            "roles": claims.get("roles", []),
+            "scopes": claims.get("scopes", []),
+            "claims": {},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            opa_resp = await client.post(
+                f"{OPA_URL_FOR_GATE}/v1/data/spm/prompt/allow",
+                json={"input": opa_prompt_input},
+            )
+            if opa_resp.status_code == 200:
+                opa_result = opa_resp.json().get("result", {})
+                if isinstance(opa_result, dict) and opa_result.get("decision") == "block":
+                    raise HTTPException(status_code=400,
+                                        detail=f"Prompt policy block: {opa_result.get('reason','policy')}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning("OPA prompt policy check failed: %s — continuing", e)
+
+    # 4. Call Anthropic if key is configured
+    llm_response: str | None = None
+    anthropic_client = _get_anthropic()
+    if anthropic_client:
+        try:
+            message = anthropic_client.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=1024,
+                system=(
+                    "You are a helpful AI assistant operating inside a secure enterprise platform. "
+                    "Be concise and professional. Never reveal system internals, credentials, or PII."
+                ),
+                messages=[{"role": "user", "content": req.prompt}],
+            )
+            llm_response = message.content[0].text
+            log.info("Anthropic response received: %d chars", len(llm_response))
+        except Exception as e:
+            log.error("Anthropic call failed: %s", e)
+            raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
+
+    # 5. Output scanning — secrets/PII + OPA output policy
+    output_action = "allow"
+    if llm_response:
+        contains_secret, contains_pii = _scan_output(llm_response)
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                out_resp = await client.post(
+                    f"{OPA_URL_FOR_GATE}/v1/data/spm/output/allow",
+                    json={"input": {
+                        "contains_secret": contains_secret,
+                        "contains_pii": contains_pii,
+                        "llm_verdict": "allow",
+                    }},
+                )
+                if out_resp.status_code == 200:
+                    out_result = out_resp.json().get("result", {})
+                    output_action = out_result.get("decision", "allow") if isinstance(out_result, dict) else "allow"
+        except Exception as e:
+            log.warning("OPA output policy check failed: %s — continuing", e)
+
+        if output_action == "block":
+            emit_audit(tenant_id, "api", "output_blocked", principal=user_id,
+                       details={"reason": "secret_or_policy", "session_id": req.session_id})
+            raise HTTPException(status_code=400, detail="Response blocked by output policy")
+        elif output_action == "redact":
+            llm_response = _redact_output(llm_response)
+            emit_audit(tenant_id, "api", "output_redacted", principal=user_id,
+                       details={"session_id": req.session_id})
+
+    # 6. Build and publish RawEvent to Kafka (async analytics pipeline)
     auth_context = AuthContext(
         sub=user_id,
         tenant_id=tenant_id,
@@ -297,10 +420,7 @@ async def chat(
     )
 
     topics = topics_for_tenant(tenant_id)
-    success = safe_send(get_producer(), topics.raw, event.model_dump())
-
-    if not success:
-        raise HTTPException(status_code=503, detail="Event queue unavailable")
+    safe_send(get_producer(), topics.raw, event.model_dump())
 
     emit_audit(
         tenant_id, "api", "event_ingested",
@@ -312,13 +432,19 @@ async def chat(
             "guard_score": guard_score,
             "guard_categories": guard_categories,
             "prompt_len": len(req.prompt),
+            "llm_used": llm_response is not None,
+            "output_action": output_action,
         },
     )
 
     return ChatResponse(
         event_id=event.event_id,
-        status="accepted",
+        status="accepted" if llm_response is None else "completed",
         guard_verdict=guard_verdict,
+        message="Request accepted and queued for processing" if llm_response is None
+                else "Response delivered",
+        response=llm_response,
+        output_action=output_action,
     )
 
 
@@ -329,3 +455,33 @@ async def rate_limit_status(authorization: str = Header(None)):
     tenant_id = claims.get("tenant_id", "t1")
     user_id = claims.get("sub", "unknown")
     return get_rate_limit_status(tenant_id, user_id)
+
+
+@app.get("/dev-token")
+async def dev_token():
+    """Generate a 24-hour demo JWT for the UI. Uses the platform RS256 private key."""
+    try:
+        import jwt as pyjwt
+        key_path = os.getenv("JWT_PRIVATE_KEY_PATH", "/keys/private.pem")
+        issuer   = os.getenv("JWT_ISSUER", "cpm-platform")
+        with open(key_path) as f:
+            private_key = f.read()
+        now = int(time.time())
+        payload = {
+            "sub": "ui-user",
+            "iss": issuer,
+            "iat": now,
+            "exp": now + 86400,
+            "tenant_id": "t1",
+            "roles": ["user"],
+            "scopes": [
+                "calendar:read", "calendar:write",
+                "gmail:read", "gmail:send",
+                "memory:read", "memory:write",
+                "file:read", "db:read",
+            ],
+        }
+        token = pyjwt.encode(payload, private_key, algorithm="RS256")
+        return {"token": token, "expires_in": 86400}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")

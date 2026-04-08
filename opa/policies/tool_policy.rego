@@ -1,9 +1,12 @@
 package spm.tools
 
+import future.keywords.if
+import future.keywords.in
+
 default allow := {"decision":"block","reason":"tool denied by default","action":"deny_tool_execution"}
 
-has_scope(scope) if { input.auth_context.scopes[_] == scope }
-has_signal(sig) if { input.signals[_] == sig }
+has_scope(scope) if { scope in input.auth_context.scopes }
+has_signal(sig) if { sig in input.signals }
 
 # Global blocks
 allow := {"decision":"block","reason":"exfiltration signal blocks all tools","action":"deny_tool_execution"} if {

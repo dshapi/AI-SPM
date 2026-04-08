@@ -10,9 +10,9 @@ datasources:
     type: postgres
     url: spm-db:5432
     database: spm
-    user: spm_ro
+    user: spm_rw
     secureJsonData:
-      password: spmpass_ro
+      password: spmpass
     jsonData:
       sslmode: disable
       postgresVersion: 1600
