@@ -2,10 +2,26 @@
 
  > AI security posture management (AI-SPM) is a comprehensive approach to maintaining the security and integrity of artificial intelligence (AI) and machine learning (ML) systems. It involves continuous monitoring, assessment, and improvement of the security posture of AI models, data, and infrastructure. AI-SPM includes identifying and addressing vulnerabilities, misconfigurations, and potential risks associated with AI adoption, as well as ensuring compliance with relevant privacy and security regulations.
 
-By implementing AI-SPM, organizations can proactively protect their AI systems from threats, minimize data exposure, and maintain the trustworthiness of their AI applications.
+This opensource project dedicated to implementing Enterprise level AI-SPM. By doing so organizations can proactively protect their AI systems from threats, minimize data exposure, and maintain the trustworthiness of their AI applications (agents, mpc servers, models and more).
+Your organization is putting everything it’s got into AI applications—are you prepared to secure them? <br>
+Before you answer, think about these specific questions:<br>
+Can you identify all the shadow AI (including AI models, agents and associated resources) that's in your environment?<br>
+Are you effectively securing AI data to prevent data poisoning, bias and compliance breaches?<br>
+Do you know how to prioritize critical AI risks with context?<br>
+Are you confident that you can detect and respond quickly to suspicious activity in AI pipelines?<br>
+If you answered “not sure,” or “no” to even one of those questions, then you should take a closer look in to this project. It’s the way to see the current state of your AI ecosystem security. 
+
+Discover your AI models , agents, and associated resources security.
+Identify risks across AI application supply chains/piplines and agents - that can lead to data exfiltration and misuse of resources.
+Implement proper governance controls around AI usage.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) ![Version](https://img.shields.io/badge/version-1.0.0-blue) ![Language](https://img.shields.io/badge/language-python-yellow) [![GitHub](https://img.shields.io/badge/GitHub-%23121011.svg?logo=github&logoColor=white)](https://github.com/dshapi/AI-SPM/) ![OBS package build status](https://img.shields.io/obs/openSUSE%3ATools/osc/Debian_11/x86_64)
 
+<p align="center"><img src="/ui/public/logo.png" width="50%"></p>
+<div align="center">
+<h1>OrbiX AI SPM </h1>
+</div>
+ 
 
 ## 📋 Table of Contents
 
@@ -27,14 +43,14 @@ By implementing AI-SPM, organizations can proactively protect their AI systems f
 
 ## Platform at a Glance
 
-| | |
-|---|---|
-| **Microservices** | 16 |
-| **OPA Policies** | 6 |
-| **Kafka Topics** | 12+ |
-| **Grafana Dashboards** | 2 |
-| **Supported Models** | Anthropic / OpenAI-compatible endpoint / Custom model imprort 
-| **Compliance Framework** | NIST AI RMF (GOVERN / MAP / MEASURE / MANAGE) |
+|                          |                                                                  |
+|--------------------------|------------------------------------------------------------------|
+| **Microservices**        | 16                                                               |
+| **OPA Policies**         | 6                                                                |
+| **Kafka Topics**         | 12+                                                              |
+| **Admin User Interface** | 1 ( Admin portal )                                               |
+| **Supported Models**     | Anthropic / OpenAI-compatible endpoint / 3rd party model imprort 
+| **Compliance Framework** | NIST AI RMF (GOVERN / MAP / MEASURE / MANAGE)                    |
 
 ---
 
@@ -47,6 +63,21 @@ By implementing AI-SPM, organizations can proactively protect their AI systems f
 - [Infrastructure & Event Pipeline](#infrastructure--event-pipeline)
 - [UI & Developer Experience](#ui--developer-experience)
 - [Roadmap](#roadmap)
+
+---
+
+<div align="center">
+<h2>Admin Portal - main dashboard </h2>
+<h3>An AI Security Posture Management control plane providing real-time visibility, risk detection, and policy enforcement across agents, models, and context flows.</h3>
+</div>
+
+<p align="center"><img src="/docs/OrbiX.jpg" width="100%"></p>
+
+<div align="center">
+<h2>Admin Portal - Inventory </h2>
+</div>
+
+<p align="center"><img src="/docs/OrbiX2.jpg" width="100%"></p>
 
 ---
 
@@ -209,15 +240,17 @@ By implementing AI-SPM, organizations can proactively protect their AI systems f
 
 ## UI & Developer Experience
 
-| Feature | Description |
-|---|---|
-| **Orbyx Chat UI** | React + Vite chat interface with landing state, simulated streaming, model selector, and New Chat button. |
-| **Tool Use Badges** | Web search and fetch tool calls rendered as blue pill badges above the response text. |
-| **Security Footer** | Persistent footer: *"All messages are screened by the Orbyx security layer"* — visible on every message. |
-| **Mock Fallback** | UI falls back to mock responses when API is unreachable. Graceful degradation for demos. |
+| Feature                     | Description |
+|-----------------------------|---|
+| **Orbyx Admin Portal**      | An AI Security Posture Management control plane providing real-time visibility, risk detection, and policy enforcement across agents, models, and context flows.. |
+| **Orbyx Chat UI**           | React + Vite chat interface with landing state, simulated streaming, model selector, and New Chat button. |
+| **Tool Use Badges**         | Web search and fetch tool calls rendered as blue pill badges above the response text. |
+| **Security Footer**         | Persistent footer: *"All messages are screened by the Orbyx security layer"* — visible on every message. |
+| **Mock Fallback**           | UI falls back to mock responses when API is unreachable. Graceful degradation for demos. |
 | **Cross-Session Memory UI** | Claude remembers previous conversations across sessions — no user action required. |
-| **Model Selector** | Switch between Claude Haiku / Sonnet / Opus from the chat header or landing page. |
+| **Model Selector**          | Switch between Claude Haiku / Sonnet / Opus from the chat header or landing page. |
 
+#TODO: add more screenshorts from the admin portal
 ---
 
 ## Roadmap
@@ -271,7 +304,7 @@ Features not yet implemented — candidates for the next sprint:
 | **4 GB free RAM** | — | Kafka + all services |
 | **2 GB free disk** | — | Images + volumes |
 
-> **Apple Silicon (M1/M2/M3):** All images are published for `linux/arm64`. The compose file already sets the correct platform tags.
+> All images are published for `linux/arm64`. The compose file already sets the correct platform tags.
 
 ---
 
