@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 196" fill="none">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="48%" r="50%">
+      <stop offset="0%" stop-color="#7dd3fc" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#0ea5e9" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="outerRing" cx="38%" cy="28%" r="62%">
+      <stop offset="0%" stop-color="#bfdbfe"/>
+      <stop offset="30%" stop-color="#60a5fa"/>
+      <stop offset="65%" stop-color="#1d6fc4"/>
+      <stop offset="100%" stop-color="#0d47a1"/>
+    </radialGradient>
+    <radialGradient id="midRing" cx="38%" cy="30%" r="60%">
+      <stop offset="0%" stop-color="#93c5fd"/>
+      <stop offset="35%" stop-color="#2563eb"/>
+      <stop offset="70%" stop-color="#1347a0"/>
+      <stop offset="100%" stop-color="#0a2d7a"/>
+    </radialGradient>
+    <radialGradient id="innerSphere" cx="45%" cy="38%" r="58%">
+      <stop offset="0%" stop-color="#1a5fb4"/>
+      <stop offset="40%" stop-color="#0d2f7a"/>
+      <stop offset="75%" stop-color="#07195a"/>
+      <stop offset="100%" stop-color="#040f3b"/>
+    </radialGradient>
+    <radialGradient id="highlight" cx="42%" cy="22%" r="38%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.45"/>
+      <stop offset="60%" stop-color="#bfdbfe" stop-opacity="0.1"/>
+      <stop offset="100%" stop-color="transparent" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="softGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="nodeFilter" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <circle cx="100" cy="98" r="86" fill="url(#glow)"/>
+  <circle cx="100" cy="98" r="78" fill="url(#outerRing)"/>
+  <ellipse cx="100" cy="98" rx="68" ry="72" fill="url(#midRing)" transform="rotate(-12 100 98)"/>
+  <ellipse cx="100" cy="98" rx="60" ry="64" fill="url(#midRing)" transform="rotate(10 100 98)"/>
+  <circle cx="100" cy="98" r="52" fill="url(#innerSphere)"/>
+  <ellipse cx="88" cy="74" rx="36" ry="22" fill="url(#highlight)"/>
+
+  <g opacity="0.75" stroke="#a8d4ff" stroke-width="1.5" stroke-linecap="round">
+    <line x1="100" y1="64"  x2="76"  y2="102"/>
+    <line x1="100" y1="64"  x2="118" y2="106"/>
+    <line x1="76"  y1="102" x2="118" y2="106"/>
+    <line x1="118" y1="106" x2="112" y2="124"/>
+    <line x1="76"  y1="102" x2="112" y2="124"/>
+  </g>
+
+  <circle cx="100" cy="64"  r="9"  fill="#3b82f6" opacity="0.25" filter="url(#nodeFilter)"/>
+  <circle cx="76"  cy="102" r="8"  fill="#3b82f6" opacity="0.25" filter="url(#nodeFilter)"/>
+  <circle cx="118" cy="106" r="8"  fill="#3b82f6" opacity="0.25" filter="url(#nodeFilter)"/>
+  <circle cx="112" cy="124" r="7"  fill="#3b82f6" opacity="0.25" filter="url(#nodeFilter)"/>
+
+  <circle cx="100" cy="64"  r="4.5" fill="white" filter="url(#softGlow)"/>
+  <circle cx="76"  cy="102" r="4"   fill="white" filter="url(#softGlow)"/>
+  <circle cx="118" cy="106" r="4"   fill="white" filter="url(#softGlow)"/>
+  <circle cx="112" cy="124" r="3.5" fill="white" filter="url(#softGlow)"/>
+</svg>

@@ -1,0 +1,70 @@
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:              #ffffff;
+  --bg-2:            #f8f9fb;
+  --bg-3:            #f1f4f8;
+  --text:            #0f172a;
+  --text-2:          #475569;
+  --text-3:          #94a3b8;
+  --border:          #e2e8f0;
+  --accent:          #2563eb;
+  --accent-2:        #1d4ed8;
+  --accent-glow:     rgba(37, 99, 235, 0.15);
+  --user-bg:         #f1f5f9;
+  --assistant-bg:    #f0f7ff;
+  --radius-sm:       8px;
+  --radius:          14px;
+  --radius-lg:       20px;
+  --shadow-sm:       0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+  --shadow:          0 4px 16px rgba(0,0,0,0.08);
+  --transition:      0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', sans-serif;
+}
+
+html, body, #root { height: 100%; background: var(--bg); color: var(--text); }
+
+button { cursor: pointer; border: none; background: none; font-family: inherit; }
+input, textarea { font-family: inherit; }
+a { color: inherit; text-decoration: none; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+/* Code blocks inside messages */
+pre {
+  background: #1e293b;
+  color: #e2e8f0;
+  padding: 14px 16px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 8px 0;
+}
+code {
+  background: var(--bg-3);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+pre code { background: none; padding: 0; }
+
+/* Markdown inside messages */
+.message-content p { margin-bottom: 8px; line-height: 1.65; }
+.message-content p:last-child { margin-bottom: 0; }
+.message-content ul, .message-content ol { padding-left: 20px; margin-bottom: 8px; }
+.message-content li { margin-bottom: 4px; line-height: 1.55; }
+.message-content strong { font-weight: 600; }
+.message-content em { font-style: italic; }
+.message-content h1, .message-content h2, .message-content h3 {
+  font-weight: 600; margin-bottom: 6px; margin-top: 12px;
+}
+
+@keyframes fadeIn    { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes slideUp   { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes blink     { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
+@keyframes pulse     { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+@keyframes spin      { to { transform: rotate(360deg); } }
