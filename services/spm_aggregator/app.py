@@ -29,6 +29,7 @@ _enforce_count    = None
 _snapshot_lag     = None
 _risk_score       = None
 _coverage_pct     = None
+_last_snapshot_ts = None
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -193,7 +194,9 @@ def process_posture_enriched(conn, msg: Dict) -> None:
     })
 
     if _snapshot_lag:
-        _snapshot_lag.set(0)  # reset lag after successful write
+        global _last_snapshot_ts
+        _last_snapshot_ts = time.time()
+        _snapshot_lag.set(0)
 
     if _risk_score:
         _risk_score.labels(
@@ -249,7 +252,7 @@ def main() -> None:
 
     # Start Prometheus metrics server on :9091
     from prometheus_client import start_http_server, Gauge, Counter
-    global _enforce_count, _snapshot_lag
+    global _enforce_count, _snapshot_lag, _last_snapshot_ts
     _snapshot_lag  = Gauge("spm_snapshot_lag_seconds",   "Seconds since last snapshot write")
     _enforce_count = Counter("spm_enforcement_actions_total", "Enforcement actions taken",
                              ["action", "tenant_id"])
@@ -259,6 +262,16 @@ def main() -> None:
     global _coverage_pct
     _coverage_pct  = Gauge("spm_compliance_coverage_pct", "NIST AI RMF compliance coverage %",
                            ["function"])
+
+    # Initialise counters with 0 so Prometheus always has a series
+    for action in ("block", "escalate", "allow"):
+        for t in TENANTS:
+            _enforce_count.labels(action=action, tenant_id=t).inc(0)
+
+    # Initialise snapshot lag — update every 15s in background
+    _last_snapshot_ts = time.time()
+    _snapshot_lag.set(0)
+
     start_http_server(9091)
     log.info("Prometheus metrics server started on :9091")
 
@@ -300,6 +313,14 @@ def main() -> None:
     t = threading.Thread(target=_refresh_coverage, args=(cov_conn,), daemon=True)
     t.start()
     log.info("Compliance coverage refresh thread started")
+
+    # Background thread: update snapshot lag gauge every 15s
+    def _update_lag():
+        while True:
+            if _snapshot_lag and _last_snapshot_ts:
+                _snapshot_lag.set(time.time() - _last_snapshot_ts)
+            time.sleep(15)
+    threading.Thread(target=_update_lag, daemon=True).start()
 
     conn = None
 

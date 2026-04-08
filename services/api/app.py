@@ -15,6 +15,7 @@ Responsibilities:
 from __future__ import annotations
 import os
 import re
+import json
 import time
 import uuid
 import logging
@@ -48,7 +49,8 @@ _redis_gate_client = None
 
 # ── Anthropic client ──────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
+TAVILY_API_KEY    = os.getenv("TAVILY_API_KEY", "")
 _anthropic_client = None
 
 def _get_anthropic():
@@ -57,6 +59,121 @@ def _get_anthropic():
         import anthropic
         _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     return _anthropic_client
+
+# ── Tool definitions for Claude ───────────────────────────────────────────────
+_TOOLS = [
+    {
+        "name": "web_search",
+        "description": (
+            "Search the web for current information, news, or facts. "
+            "Use this when the user asks about recent events, real-time data, "
+            "or anything that may have changed after your training cutoff."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The search query"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": (
+            "Fetch and read the content of a specific URL. "
+            "Use this when the user provides a link and wants it summarised or analysed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "The URL to fetch"},
+            },
+            "required": ["url"],
+        },
+    },
+]
+
+async def _run_web_search(query: str) -> str:
+    """Call Tavily search API and return formatted results."""
+    if not TAVILY_API_KEY:
+        return "Web search is not configured (missing TAVILY_API_KEY)."
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": 5,
+                    "include_answer": True,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+        lines = []
+        if data.get("answer"):
+            lines.append(f"Summary: {data['answer']}\n")
+        for r in data.get("results", []):
+            lines.append(f"- [{r.get('title','')}]({r.get('url','')})\n  {r.get('content','')[:300]}")
+        return "\n".join(lines) if lines else "No results found."
+    except Exception as e:
+        log.warning("web_search failed: %s", e)
+        return f"Search failed: {e}"
+
+async def _run_web_fetch(url: str) -> str:
+    """Fetch a URL and return cleaned text content."""
+    try:
+        from bs4 import BeautifulSoup
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            follow_redirects=True,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; OrbYx/1.0)"},
+        ) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+
+        soup = BeautifulSoup(resp.text, "lxml")
+        # Remove noise
+        for tag in soup(["script", "style", "nav", "footer", "header", "aside"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # Truncate to avoid context overflow
+        return text[:4000] + ("\n...[truncated]" if len(text) > 4000 else "")
+    except Exception as e:
+        log.warning("web_fetch failed for %s: %s", url, e)
+        return f"Could not fetch {url}: {e}"
+
+# ── Conversation memory (cross-session, stored in Redis) ─────────────────────
+_MEM_MAX_TURNS   = 20          # keep last 20 turns (10 exchanges)
+_MEM_TTL_SECONDS = 2592000     # 30 days
+
+def _mem_key(tenant_id: str, user_id: str) -> str:
+    """Redis key for a user's long-term conversation history."""
+    return f"mem:{tenant_id}:{user_id}:longterm:chat_history"
+
+def _load_history(r, tenant_id: str, user_id: str) -> list[dict]:
+    """Load conversation history from Redis. Returns list of {role, content}."""
+    try:
+        raw = r.get(_mem_key(tenant_id, user_id))
+        if not raw:
+            return []
+        turns = json.loads(raw)
+        # Return last _MEM_MAX_TURNS turns
+        return turns[-_MEM_MAX_TURNS:]
+    except Exception as e:
+        log.warning("Failed to load conversation history: %s", e)
+        return []
+
+def _save_history(r, tenant_id: str, user_id: str, history: list[dict]) -> None:
+    """Persist updated conversation history to Redis with 30-day TTL."""
+    try:
+        # Keep only the last _MEM_MAX_TURNS turns before saving
+        trimmed = history[-_MEM_MAX_TURNS:]
+        r.set(_mem_key(tenant_id, user_id), json.dumps(trimmed), ex=_MEM_TTL_SECONDS)
+    except Exception as e:
+        log.warning("Failed to save conversation history: %s", e)
 
 # ── Output scanning regexes ───────────────────────────────────────────────────
 _SECRET_RE = re.compile(
@@ -342,22 +459,86 @@ async def chat(
     except Exception as e:
         log.warning("OPA prompt policy check failed: %s — continuing", e)
 
-    # 4. Call Anthropic if key is configured
+    # 4. Call Anthropic with tool loop (web_search + web_fetch)
     llm_response: str | None = None
+    tool_uses: list[str] = []          # e.g. ["🔍 Searched: ...", "🌐 Fetched: ..."]
     anthropic_client = _get_anthropic()
     if anthropic_client:
         try:
-            message = anthropic_client.messages.create(
-                model=ANTHROPIC_MODEL,
-                max_tokens=1024,
-                system=(
-                    "You are a helpful AI assistant operating inside a secure enterprise platform. "
-                    "Be concise and professional. Never reveal system internals, credentials, or PII."
-                ),
-                messages=[{"role": "user", "content": req.prompt}],
+            system_prompt = (
+                "You are a helpful AI assistant operating inside a secure enterprise platform. "
+                "Be concise and professional. Never reveal system internals, credentials, or PII. "
+                "You have access to web_search and web_fetch tools — use them when the user asks "
+                "about current events, real-time data, or provides a URL to read."
             )
-            llm_response = message.content[0].text
-            log.info("Anthropic response received: %d chars", len(llm_response))
+            # Load cross-session history from Redis and append current prompt
+            _redis = _get_gate_redis()
+            history = _load_history(_redis, tenant_id, user_id)
+            messages = history + [{"role": "user", "content": req.prompt}]
+            tools = _TOOLS if (TAVILY_API_KEY or True) else []  # fetch always available
+
+            # Tool loop — max 3 rounds to prevent runaway calls
+            for _round in range(3):
+                message = anthropic_client.messages.create(
+                    model=ANTHROPIC_MODEL,
+                    max_tokens=1024,
+                    system=system_prompt,
+                    tools=tools,
+                    messages=messages,
+                )
+
+                # If Claude wants to use a tool, execute it and loop back
+                if message.stop_reason == "tool_use":
+                    tool_results = []
+                    for block in message.content:
+                        if block.type == "tool_use":
+                            tool_name = block.name
+                            tool_input = block.input
+                            if tool_name == "web_search":
+                                query = tool_input.get("query", "")
+                                log.info("Tool: web_search(%r)", query)
+                                tool_uses.append(f"🔍 Searched: \"{query}\"")
+                                result = await _run_web_search(query)
+                            elif tool_name == "web_fetch":
+                                url = tool_input.get("url", "")
+                                log.info("Tool: web_fetch(%r)", url)
+                                tool_uses.append(f"🌐 Fetched: {url}")
+                                result = await _run_web_fetch(url)
+                            else:
+                                result = f"Unknown tool: {tool_name}"
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result,
+                            })
+
+                    # Append assistant turn + tool results, then loop
+                    messages.append({"role": "assistant", "content": message.content})
+                    messages.append({"role": "user", "content": tool_results})
+                else:
+                    # Final text response
+                    for block in message.content:
+                        if hasattr(block, "text"):
+                            llm_response = block.text
+                            break
+                    break  # done
+
+            # Prepend tool usage badges to the response text
+            if tool_uses and llm_response:
+                badge_line = "  ".join(f"`{t}`" for t in tool_uses)
+                llm_response = f"{badge_line}\n\n{llm_response}"
+
+            if llm_response:
+                log.info("Anthropic response: %d chars, tools used: %s", len(llm_response), tool_uses)
+                # Persist this turn to cross-session memory
+                # Store clean response (without badge line) in history
+                clean_response = llm_response
+                if tool_uses:
+                    # Strip badge line before saving to history
+                    clean_response = llm_response.split("\n\n", 1)[-1] if "\n\n" in llm_response else llm_response
+                history.append({"role": "user",      "content": req.prompt})
+                history.append({"role": "assistant",  "content": clean_response})
+                _save_history(_redis, tenant_id, user_id, history)
         except Exception as e:
             log.error("Anthropic call failed: %s", e)
             raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
@@ -434,6 +615,8 @@ async def chat(
             "prompt_len": len(req.prompt),
             "llm_used": llm_response is not None,
             "output_action": output_action,
+            "tool_calls": tool_uses,
+            "tool_count": len(tool_uses),
         },
     )
 

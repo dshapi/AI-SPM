@@ -2790,3 +2790,40 @@ make spm-smoke       # health + auth check
 make spm-compliance  # NIST AI RMF coverage %
 make spm-logs        # check for errors
 ```
+Features to implement:
+Great question. Here's what's genuinely missing and would make this a production-grade platform:
+Security & Detection
+
+Prompt injection detection — dedicated ML model specifically for jailbreaks, not just general content screening. The guard model catches harmful content but not subtle "ignore previous instructions" attacks
+Anomaly detection — flag users whose behaviour suddenly changes (e.g. 10 normal queries then suddenly probing for system info). The CEP framework is there but not wired to anything actionable
+Conversation-level threat scoring — right now each message is scored independently; a multi-turn attack that's individually benign but collectively harmful would slip through
+
+Governance & Compliance
+
+Automated compliance reports — one-click PDF/DOCX export of your NIST AI RMF posture for auditors. You have the data in the DB, just no report generator
+Model drift detection — alert when a model's risk score distribution shifts over time (e.g. Claude starts producing riskier outputs after an Anthropic update)
+Shadow mode — run a new model in parallel alongside the approved one, compare outputs without serving them to users, then promote when satisfied
+Cost tracking per tenant/user — every Claude API call has a token cost; none of it is tracked or budgeted right now
+
+User & Access Control
+
+Tool-level RBAC — right now all users can trigger web search. You might want finance users to have different tool access than engineering users
+Human-in-the-loop escalation — when posture score is in the grey zone (0.3–0.7), route to a human reviewer instead of auto-allow or auto-block
+Session replay — ability to replay a full conversation in the audit UI for incident investigation
+
+AI Capabilities
+
+Real streaming — right now Claude's full response arrives then gets word-by-word simulated. True token streaming would make it feel much faster
+RAG pipeline — the retrieval gateway exists but isn't connected to Claude. Connecting it would let you ground answers in your own documents
+
+DONE- Conversation memory — the memory service is running but Claude doesn't remember previous sessions. Wiring it in would give persistent context across conversations
+
+Hallucination scoring — after Claude responds, run a lightweight check to estimate how likely the response is to contain fabricated facts
+
+Ops & Observability
+
+Alerting — Grafana dashboards show data but nothing fires a Slack/email alert when blocked requests spike or a model's risk score crosses a threshold
+A/B model routing — split traffic between two approved models (e.g. 80% Sonnet, 20% Haiku) and compare quality/risk metrics
+Token & cost dashboard — Grafana panel showing API spend per day/user/tenant
+
+The three highest-impact ones that would most impress in a demo are real streaming, human-in-the-loop escalation, and automated compliance PDF reports. Want to pick one to build next?
