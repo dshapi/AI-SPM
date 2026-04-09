@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
   Search, SlidersHorizontal, LayoutGrid, List,
   ChevronRight, X, ExternalLink, AlertTriangle,
@@ -8,6 +8,7 @@ import {
   CheckCircle2, XCircle, AlertCircle, Share2,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
+import { useFilterParams } from '../../hooks/useFilterParams.js'
 import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
@@ -606,17 +607,27 @@ function PreviewPanel({ asset, onClose }) {
 // ── Inventory page ─────────────────────────────────────────────────────────────
 
 export default function Inventory() {
-  const [activeTab, setActiveTab] = useState('agents')
-  const [view,      setView]      = useState('table')
-  const [search,    setSearch]    = useState('')
-  const [provider,  setProvider]  = useState('All Providers')
-  const [risk,      setRisk]      = useState('All Risk')
-  const [policy,    setPolicy]    = useState('All Coverage')
-  const [selected,  setSelected]  = useState(null)
+  const { assetId } = useParams()
+  const navigate    = useNavigate()
+
+  const { values, setters } = useFilterParams({
+    tab:      'agents',
+    view:     'table',
+    search:   '',
+    provider: 'All Providers',
+    risk:     'All Risk',
+    policy:   'All Coverage',
+  })
+  const { tab: activeTab, view, search, provider, risk, policy } = values
+  const { setTab, setView, setSearch, setProvider, setRisk, setPolicy } = setters
+
+  // Selection derived from URL param, not local state
+  const allAssets = Object.values(ASSETS).flat()
+  const selected  = allAssets.find(a => a.id === assetId) ?? null
 
   const handleTabChange = (tab) => {
-    setActiveTab(tab)
-    setSelected(null)
+    setTab(tab)
+    if (assetId) navigate('/admin/inventory', { replace: true })
   }
 
   const rawAssets = ASSETS[activeTab] ?? []
@@ -672,13 +683,19 @@ export default function Inventory() {
               ? <AssetTable
                   assets={filtered}
                   selectedId={selected?.id}
-                  onSelect={setSelected}
+                  onSelect={(asset) => {
+                    if (asset?.id === assetId) {
+                      navigate('/admin/inventory', { replace: true })
+                    } else {
+                      navigate(`/admin/inventory/${asset.id}`, { replace: true })
+                    }
+                  }}
                 />
               : <GraphView assets={filtered} />
             }
           </div>
 
-          {selected && <PreviewPanel asset={selected} onClose={() => setSelected(null)} />}
+          {selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />}
 
         </div>
 
