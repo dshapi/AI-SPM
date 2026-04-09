@@ -66,17 +66,26 @@ Implement proper governance controls around AI usage.
 
 ---
 
+
+
 <div align="center">
-<h2>Admin Portal - main dashboard </h2>
+<h2>Admin Portal - Overview </h2>
+<h3>A Real-time AI security posture across every agent, model, and data source — inventory, runtime, policies, and threat response unified.</h3>
+</div>
+<p align="center"><img src="/docs/Admiin_Portal_overview.jpg" width="100%"></p>
+
+
+
+<div align="center">
+<h2>Admin Portal - Dashboard </h2>
 <h3>An AI Security Posture Management control plane providing real-time visibility, risk detection, and policy enforcement across agents, models, and context flows.</h3>
 </div>
-
 <p align="center"><img src="/docs/OrbiX.jpg" width="100%"></p>
+
 
 <div align="center">
 <h2>Admin Portal - Inventory </h2>
 </div>
-
 <p align="center"><img src="/docs/OrbiX2.jpg" width="100%"></p>
 
 ---
