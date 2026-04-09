@@ -7,7 +7,7 @@ Thanks for your interest in contributing! Here's everything you need to get star
 ## Getting Started
 
 1. Fork the repository and clone your fork
-2. Follow [INSTALL.md](./INSTALL.md) to get the platform running locally
+2. Follow [README.md/Installation](./README.md/#installation) to get the platform running locally
 3. Create a feature branch: `git checkout -b feat/your-feature-name`
 
 ---

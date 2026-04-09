@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Outlet }   from 'react-router-dom'
+import { useState, useEffect, useRef } from 'react'
+import { Outlet, useLocation }         from 'react-router-dom'
 import { AccentPillar } from './AccentPillar.jsx'
 import { AppSidebar }   from './AppSidebar.jsx'
 import { Topbar }       from './Topbar.jsx'
@@ -31,7 +31,17 @@ import { Topbar }       from './Topbar.jsx'
  *   - `overflow-y-auto` on main: allows page content to scroll independently
  */
 export function AppShell() {
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed]   = useState(false)
+  const mainRef                     = useRef(null)
+  const { pathname }                = useLocation()
+
+  // Scroll the main content area back to the top on every route change.
+  // Without this, navigating from a scrolled page (e.g. Overview scrolled
+  // to the Launch tiles) retains the old scrollTop, showing blank space
+  // at the bottom of shorter destination pages.
+  useEffect(() => {
+    if (mainRef.current) mainRef.current.scrollTop = 0
+  }, [pathname])
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#f6f7fb]">
@@ -50,7 +60,7 @@ export function AppShell() {
           onToggle={() => setCollapsed(v => !v)}
         />
 
-        <main className="flex-1 overflow-y-auto">
+        <main ref={mainRef} className="flex-1 overflow-y-auto">
           <Outlet />
         </main>
 
