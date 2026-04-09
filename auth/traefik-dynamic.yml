@@ -1,0 +1,50 @@
+http:
+
+  # ── Routers ──────────────────────────────────────────────────────────────────
+
+  routers:
+
+    # The OIDC callback — must NOT have the sso middleware (forward-auth handles it directly)
+    aispm-oauth:
+      rule: "Host(`aispm.local`) && PathPrefix(`/_oauth`)"
+      entryPoints:
+        - web
+      service: auth-svc
+      priority: 100   # Higher than the catch-all aispm router below
+
+    # The AISPM admin portal — all other paths are protected by SSO
+    aispm:
+      rule: "Host(`aispm.local`)"
+      entryPoints:
+        - web
+      middlewares:
+        - sso
+      service: aispm
+      priority: 1
+
+  # ── Middlewares ───────────────────────────────────────────────────────────────
+
+  middlewares:
+
+    sso:
+      forwardAuth:
+        address: "http://traefik-forward-auth:4181"
+        authResponseHeaders:
+          - "X-Forwarded-User"
+        trustForwardHeader: true
+
+  # ── Services ──────────────────────────────────────────────────────────────────
+
+  services:
+
+    # The AISPM React UI container
+    aispm:
+      loadBalancer:
+        servers:
+          - url: "http://ui:3001"
+
+    # traefik-forward-auth handles the /_oauth OIDC callback
+    auth-svc:
+      loadBalancer:
+        servers:
+          - url: "http://traefik-forward-auth:4181"

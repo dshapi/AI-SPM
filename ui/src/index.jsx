@@ -33,7 +33,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           {/* Admin UI */}
           <Route path="/admin" element={<DashboardLayout />}>
 
-            <Route index element={<Navigate to="overview" replace />} />
+            <Route index element={<Overview />} />
 
             {/* ── Command center ── */}
             <Route path="overview"     element={<Overview />} />

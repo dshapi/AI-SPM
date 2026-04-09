@@ -1,0 +1,95 @@
+# ── Auth overlay ──────────────────────────────────────────────────────────────
+#
+# Run alongside the main stack:
+#   docker-compose -f docker-compose.yml -f docker-compose.auth.yml up --build
+#
+# Before running, add these lines to /etc/hosts on your Mac:
+#   127.0.0.1  keycloak.local
+#   127.0.0.1  auth.local
+#   127.0.0.1  aispm.local
+#
+# After first boot, set up the Keycloak realm — see README in auth/ directory.
+
+services:
+
+  # ── Traefik reverse proxy ────────────────────────────────────────────────────
+  # Uses file provider instead of Docker provider — no socket needed.
+  # Routes are defined statically in auth/traefik-dynamic.yml.
+  traefik:
+    image: traefik:v3.0
+    container_name: traefik
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "9091:8080"     # Traefik dashboard → http://localhost:9091/dashboard/
+    volumes:
+      - ./auth/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./auth/traefik-dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - traefik
+      - aispm-default   # Reach ui:3001 and api:8080 on the project's default network
+
+  # ── Keycloak OIDC provider ───────────────────────────────────────────────────
+  # Runs in dev mode: HTTP only, in-memory DB (state resets on restart).
+  # Admin UI → http://keycloak.local:8180  (admin / admin)
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: keycloak
+    restart: unless-stopped
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_HOSTNAME_URL: http://keycloak.local:8180
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_HTTP_ENABLED: "true"
+      KC_HTTP_PORT: "8080"
+      KC_HEALTH_ENABLED: "true"
+    ports:
+      - "8180:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data   # Persist realm config across restarts
+    networks:
+      - traefik
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/localhost/8080 && printf 'GET /health/ready HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && cat <&3 | grep -q UP"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ── traefik-forward-auth ─────────────────────────────────────────────────────
+  traefik-forward-auth:
+    image: thomseddon/traefik-forward-auth:2
+    platform: linux/amd64
+    container_name: traefik-forward-auth
+    restart: unless-stopped
+    env_file: .env.auth
+    environment:
+      DEFAULT_PROVIDER: oidc
+      PROVIDERS_OIDC_ISSUER_URL: http://keycloak.local:8180/realms/aispm
+      # No AUTH_HOST / COOKIE_DOMAIN — callback stays on aispm.local/_oauth,
+      # so the cookie is set on aispm.local only. Avoids Safari .local mDNS issues.
+      INSECURE_COOKIE: "true"
+      LOG_LEVEL: info
+    extra_hosts:
+      - "keycloak.local:host-gateway"
+    networks:
+      - traefik
+    depends_on:
+      keycloak:
+        condition: service_healthy
+
+volumes:
+  keycloak-data:
+    name: keycloak-data
+
+networks:
+  traefik:
+    name: traefik
+  aispm-default:
+    name: aispm_default   # The project's existing default network
+    external: true        # Already created by docker-compose.yml — don't recreate it
