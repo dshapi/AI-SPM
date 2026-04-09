@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { useFilterParams } from '../../hooks/useFilterParams.js'
 import {
   Search, SlidersHorizontal, Plus, Download,
   ChevronRight, X, AlertTriangle,
@@ -846,16 +847,29 @@ function AlertDetailPanel({ alert, onClose }) {
 // ── Alerts page ────────────────────────────────────────────────────────────────
 
 export default function Alerts() {
-  const [selected,     setSelected]     = useState(null)
-  const [search,       setSearch]       = useState('')
-  const [severity,     setSeverity]     = useState('All Severity')
-  const [status,       setStatus]       = useState('All Status')
-  const [assetType,    setAssetType]    = useState('All Types')
-  const [timeRange,    setTimeRange]    = useState('Last 24h')
-  const [highRiskOnly, setHighRiskOnly] = useState(false)
+  const { alertId }  = useParams()
+  const navigate     = useNavigate()
+
+  const { values, setters } = useFilterParams({
+    search:       '',
+    severity:     'All Severity',
+    status:       'All Status',
+    assetType:    'All Types',
+    timeRange:    'Last 24h',
+    highRiskOnly: false,
+  })
+  const { search, severity, status, assetType, timeRange, highRiskOnly } = values
+  const { setSearch, setSeverity, setStatus, setAssetType, setTimeRange, setHighRiskOnly } = setters
+
+  // Selection is derived from URL param, not local state
+  const selected = MOCK_ALERTS.find(a => a.id === alertId) ?? null
 
   const handleSelectAlert = (alert) => {
-    setSelected(prev => prev?.id === alert?.id ? null : alert)
+    if (alert?.id === alertId) {
+      navigate('/admin/alerts', { replace: true })
+    } else {
+      navigate(`/admin/alerts/${alert.id}`, { replace: true })
+    }
   }
 
   const filtered = MOCK_ALERTS.filter(a => {
@@ -924,7 +938,7 @@ export default function Alerts() {
           {selected && (
             <AlertDetailPanel
               alert={selected}
-              onClose={() => setSelected(null)}
+              onClose={() => navigate('/admin/alerts', { replace: true })}
             />
           )}
 
