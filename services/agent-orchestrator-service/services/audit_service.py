@@ -44,7 +44,7 @@ class AuditService:
         """Emit a standard audit event (non-blocking)."""
         try:
             from platform_shared.audit import emit_audit
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(
                 None,
                 lambda: emit_audit(
