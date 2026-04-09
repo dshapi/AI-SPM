@@ -25,10 +25,31 @@ Implement proper governance controls around AI usage.
 
 ## 📋 Table of Contents
 
+- [Project Information](#ℹ️-project-information)
+- [Platform at a Glance](#platform-at-a-glance)
 - [Features](#features)
+  - [Security & Access Control](#security--access-control)
+  - [LLM Integration & Gateway](#llm-integration--gateway)
+  - [Conversation Memory](#conversation-memory)
+  - [Observability & Compliance](#observability--compliance)
+  - [Infrastructure & Event Pipeline](#infrastructure--event-pipeline)
+  - [UI & Developer Experience](#ui--developer-experience)
+- [Roadmap](#roadmap)
 - [Installation](#installation)
+  - [Prerequisites](#prerequisites)
+  - [Clone & Configure](#clone--configure)
+  - [API Keys](#api-keys)
+  - [First Boot](#first-boot)
+  - [Verify the Platform](#verify-the-platform)
+  - [Access the UI & Dashboards](#access-the-ui--dashboards)
+  - [Run the Smoke Test](#run-the-smoke-test)
+  - [Stopping & Cleaning Up](#stopping--cleaning-up)
+- [Local SSO with Keycloak + Traefik](#local-sso-with-keycloak--traefik)
+- [Troubleshooting](#troubleshooting)
+- [Environment Reference](#environment-reference)
 - [Usage](#usage)
 - [Tech Stack](#tech-stack)
+- [Architecture Overview](#architecture-overview)
 - [Contributing](#contributing)
 
 ## ℹ️ Project Information
@@ -57,10 +78,21 @@ Implement proper governance controls around AI usage.
 ## Table of Contents
 
 - [Security & Access Control](#security--access-control)
+  - [Authentication & Authorization](#authentication--authorization)
+  - [Prompt Security](#prompt-security)
+  - [Output Security](#output-security)
 - [LLM Integration & Gateway](#llm-integration--gateway)
+  - [Model Management](#model-management)
+  - [Agentic Tools](#agentic-tools)
 - [Conversation Memory](#conversation-memory)
 - [Observability & Compliance](#observability--compliance)
+  - [Prometheus Metrics](#prometheus-metrics)
+  - [Grafana Dashboards](#grafana-dashboards)
+  - [Audit & Compliance](#audit--compliance)
+  - [Behavioural Analytics](#behavioural-analytics)
 - [Infrastructure & Event Pipeline](#infrastructure--event-pipeline)
+  - [Kafka Event Bus](#kafka-event-bus)
+  - [Platform Services](#platform-services)
 - [UI & Developer Experience](#ui--developer-experience)
 - [Roadmap](#roadmap)
 
@@ -266,7 +298,6 @@ Implement proper governance controls around AI usage.
 
 Features not yet implemented — candidates for the next sprint:
 
-- [ ] **Real token streaming** — true SSE streaming from Claude instead of simulated word-by-word reveal
 - [ ] **Human-in-the-loop escalation** — middle-risk requests (0.30–0.70) route to a human reviewer queue
 - [ ] **Automated compliance reports** — one-click PDF/DOCX export of NIST AI RMF posture for auditors
 - [ ] **Model drift detection** — alert when a model's risk score distribution shifts after a provider update
@@ -461,11 +492,23 @@ A passing run ends with:
 
 ## Stopping & Cleaning Up
 
-**Stop all services (keeps data):**
+**Stop all services including auth (keeps data):**
 
 ```bash
-make down
+./stop.sh
 # or
+docker-compose -f docker-compose.yml -f docker-compose.auth.yml down
+```
+
+**Start everything back up:**
+
+```bash
+./start.sh
+```
+
+**Stop without the auth overlay:**
+
+```bash
 docker compose down
 ```
 
@@ -475,7 +518,7 @@ docker compose down
 make clean
 ```
 
-> ⚠️ `make clean` deletes the RSA keys in `./keys/`. New keys will be auto-generated on next `make up`, which invalidates any previously minted JWTs.
+> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next `make up` (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
 
 ---
 
@@ -771,11 +814,23 @@ A passing run ends with:
 
 ## Stopping & Cleaning Up
 
-**Stop all services (keeps data):**
+**Stop all services including auth (keeps data):**
 
 ```bash
-make down
+./stop.sh
 # or
+docker-compose -f docker-compose.yml -f docker-compose.auth.yml down
+```
+
+**Start everything back up:**
+
+```bash
+./start.sh
+```
+
+**Stop without the auth overlay:**
+
+```bash
 docker compose down
 ```
 
@@ -785,7 +840,7 @@ docker compose down
 make clean
 ```
 
-> ⚠️ `make clean` deletes the RSA keys in `./keys/`. New keys will be auto-generated on next `make up`, which invalidates any previously minted JWTs.
+> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next `make up` (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
 
 ---
 
@@ -1351,6 +1406,71 @@ Please open a GitHub Issue and include:
 - **Python** — follow PEP 8; use type hints where practical
 - **JavaScript** — standard ESM; no external linting config required
 - **Commits** — use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, etc.)
+
+---
+
+## Local SSO with Keycloak + Traefik
+
+The auth overlay adds a full OIDC login flow in front of the admin portal, running entirely on localhost. No real domain or TLS certificate required.
+
+### What it adds
+
+| Component | Role |
+|---|---|
+| **Traefik v3** | Reverse proxy. Routes `aispm.local` → admin UI via the ForwardAuth middleware. Uses a static file provider — no Docker socket required. |
+| **Keycloak 24** | OIDC identity provider running in dev mode. Realm config is persisted in a named Docker volume so it survives restarts. |
+| **traefik-forward-auth** | Sits in front of every protected route. Handles the OIDC redirect flow and sets a signed session cookie on `aispm.local`. |
+
+### One-time host setup
+
+Add these entries to `/etc/hosts` on your Mac:
+
+```bash
+sudo sh -c 'echo "127.0.0.1  keycloak.local auth.local aispm.local" >> /etc/hosts'
+```
+
+### Start / Stop
+
+```bash
+./start.sh   # full stack including auth
+./stop.sh    # tear everything down (volumes preserved)
+```
+
+### First-time Keycloak setup
+
+Only required once — Keycloak persists the realm to the `keycloak-data` Docker volume.
+
+1. `./start.sh` then open **http://keycloak.local:8180/admin/** (`admin` / `admin`)
+2. Top-left dropdown → **Create realm** → name: `aispm` → **Create**
+3. **Clients** → **Create client**
+   - Client ID: `traefik-forward-auth`
+   - Turn ON **Client authentication** → **Next**
+   - Valid redirect URIs: `http://aispm.local/_oauth`
+   - Web origins: `http://aispm.local` → **Save**
+4. **Credentials** tab → copy **Client secret** → paste into `.env.auth`:
+   ```
+   PROVIDERS_OIDC_CLIENT_SECRET=<paste here>
+   ```
+5. **Users** → **Create user** → set username → **Create**
+6. **Credentials** tab → set password → turn OFF **Temporary** → **Save password**
+7. Restart forward-auth: `docker-compose -f docker-compose.yml -f docker-compose.auth.yml up -d traefik-forward-auth`
+
+### Access
+
+| URL | What |
+|---|---|
+| **http://aispm.local/admin** | Admin portal (SSO protected — redirects to Keycloak login) |
+| **http://keycloak.local:8180/admin/** | Keycloak admin console |
+| **http://localhost:9091/dashboard/** | Traefik routing dashboard |
+
+### Configuration files
+
+| File | Purpose |
+|---|---|
+| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth |
+| `auth/traefik.yml` | Traefik static config (file provider, entrypoints, dashboard on `:9091`) |
+| `auth/traefik-dynamic.yml` | Route and middleware definitions (aispm router + sso forwardAuth) |
+| `.env.auth` | OIDC client ID, client secret, and cookie signing secret |
 
 ---
 
