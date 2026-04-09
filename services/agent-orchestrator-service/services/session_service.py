@@ -46,6 +46,7 @@ from schemas.session import (
     CreateSessionRequest,
     PolicyDecision,
     SessionStatus,
+    RiskTier,
 )
 from services.risk_engine import RiskEngine, RiskResult
 from services.prompt_processor import PromptProcessor
@@ -135,25 +136,44 @@ class SessionService:
         guard_verdict = "allow"
         guard_score = 0.0
         if self._processor:
-            pre = await self._processor.pre_screen(request.prompt)
-            guard_verdict = pre.verdict
-            guard_score = pre.score
-            logger.info(
-                "pre_screen session=%s verdict=%s score=%.4f",
-                session_id, guard_verdict, guard_score,
-            )
+            try:
+                pre = await self._processor.pre_screen(request.prompt)
+                guard_verdict = pre.verdict
+                guard_score = pre.score
+                logger.info(
+                    "pre_screen session=%s verdict=%s score=%.4f",
+                    session_id, guard_verdict, guard_score,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "pre_screen failed session=%s: %s — treating as allow",
+                    session_id, exc,
+                )
 
         # ── Step 3: risk scoring ───────────────────────────────────────────
-        risk = self._risk.score(
-            prompt=request.prompt,
-            tools=request.tools,
-            agent_id=request.agent_id,
-            context=request.context,
-            roles=identity.roles,
-            scopes=[],
-            guard_verdict=guard_verdict,
-            guard_score=guard_score,
-        )
+        try:
+            risk = self._risk.score(
+                prompt=request.prompt,
+                tools=request.tools,
+                agent_id=request.agent_id,
+                context=request.context,
+                roles=identity.roles,
+                scopes=[],
+                guard_verdict=guard_verdict,
+                guard_score=guard_score,
+            )
+        except Exception as exc:
+            logger.exception(
+                "Risk scoring failed session=%s: %s — falling back to MEDIUM",
+                session_id, exc,
+            )
+            risk = RiskResult(
+                score=0.5,
+                tier=RiskTier.MEDIUM,
+                signals=["risk_engine_error"],
+                ttps=[],
+                prompt_hash="",
+            )
         await self._publisher.emit_risk_calculated(
             payload=RiskCalculatedPayload(
                 session_id=session_id,
@@ -190,39 +210,52 @@ class SessionService:
                 llm_resp = await self._llm.complete(request.prompt)
                 llm_latency_ms = int((time.perf_counter() - llm_t0) * 1000)
                 llm_text = llm_resp.text
-                await self._publisher.emit_llm_response(
-                    session_id=session_id,
-                    correlation_id=trace_id,
-                    model=llm_resp.model,
-                    input_tokens=llm_resp.input_tokens,
-                    output_tokens=llm_resp.output_tokens,
-                    stop_reason=llm_resp.stop_reason,
-                    response_length=len(llm_text),
-                    latency_ms=llm_latency_ms,
-                )
             except Exception as exc:
                 logger.exception("LLM call failed session=%s: %s", session_id, exc)
+            else:
+                try:
+                    await self._publisher.emit_llm_response(
+                        session_id=session_id,
+                        correlation_id=trace_id,
+                        model=llm_resp.model,
+                        input_tokens=llm_resp.input_tokens,
+                        output_tokens=llm_resp.output_tokens,
+                        stop_reason=llm_resp.stop_reason,
+                        response_length=len(llm_text),
+                        latency_ms=llm_latency_ms,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "emit_llm_response failed session=%s: %s",
+                        session_id, exc,
+                    )
 
         # ── Step 6: output scan (only if LLM ran) ─────────────────────────
         if llm_text and self._processor:
-            post = await self._processor.post_scan_async(llm_text)
-            await self._publisher.emit_output_scanned(
-                session_id=session_id,
-                correlation_id=trace_id,
-                verdict=post.verdict,
-                pii_types=post.pii_types,
-                secret_types=post.secret_types,
-                scan_notes=post.scan_notes,
-            )
-            if post.blocked:
-                logger.warning(
-                    "Output blocked session=%s notes=%s", session_id, post.scan_notes
+            try:
+                post = await self._processor.post_scan_async(llm_text)
+                await self._publisher.emit_output_scanned(
+                    session_id=session_id,
+                    correlation_id=trace_id,
+                    verdict=post.verdict,
+                    pii_types=post.pii_types,
+                    secret_types=post.secret_types,
+                    scan_notes=post.scan_notes,
                 )
-                await audit.security_alert(
-                    "secret_in_output",
-                    ttp_codes=["AML.T0048"],
-                    session_id=str(session_id),
-                    principal=identity.user_id,
+                if post.blocked:
+                    logger.warning(
+                        "Output blocked session=%s notes=%s", session_id, post.scan_notes
+                    )
+                    await audit.security_alert(
+                        "secret_in_output",
+                        ttp_codes=["AML.T0048"],
+                        session_id=str(session_id),
+                        principal=identity.user_id,
+                    )
+            except Exception as exc:
+                logger.exception(
+                    "Output scan failed session=%s: %s — continuing without scan",
+                    session_id, exc,
                 )
 
         # ── Step 7: persist session ────────────────────────────────────────
