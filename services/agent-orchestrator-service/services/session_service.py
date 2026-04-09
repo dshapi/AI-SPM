@@ -3,13 +3,17 @@ services/session_service.py
 ────────────────────────────
 SessionService: full pipeline with per-step lifecycle event emission.
 
-Pipeline (each step emits one event):
-  Step 1  prompt.received    — prompt accepted, basic metadata logged
-  Step 2  risk.calculated    — RiskEngine scores the prompt + tools
-  Step 3  policy.decision    — PolicyClient evaluates allow/block/escalate
-  Step 4  session.created    — record persisted + Kafka published (allowed)
-          session.blocked    — record persisted + Kafka published (blocked)
-  Step 5  session.completed  — always emitted last with duration + event count
+Pipeline steps:
+  1. prompt.received     — record prompt hash
+  2. pre-screen          — guard model content check (optional)
+  3. risk.calculated     — multi-dimensional risk scoring
+  4. policy.decision     — OPA/local policy evaluation
+  5. llm.response        — LLM execution (if allowed, optional)
+  6. output.scanned      — PII/secret scan on LLM output (optional)
+  7. persist             — write session to database
+  8. session.created/blocked — lifecycle event
+  9. audit trail         — compliance audit emission
+  10. session.completed  — final summary event
 
 The EventStore is queried for read operations; no extra DB round-trips
 for the event timeline.

@@ -48,6 +48,8 @@ TOPIC_POLICY_DECISION    = os.getenv("KAFKA_TOPIC_POLICY_DECISION",   "cpm.sessi
 TOPIC_SESSION_CREATED    = os.getenv("KAFKA_TOPIC_SESSION_CREATED",   "cpm.sessions.created")
 TOPIC_SESSION_BLOCKED    = os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   "cpm.sessions.blocked")
 TOPIC_SESSION_COMPLETED  = os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", "cpm.sessions.completed")
+TOPIC_LLM_RESPONSE       = os.getenv("KAFKA_TOPIC_LLM_RESPONSE",       "cpm.sessions.llm_response")
+TOPIC_OUTPUT_SCANNED     = os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",     "cpm.sessions.output_scanned")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -316,7 +318,7 @@ class EventPublisher:
         )
         return await self._emit(
             event_type=EventType.LLM_RESPONSE,
-            topic="agent.llm.response",
+            topic=TOPIC_LLM_RESPONSE,
             session_id=session_id,
             correlation_id=correlation_id,
             step=6,
@@ -342,7 +344,7 @@ class EventPublisher:
         )
         return await self._emit(
             event_type=EventType.OUTPUT_SCANNED,
-            topic="agent.output.scanned",
+            topic=TOPIC_OUTPUT_SCANNED,
             session_id=session_id,
             correlation_id=correlation_id,
             step=7,
@@ -361,7 +363,7 @@ class EventPublisher:
             topic=TOPIC_SESSION_COMPLETED,
             session_id=payload.session_id,
             correlation_id=correlation_id,
-            step=5,
+            step=10,
             status=payload.final_status,
             summary=(
                 f"Session completed — status: {payload.final_status}, "
