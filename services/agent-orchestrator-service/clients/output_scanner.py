@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -125,6 +125,8 @@ class OutputScanner:
 
         # Pass 2: LLM semantic scan
         llm_verdict, llm_categories = await self._llm_scan(text)
+        # Verdict priority: block (secrets) > block (LLM) > flag > allow
+        # Regex pass has already set result.verdict; LLM can only escalate, not downgrade
         if llm_categories:
             result.scan_notes.extend([f"llm:{c}" for c in llm_categories])
             if llm_verdict == "block":
@@ -136,7 +138,7 @@ class OutputScanner:
         result.llm_categories = llm_categories
         return result
 
-    async def _llm_scan(self, text: str) -> tuple:
+    async def _llm_scan(self, text: str) -> Tuple[str, List[str]]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
                 resp = await client.post(
