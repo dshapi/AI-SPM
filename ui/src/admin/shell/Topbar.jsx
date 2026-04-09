@@ -1,27 +1,53 @@
-import { PanelLeftClose, PanelLeftOpen, CalendarDays, ChevronDown, CircleHelp, Settings } from 'lucide-react'
+// src/admin/shell/Topbar.jsx
+import { PanelLeftClose, PanelLeftOpen, CalendarDays, ChevronDown, CircleHelp, Settings, Building2 } from 'lucide-react'
 import { cn } from '../../lib/utils.js'
 import { SearchCommand }     from './SearchCommand.jsx'
 import { NotificationsMenu } from './NotificationsMenu.jsx'
 import { IconButton }        from '../../components/ui/IconButton.jsx'
 import { Separator }         from '../../components/ui/Separator.jsx'
+import { Breadcrumbs }       from '../../components/navigation/Breadcrumbs.jsx'
+import { useTenant }         from '../../context/TenantContext.jsx'
 
-/**
- * Topbar — global horizontal shell bar.
- *
- * Layout (left → right):
- *   [collapse toggle] [sep] [breadcrumb flex-1] [search] [controls flex-1 justify-end] [avatar]
- *
- * All interactive controls: h-10 (40px) per design system spec.
- * Separators: h-5 (20px).
- */
+// ── Tenant selector ────────────────────────────────────────────────────────────
+function TenantSelector() {
+  const { tenant, setTenant, tenants } = useTenant()
+  const current = tenants.find(t => t.id === tenant) ?? tenants[0]
 
-// ── Breadcrumb ─────────────────────────────────────────────────────────────────
-function Breadcrumb() {
   return (
-    <div className="flex items-center gap-1.5 min-w-0">
-      <span className="text-sm text-gray-400 leading-none whitespace-nowrap">Orbyx</span>
-      <span className="text-gray-300 leading-none select-none">/</span>
-      <span className="text-sm font-semibold text-gray-700 leading-none truncate">Dashboard</span>
+    <div className="relative group/tenant">
+      <button className={cn(
+        'flex items-center gap-2 h-10 px-3 rounded-lg border border-gray-200 bg-white',
+        'text-sm font-medium text-gray-600',
+        'hover:border-gray-300 hover:bg-gray-50 transition-colors duration-150',
+        'whitespace-nowrap shrink-0',
+      )}>
+        <Building2 size={14} strokeWidth={1.75} className="text-gray-400 shrink-0" />
+        {current.label}
+        <ChevronDown size={12} strokeWidth={2} className="text-gray-400 shrink-0" />
+      </button>
+
+      {/* Dropdown */}
+      <div className={cn(
+        'absolute top-full right-0 mt-1.5 min-w-[160px] z-50',
+        'bg-white border border-gray-200 rounded-xl shadow-lg py-1',
+        'opacity-0 pointer-events-none group-hover/tenant:opacity-100 group-hover/tenant:pointer-events-auto',
+        'transition-opacity duration-150',
+      )}>
+        {tenants.map(t => (
+          <button
+            key={t.id}
+            onClick={() => setTenant(t.id)}
+            className={cn(
+              'w-full text-left px-3 py-2 text-sm transition-colors duration-100',
+              t.id === tenant
+                ? 'text-blue-600 font-semibold bg-blue-50'
+                : 'text-gray-700 hover:bg-gray-50',
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -42,7 +68,7 @@ function TimeRange() {
   )
 }
 
-// ── Topbar ────────────────────────────────────────────────────────────────────
+// ── Topbar ─────────────────────────────────────────────────────────────────────
 export function Topbar({ collapsed, onToggle }) {
   return (
     <header className="h-16 shrink-0 bg-white border-b border-gray-200 flex items-center px-4 gap-3">
@@ -60,17 +86,19 @@ export function Topbar({ collapsed, onToggle }) {
 
       <Separator orientation="vertical" />
 
-      {/* Breadcrumb — takes remaining left space */}
+      {/* Breadcrumbs — takes remaining left space */}
       <div className="flex-1 min-w-0 flex items-center">
-        <Breadcrumb />
+        <Breadcrumbs />
       </div>
 
-      {/* Right cluster — search anchored left of controls */}
+      {/* Right cluster */}
       <div className="flex items-center gap-2">
 
         <SearchCommand />
 
         <Separator orientation="vertical" />
+
+        <TenantSelector />
 
         <TimeRange />
 
