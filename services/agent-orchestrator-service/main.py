@@ -37,11 +37,12 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from clients.policy_client import PolicyClient
+from db.base import make_engine, make_session_factory, Base
 from events.publisher import EventPublisher
 from events.store import EventStore
-from models.session import SessionRepository
 from routers import sessions as sessions_router
 from services.risk_engine import RiskEngine
 
@@ -90,9 +91,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("=== %s v%s starting up ===", SERVICE_NAME, SERVICE_VERSION)
 
     # -- Database ------------------------------------------------------------
-    repo = SessionRepository(db_path=DB_PATH)
-    await repo.connect()
-    app.state.session_repo = repo
+    db_url = f"sqlite+aiosqlite:///{DB_PATH}"
+    engine: AsyncEngine = make_engine(db_url)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    session_factory: async_sessionmaker = make_session_factory(engine)
+    app.state.db_engine = engine
+    app.state.db_session_factory = session_factory
+    logger.info("Database engine initialised: %s", db_url)
 
     # -- In-memory event store -----------------------------------------------
     store = EventStore(max_events_per_session=500)
@@ -147,7 +153,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # -- Teardown ------------------------------------------------------------
     logger.info("=== %s shutting down ===", SERVICE_NAME)
     await publisher.stop()
-    await repo.close()
+    await engine.dispose()
     logger.info("=== %s stopped ===", SERVICE_NAME)
 
 
@@ -265,7 +271,7 @@ def create_app() -> FastAPI:
 
     @app.get("/ready", tags=["Observability"], summary="Readiness probe")
     async def ready(request: Request) -> dict:
-        db_ok = hasattr(request.app.state, "session_repo")
+        db_ok = hasattr(request.app.state, "db_engine") and hasattr(request.app.state, "db_session_factory")
         store: EventStore = getattr(request.app.state, "event_store", None)
         return {
             "status": "ready" if db_ok else "not_ready",
