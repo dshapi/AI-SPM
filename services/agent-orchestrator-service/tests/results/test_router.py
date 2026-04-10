@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from results.router import router as results_router
 from results.schemas import SessionResults, SessionResultsMeta
@@ -12,10 +13,19 @@ from dependencies.db import get_event_repo
 from results.router import _get_results_service
 
 
+class TraceMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        request.state.trace_id = "test-trace-id"
+        response = await call_next(request)
+        response.headers["X-Trace-ID"] = "test-trace-id"
+        return response
+
+
 def _make_app() -> FastAPI:
     app = FastAPI()
     # Use the pre-registered router from the module
     app.include_router(results_router)
+    app.add_middleware(TraceMiddleware)
     return app
 
 
@@ -65,6 +75,7 @@ async def test_get_results_200(app):
             )
 
         assert resp.status_code == 200
+        assert resp.headers.get("x-trace-id") == "test-trace-id"
         data = resp.json()
         assert data["decision"] == "allow"
         assert data["status"] == "completed"
@@ -109,6 +120,7 @@ async def test_get_results_partial_returns_200(app):
             )
 
         assert resp.status_code == 200
+        assert resp.headers.get("x-trace-id") == "test-trace-id"
         assert resp.json()["meta"]["partial"] is True
     finally:
         app.dependency_overrides.clear()
@@ -145,7 +157,11 @@ async def test_get_results_404_no_events(app):
             )
 
         assert resp.status_code == 404
+        assert resp.headers.get("x-trace-id") == "test-trace-id"
         data = resp.json()
         assert "detail" in data
+        detail = data["detail"]
+        assert detail.get("code") == "SESSION_NOT_FOUND"
+        assert "no events" in detail.get("message", "").lower() or "not exist" in detail.get("message", "").lower()
     finally:
         app.dependency_overrides.clear()

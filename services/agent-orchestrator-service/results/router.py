@@ -10,6 +10,8 @@ Caching: ResultsService is read from app.state (shared across requests)
 404:     returned when no events exist for the session_id
 """
 
+from __future__ import annotations
+
 import logging
 from uuid import UUID
 
@@ -21,7 +23,7 @@ from dependencies.rbac import require_session_read
 from models.event import EventRepository
 from results.schemas import SessionResults
 from results.service import ResultsService
-from schemas.session import ErrorDetail, ErrorResponse
+from schemas.session import ErrorDetail, ErrorResponse  # ErrorResponse used in responses={} dict
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +59,7 @@ async def get_session_results(
     identity: IdentityContext = Depends(require_session_read),
     event_repo: EventRepository = Depends(get_event_repo),
 ) -> SessionResults:
-    trace_id = getattr(request.state, "trace_id", "no-trace")
+    trace_id = request.state.trace_id
     response.headers["X-Trace-ID"] = trace_id
 
     logger.info(
