@@ -8,7 +8,7 @@ from typing import Dict
 
 from sqlalchemy import (
     BigInteger, Column, DateTime, Enum, Float,
-    Integer, Index, Text, UniqueConstraint, func,
+    Integer, Index, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase
@@ -124,3 +124,8 @@ class AuditExport(Base):
     actor      = Column(Text)
     timestamp  = Column(DateTime(timezone=True), nullable=False)
     payload    = Column(JSONB, nullable=False)
+    session_id = Column(String(64), nullable=True)
+
+    __table_args__ = (
+        Index("idx_audit_export_session_id", "session_id"),
+    )
