@@ -93,8 +93,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # -- Database ------------------------------------------------------------
     db_url = f"sqlite+aiosqlite:///{DB_PATH}"
     engine: AsyncEngine = make_engine(db_url)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+
+    # Dev path: create tables automatically via create_all.
+    # Production path: set DB_AUTO_CREATE_TABLES=false and run
+    # `alembic upgrade head` before deploying.
+    if os.getenv("DB_AUTO_CREATE_TABLES", "true").lower() == "true":
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("create_all complete (dev mode)")
+
     session_factory: async_sessionmaker = make_session_factory(engine)
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory

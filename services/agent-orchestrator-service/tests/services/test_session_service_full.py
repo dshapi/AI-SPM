@@ -311,3 +311,51 @@ async def test_output_scan_exception_does_not_crash_session(publisher, store, id
     result = await svc.create_session(request=req, identity=identity, trace_id="t9")
     assert result.session_id is not None
     # Pipeline should complete even though post_scan_async failed
+
+
+@pytest.mark.asyncio
+async def test_events_persisted_to_event_repo(publisher, store, identity):
+    """EventRepository.bulk_insert is called once per session creation."""
+    mock_repo = AsyncMock()
+    mock_repo.insert.return_value = None
+    mock_event_repo = AsyncMock()
+
+    svc = SessionService(
+        risk_engine=RiskEngine(),
+        policy_client=PolicyClient(),
+        event_publisher=publisher,
+        session_repo=mock_repo,
+        event_store=store,
+        llm_client=None,
+        prompt_processor=None,
+        event_repo=mock_event_repo,
+    )
+
+    from schemas.session import CreateSessionRequest
+    req = CreateSessionRequest(agent_id="agent-1", prompt="hello world")
+    await svc.create_session(request=req, identity=identity, trace_id="t-ev")
+
+    # bulk_insert must have been called with at least the prompt.received event
+    mock_event_repo.bulk_insert.assert_called_once()
+    call_args = mock_event_repo.bulk_insert.call_args[0][0]
+    assert len(call_args) >= 1
+    event_types = {e.event_type for e in call_args}
+    assert "prompt.received" in event_types
+
+
+@pytest.mark.asyncio
+async def test_session_service_works_without_event_repo(publisher, store, identity):
+    """event_repo=None is safe — no AttributeError."""
+    mock_repo = AsyncMock()
+    svc = SessionService(
+        risk_engine=RiskEngine(),
+        policy_client=PolicyClient(),
+        event_publisher=publisher,
+        session_repo=mock_repo,
+        event_store=store,
+        event_repo=None,
+    )
+    from schemas.session import CreateSessionRequest
+    req = CreateSessionRequest(agent_id="agent-1", prompt="hello")
+    result = await svc.create_session(request=req, identity=identity, trace_id="t-no-ev")
+    assert result.session_id is not None

@@ -24,13 +24,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from dependencies.auth import IdentityContext
-from dependencies.db import get_session_repo
+from dependencies.db import get_session_repo, get_event_repo
 from dependencies.rbac import (
     effective_permissions,
     require_agent_invoke,
     require_session_read,
 )
 from events.store import EventStore
+from models.event import EventRepository
 from models.session import SessionRepository
 from schemas.events import SessionEventListResponse, SessionTimelineEntry
 from schemas.session import (
@@ -54,6 +55,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 def get_session_service(
     request: Request,
     repo: SessionRepository = Depends(get_session_repo),
+    event_repo: EventRepository = Depends(get_event_repo),
 ) -> SessionService:
     return SessionService(
         risk_engine=request.app.state.risk_engine,
@@ -63,6 +65,7 @@ def get_session_service(
         event_store=request.app.state.event_store,
         llm_client=getattr(request.app.state, "llm_client", None),
         prompt_processor=getattr(request.app.state, "prompt_processor", None),
+        event_repo=event_repo,
     )
 
 

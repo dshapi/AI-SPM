@@ -32,6 +32,7 @@ from clients.policy_client import PolicyClient, PolicyResult
 from dependencies.auth import IdentityContext
 from events.publisher import EventPublisher
 from events.store import EventStore
+from models.event import EventRecord, EventRepository
 from models.session import SessionRecord, SessionRepository
 from schemas.events import (
     PolicyDecisionPayload,
@@ -89,14 +90,16 @@ class SessionService:
         event_store: EventStore,
         llm_client=None,        # LLMClient | MockLLMClient | None
         prompt_processor=None,  # PromptProcessor | None
+        event_repo=None,        # EventRepository | None
     ) -> None:
-        self._risk      = risk_engine
-        self._policy    = policy_client
-        self._publisher = event_publisher
-        self._repo      = session_repo
-        self._store     = event_store
-        self._llm       = llm_client
-        self._processor = prompt_processor
+        self._risk       = risk_engine
+        self._policy     = policy_client
+        self._publisher  = event_publisher
+        self._repo       = session_repo
+        self._store      = event_store
+        self._llm        = llm_client
+        self._processor  = prompt_processor
+        self._event_repo = event_repo
 
     # ─────────────────────────────────────────────────────────────────────
     # Create session — full 10-step pipeline
@@ -282,6 +285,31 @@ class SessionService:
             updated_at=now,
         )
         await self._repo.insert(record)
+
+        if self._event_repo:
+            try:
+                import json as _json
+                current_events = await self._store.get_events(session_id)
+                # EventType is `str, Enum` so .value gives the plain string.
+                # e.payload is Dict[str, Any]; json.dumps serialises it to Text.
+                event_records = [
+                    EventRecord(
+                        session_id=str(session_id),
+                        event_type=e.event_type.value,
+                        payload=_json.dumps(e.payload),
+                        timestamp=e.timestamp,
+                    )
+                    for e in current_events
+                ]
+                await self._event_repo.bulk_insert(event_records)
+                logger.debug(
+                    "Persisted %d events for session=%s", len(event_records), session_id
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Event persistence failed session=%s: %s — continuing",
+                    session_id, exc,
+                )
 
         # ── Step 8: session.created / session.blocked ──────────────────────
         if policy.is_allowed:
