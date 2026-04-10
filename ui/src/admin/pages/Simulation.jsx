@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import {
   Play, Save, FolderOpen, FlaskConical, Shield,
   ChevronDown, ChevronRight, RotateCcw, AlertTriangle,
@@ -14,6 +14,7 @@ import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
+import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -941,13 +942,19 @@ function DecisionTrace({ trace }) {
 
 const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations']
 
-function SimulationResult({ result, attackType, config, running, apiError, sessionId }) {
+function SimulationResult({ result, attackType, config, running, apiError, sessionId, connectionStatus }) {
   const [activeTab, setActiveTab] = useState('Summary')
   const [copied, setCopied] = useState(false)
 
   useEffect(() => { setActiveTab('Summary') }, [result])
 
-  if (running) {
+  // Show spinner while the HTTP round-trip is in progress OR while we're
+  // waiting for the first WS event to arrive (no result yet + socket pending)
+  const isConnecting = connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
+  const showSpinner  = running || (isConnecting && !result)
+
+  if (showSpinner) {
+    const streamMsg = !running && isConnecting ? 'Opening live stream…' : 'Simulating attack…'
     return (
       <div className="flex flex-col h-full">
         <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
@@ -959,7 +966,7 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
             <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
           </div>
           <div>
-            <p className="text-[13px] font-semibold text-gray-700">Simulating attack…</p>
+            <p className="text-[13px] font-semibold text-gray-700">{streamMsg}</p>
             <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
           </div>
           <div className="flex flex-col items-center gap-1.5 text-[11px] text-gray-400">
@@ -1013,16 +1020,44 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
             <span className={cn('w-1.5 h-1.5 rounded-full', vcfg.dot)} />
             {vcfg.label}
           </span>
-          {/* Data-source indicator: green "Live" when real API data, amber "Simulated" on fallback */}
-          {sessionId && !apiError && (
+          {/* Data-source indicator — reflects WebSocket connection status */}
+          {sessionId && !apiError && connectionStatus === 'connected' && (
             <span
-              title={`Session: ${sessionId}`}
+              title={`Live stream · session: ${sessionId}`}
               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[9.5px] font-semibold text-emerald-700 shrink-0"
             >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
               Live
             </span>
           )}
+          {sessionId && !apiError && (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') && (
+            <span
+              title="Opening WebSocket stream…"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-[9.5px] font-semibold text-amber-700 shrink-0"
+            >
+              <RefreshCw size={8} className="animate-spin" strokeWidth={2.5} />
+              {connectionStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
+            </span>
+          )}
+          {sessionId && !apiError && connectionStatus === 'closed' && (
+            <span
+              title={`Stream closed · session: ${sessionId}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-[9.5px] font-semibold text-gray-500 shrink-0"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
+              Stream ended
+            </span>
+          )}
+          {sessionId && !apiError && connectionStatus === 'error' && (
+            <span
+              title="WebSocket error — data may be incomplete"
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-[9.5px] font-semibold text-red-600 shrink-0 cursor-help"
+            >
+              <AlertCircle size={9} strokeWidth={2.5} />
+              Stream error
+            </span>
+          )}
+          {/* Fallback to mock data when live API is unavailable */}
           {apiError && (
             <span
               title={`API error: ${apiError}`}
@@ -1454,13 +1489,60 @@ export default function Simulation() {
   const [resultA,     setResultA]    = useState(null)   // before
   const [resultB,     setResultB]    = useState(null)   // after
 
+  // ── WebSocket live streaming ────────────────────────────────────────────────
+  const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
+
+  /**
+   * Re-derive the full result model whenever the WS event buffer grows.
+   *
+   * We build a synthetic sessionData from the accumulated events so we can
+   * reuse the existing transformSessionEvents() logic without modification.
+   * Only fires when we have a live session (not the mock-fallback path).
+   */
+  useEffect(() => {
+    if (!sessionId || apiError || liveEvents.length === 0) return
+
+    const riskEvt   = liveEvents.find(e => e.event_type === 'risk.calculated')
+    const policyEvt = liveEvents.find(e => e.event_type === 'policy.decision')
+
+    const synSession = {
+      session_id: sessionId,
+      risk: riskEvt ? {
+        score:   riskEvt.payload?.risk_score ?? 0,
+        tier:    riskEvt.payload?.risk_tier  ?? 'low',
+        signals: riskEvt.payload?.signals    ?? [],
+      } : { score: 0, tier: 'low', signals: [] },
+      policy: policyEvt ? {
+        decision:       policyEvt.payload?.decision       ?? 'allow',
+        reason:         policyEvt.payload?.reason         ?? '',
+        policy_version: policyEvt.payload?.policy_version ?? '',
+      } : { decision: 'allow', reason: '', policy_version: '' },
+    }
+
+    const synEventsData = {
+      events: liveEvents.map((e, i) => ({
+        step:       i + 1,
+        event_type: e.event_type,
+        status:     'ok',
+        summary:    null,
+        timestamp:  e.timestamp,
+        payload:    e.payload,
+      })),
+    }
+
+    setResult(transformSessionEvents(synSession, synEventsData))
+  }, [liveEvents, sessionId, apiError])
+
+  // ── Config change handler ───────────────────────────────────────────────────
   const handleChange = (key, val) => setConfig(c => ({ ...c, [key]: val }))
 
-  const handleRun = async () => {
+  // ── Run simulation ──────────────────────────────────────────────────────────
+  const handleRun = useCallback(async () => {
     setRunning(true)
     setResult(null)
     setApiError(null)
     setSessionId(null)
+    disconnectWs()   // tear down any prior WS connection
 
     try {
       // ── Step 1: Submit prompt to agent-orchestrator ───────────────────────
@@ -1476,22 +1558,32 @@ export default function Simulation() {
         },
       })
 
-      // ── Step 2: Fetch the lifecycle event log ─────────────────────────────
-      const eventsData = await fetchSessionEvents(String(sessionData.session_id))
+      const sid = String(sessionData.session_id)
+      setSessionId(sid)
 
-      // ── Step 3: Transform to the UI result model ──────────────────────────
-      const r = transformSessionEvents(sessionData, eventsData)
-
-      setSessionId(String(sessionData.session_id))
-      setResult(r)
-      if (compareMode) {
-        if (!resultA) setResultA(r)
-        else          setResultB(r)
+      // ── Step 2: REST hydration — get any events already persisted ─────────
+      // This handles synchronous pipelines that complete before WS connects.
+      try {
+        const eventsData = await fetchSessionEvents(sid)
+        const r = transformSessionEvents(sessionData, eventsData)
+        setResult(r)
+        if (compareMode) {
+          if (!resultA) setResultA(r)
+          else          setResultB(r)
+        }
+      } catch (evtErr) {
+        // Events endpoint unavailable — WS will populate result as events arrive
+        console.warn('[SimLab] Events fetch failed (WS will hydrate):', evtErr.message)
       }
+
+      // ── Step 3: Open WebSocket for real-time incremental updates ──────────
+      // The live-update useEffect above will re-derive result on each WS event.
+      connectWs(sid)
+
     } catch (err) {
-      // Graceful degradation — live call failed, fall back to deterministic mock
+      // POST /sessions failed — graceful degradation to deterministic mock
       console.warn('[SimLab] Live API unavailable — showing simulated results:', err.message)
-      const r = MOCK_RESULTS[config.attackType] ?? MOCK_RESULTS.custom
+      const r = MOCK_RESULTS[config.attackType] ?? MOCK_RESULTS.exfiltration
       setApiError(err.message)
       setResult(r)
       if (compareMode) {
@@ -1501,9 +1593,11 @@ export default function Simulation() {
     } finally {
       setRunning(false)
     }
-  }
+  }, [config, compareMode, resultA, connectWs, disconnectWs])
 
+  // ── Reset ───────────────────────────────────────────────────────────────────
   const handleReset = () => {
+    disconnectWs()
     setResult(null)
     setResultA(null)
     setResultB(null)
@@ -1594,10 +1688,10 @@ export default function Simulation() {
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
-              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} />
+              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
             </>
           ) : (
-            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} />
+            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
           )}
         </div>
 
@@ -1612,7 +1706,7 @@ export default function Simulation() {
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />
             </div>
-            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} />
+            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
           </div>
         )}
       </div>
