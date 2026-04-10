@@ -289,6 +289,27 @@ async def get_session_events(
         )
 
     events = await service.get_events(str(session_id))
+
+    # Backfill user identity into prompt.received events that predate the
+    # user_email / user_name payload fields (or were created without them).
+    ctx = record.context or {}
+    ctx_email = ctx.get("email")
+    ctx_name  = ctx.get("name") or ctx.get("user_id")
+    if ctx_email or ctx_name:
+        import copy
+        patched = []
+        for ev in events:
+            if ev.event_type == "prompt.received":
+                payload = ev.payload or {}
+                if not payload.get("user_email") and not payload.get("user_name"):
+                    ev = copy.copy(ev)
+                    payload = dict(payload)
+                    if ctx_email: payload["user_email"] = ctx_email
+                    if ctx_name:  payload["user_name"]  = ctx_name
+                    ev.payload = payload
+            patched.append(ev)
+        events = patched
+
     return SessionEventListResponse(
         session_id=session_id,
         correlation_id=record.trace_id,

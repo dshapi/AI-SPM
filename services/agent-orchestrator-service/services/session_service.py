@@ -127,6 +127,8 @@ class SessionService:
                 session_id=session_id,
                 agent_id=request.agent_id,
                 user_id=identity.user_id,
+                user_email=identity.email or request.context.get("email"),
+                user_name=request.context.get("name"),
                 tenant_id=tenant_id,
                 prompt_hash=prompt_hash,
                 prompt_len=len(request.prompt),

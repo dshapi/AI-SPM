@@ -98,12 +98,14 @@ class PromptReceivedPayload(BaseModel):
     session_id:   UUID
     agent_id:     str
     user_id:      str
-    tenant_id:    Optional[str]
-    prompt_hash:  str               # SHA-256
-    prompt_len:   int               # Character count
+    user_email:   Optional[str]     = None  # Extracted from JWT email claim
+    user_name:    Optional[str]     = None  # Extracted from JWT name claim
+    tenant_id:    Optional[str]     = None
+    prompt_hash:  str               = ""    # SHA-256
+    prompt_len:   int               = 0     # Character count
     prompt:       Optional[str]     = None  # Raw prompt text (stored for dev/demo)
-    tools:        List[str]
-    context_keys: List[str]         # Keys present in context (not values)
+    tools:        List[str]         = Field(default_factory=list)
+    context_keys: List[str]         = Field(default_factory=list)  # Keys present in context (not values)
     received_at:  datetime          = Field(default_factory=_utcnow)
 
 

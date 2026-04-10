@@ -173,6 +173,11 @@ function _adaptEvent(raw, sessionId) {
   // Neither shape has agent_id — do not attempt raw.agent_id.
   const eventType = raw.event_type ?? raw.type
   const payload   = raw.payload ?? {}
+
+  // User identity — present on prompt.received events (backfilled for older ones too)
+  const userEmail = payload.user_email ?? null
+  const userName  = payload.user_name  ?? payload.user_id ?? null
+
   return {
     id:          ++_uid,
     type:        _eventType(eventType, payload),
@@ -181,6 +186,8 @@ function _adaptEvent(raw, sessionId) {
     title:       _eventTitle(eventType),
     description: _eventDescription(raw),
     tool:        payload.tool_name ?? null,
+    userEmail,
+    userName,
     ts:          _formatTs(raw.timestamp),
   }
 }
@@ -346,10 +353,12 @@ function EventRow({ event, isNew }) {
         <div className="flex items-center gap-2 mt-0.5">
           <span className="text-[10px] text-gray-400 font-mono truncate">{event.agent}</span>
           {event.tool && (
-            <>
-              <span className="text-gray-300 text-[10px]">·</span>
-              <span className="text-[10px] text-blue-500/80 font-mono truncate">{event.tool}</span>
-            </>
+            <span className="text-[10px] text-blue-500/80 font-mono truncate">{event.tool}</span>
+          )}
+          {(event.userName || event.userEmail) && (
+            <span className="text-[10px] text-blue-500/80 font-mono truncate">
+              User details : {[event.userName, event.userEmail].filter(Boolean).join(', ')}
+            </span>
           )}
         </div>
       </div>
