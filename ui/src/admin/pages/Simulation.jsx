@@ -15,6 +15,9 @@ import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
 import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
+import {
+  transformSessionEvents as transformWsEvents,
+} from '../../lib/sessionResults.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -345,6 +348,73 @@ function buildRecommendations(verdict, anomalyScore, signals, riskTier) {
       action: null,
     },
   ]
+}
+
+/**
+ * _adaptSessionResults(SessionResults) → MOCK_RESULTS-compatible object
+ *
+ * Maps the canonical SessionResults shape produced by transformWsEvents()
+ * to the legacy shape consumed by SimulationResult, so the UI renders
+ * correctly from both the REST hydration and WebSocket live-update paths.
+ *
+ * @param {import('../../lib/sessionResults.js').SessionResults} sr
+ */
+function _adaptSessionResults(sr) {
+  // Recommendation icons — mapped from priority/category
+  const _recIcon = r => {
+    if (r.category === 'security')    return Shield
+    if (r.category === 'compliance') return Lock
+    if (r.category === 'policy')     return TrendingUp
+    if (r.category === 'operations') return Wrench
+    return Info
+  }
+
+  return {
+    verdict:           sr.summary.verdict === 'pending' ? 'allowed' : sr.summary.verdict,
+    riskScore:         sr.summary.risk_score,
+    riskLevel:         sr.summary.risk_level,
+    executionMs:       sr.summary.execution_ms,
+    policiesTriggered: sr.summary.policies_triggered,
+
+    decisionTrace: sr.decision_trace.map(s => ({
+      step:   s.step,
+      label:  s.title,
+      status: s.status,
+      detail: s.detail,
+      ts:     s.ts ?? s.timestamp,
+    })),
+
+    output: sr.output.status === 'available' ? sr.output.final_text : null,
+    blockedMessage: sr.summary.verdict === 'blocked'
+      ? `Your request was terminated by the policy engine. ${sr.summary.verdict_reason} This event has been logged for security review.`
+      : null,
+
+    policyImpact: sr.policy_impact.rules_triggered.map(r => ({
+      policy:   r.rule_name,
+      action:   r.action,
+      trigger:  r.trigger,
+      severity: r.severity,
+    })),
+
+    risk: {
+      injectionDetected: sr.risk_analysis.anomaly_flags.injection_detected,
+      anomalyScore:      sr.risk_analysis.score,
+      techniques: [
+        ...sr.risk_analysis.signals,
+        ...sr.risk_analysis.behavioral_signals,
+      ]
+        .filter((s, i, a) => s && s !== 'none' && a.indexOf(s) === i)
+        .map(s => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())),
+      explanation: sr.risk_analysis.explanation,
+    },
+
+    recommendations: sr.recommendations.map(r => ({
+      icon:   _recIcon(r),
+      label:  r.title,
+      desc:   r.detail,
+      action: r.action ?? null,
+    })),
+  }
 }
 
 /**
@@ -1495,42 +1565,17 @@ export default function Simulation() {
   /**
    * Re-derive the full result model whenever the WS event buffer grows.
    *
-   * We build a synthetic sessionData from the accumulated events so we can
-   * reuse the existing transformSessionEvents() logic without modification.
+   * Calls the canonical transformWsEvents() which accepts the raw WsEvent[]
+   * directly and produces a structured SessionResults.  A thin adapter maps
+   * SessionResults → the legacy UI shape used by SimulationResult.
+   *
    * Only fires when we have a live session (not the mock-fallback path).
    */
   useEffect(() => {
     if (!sessionId || apiError || liveEvents.length === 0) return
 
-    const riskEvt   = liveEvents.find(e => e.event_type === 'risk.calculated')
-    const policyEvt = liveEvents.find(e => e.event_type === 'policy.decision')
-
-    const synSession = {
-      session_id: sessionId,
-      risk: riskEvt ? {
-        score:   riskEvt.payload?.risk_score ?? 0,
-        tier:    riskEvt.payload?.risk_tier  ?? 'low',
-        signals: riskEvt.payload?.signals    ?? [],
-      } : { score: 0, tier: 'low', signals: [] },
-      policy: policyEvt ? {
-        decision:       policyEvt.payload?.decision       ?? 'allow',
-        reason:         policyEvt.payload?.reason         ?? '',
-        policy_version: policyEvt.payload?.policy_version ?? '',
-      } : { decision: 'allow', reason: '', policy_version: '' },
-    }
-
-    const synEventsData = {
-      events: liveEvents.map((e, i) => ({
-        step:       i + 1,
-        event_type: e.event_type,
-        status:     'ok',
-        summary:    null,
-        timestamp:  e.timestamp,
-        payload:    e.payload,
-      })),
-    }
-
-    setResult(transformSessionEvents(synSession, synEventsData))
+    const sr = transformWsEvents(liveEvents)
+    setResult(_adaptSessionResults(sr))
   }, [liveEvents, sessionId, apiError])
 
   // ── Config change handler ───────────────────────────────────────────────────
