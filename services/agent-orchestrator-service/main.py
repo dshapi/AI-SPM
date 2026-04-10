@@ -43,6 +43,7 @@ from clients.policy_client import PolicyClient
 from db.base import make_engine, make_session_factory, Base
 from events.publisher import EventPublisher
 from events.store import EventStore
+from results.service import ResultsService
 from routers import sessions as sessions_router
 from services.risk_engine import RiskEngine
 
@@ -119,6 +120,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # -- Stateless services (constructed once, reused across requests) -------
     app.state.risk_engine   = RiskEngine()
     app.state.policy_client = PolicyClient()
+    app.state.results_service = ResultsService()
+    logger.info("ResultsService initialised")
 
     # ── LLM Client (optional — disabled gracefully if key not set) -────────
     llm_api_key = os.getenv("LLM_API_KEY", "")
@@ -270,6 +273,8 @@ def create_app() -> FastAPI:
 
     # ── Routers ─────────────────────────────────────────────────────────────
     app.include_router(sessions_router.router)
+    from results.router import router as results_router
+    app.include_router(results_router)
 
     # ── Health endpoints ────────────────────────────────────────────────────
     @app.get("/health", tags=["Observability"], summary="Liveness probe")
