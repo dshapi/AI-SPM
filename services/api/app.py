@@ -40,6 +40,12 @@ from platform_shared.kafka_utils import build_producer, safe_send
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
 
+# ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
+from ws.connection_manager import ConnectionManager
+from ws.session_ws import init_ws_layer, router as ws_router
+from consumers.session_event_consumer import SessionEventConsumer
+from consumers.topic_resolver import resolve_topics, configured_tenants
+
 log = logging.getLogger("api")
 settings = get_settings()
 _start_time = time.time()
@@ -269,9 +275,40 @@ async def _check_model_gate(model_id: str, tenant_id: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("API service starting...")
-    get_producer()  # warm up producer
+    get_producer()  # warm up Kafka producer
+
+    # ── WebSocket / Kafka bridge startup ──────────────────────────────────────
+    tenants = configured_tenants()
+    ws_topics = resolve_topics(tenants)
+
+    ws_manager = ConnectionManager()
+    ws_consumer = SessionEventConsumer(
+        topics=ws_topics,
+        # Unique group ID per instance prevents competing consumers on same host;
+        # set KAFKA_WS_GROUP_ID env var to override for multi-replica deployments.
+        group_id=os.getenv(
+            "KAFKA_WS_GROUP_ID",
+            f"api-ws-bridge-{os.getenv('HOSTNAME', 'local')}",
+        ),
+    )
+    ws_consumer.start()
+    init_ws_layer(ws_manager, ws_consumer)
+
+    # Expose on app.state for health/debug endpoints
+    app.state.ws_manager = ws_manager
+    app.state.ws_consumer = ws_consumer
+
+    log.info(
+        "ws_bridge_started tenants=%s topics=%s",
+        tenants,
+        ws_topics,
+    )
+
     yield
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
     log.info("API service shutting down...")
+    ws_consumer.stop()
     if _producer:
         _producer.close()
 
@@ -289,6 +326,9 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+# WebSocket endpoint: /ws/sessions/{session_id}
+app.include_router(ws_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -358,15 +398,20 @@ async def _call_guard_model(prompt: str) -> tuple[str, float, list[str]]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.get("/health", response_model=HealthStatus)
-async def health():
+async def health(request: Request):
     checks = {
         "kafka": True,
         "guard_model": settings.guard_model_enabled,
+        "ws_consumer": False,
     }
     try:
         get_producer()
     except Exception:
         checks["kafka"] = False
+
+    ws_consumer: SessionEventConsumer | None = getattr(request.app.state, "ws_consumer", None)
+    if ws_consumer is not None:
+        checks["ws_consumer"] = ws_consumer.is_running
 
     return HealthStatus(
         status="ok" if all(checks.values()) else "degraded",
