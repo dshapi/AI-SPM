@@ -14,7 +14,7 @@ from platform_shared.topics import topics_for_tenant
 from platform_shared.trust import assess_contexts
 from platform_shared.risk import compute_content_hash, _jaccard_similarity
 from platform_shared.audit import emit_audit, emit_security_alert
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("retrieval-gateway")
 
@@ -151,12 +151,17 @@ class RetrievalGateway(ConsumerService):
             guard_categories=event.guard_categories,
         )
 
-        safe_send(self.producer, topics.retrieved, retrieved.model_dump())
+        send_event(
+            self.producer, topics.retrieved, retrieved,
+            event_type="context.retrieved",
+            source_service="retrieval-gateway",
+        )
 
         emit_audit(
             event.tenant_id, self.service_name, "context_retrieved",
             event_id=event.event_id, principal=event.user_id,
             session_id=event.session_id,
+            correlation_id=event.event_id,
             details={
                 "items_retrieved": len(assessed_items),
                 "tampered": len(tampered),

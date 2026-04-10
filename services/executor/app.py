@@ -17,7 +17,7 @@ from platform_shared.models import ToolRequest, ToolResult, ApprovalRequest
 from platform_shared.topics import topics_for_tenant
 from platform_shared.opa_client import get_opa_client
 from platform_shared.audit import emit_audit, emit_security_alert
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("executor")
 
@@ -193,16 +193,22 @@ class Executor(ConsumerService):
             event_id=req.event_id,
             tenant_id=req.tenant_id,
             user_id=req.user_id,
+            session_id=req.session_id,    # propagated from ToolRequest
             tool_name=req.tool_name,
             tool_args=req.tool_args,
             intent=req.intent,
             posture_score=req.posture_score,
         )
-        safe_send(self.producer, topics.approval_request, approval.model_dump())
+        send_event(
+            self.producer, topics.approval_request, approval,
+            event_type="tool.approval_requested",
+            source_service="executor",
+        )
         emit_audit(
             req.tenant_id, self.service_name, "tool_approval_requested",
             event_id=req.event_id, principal=req.user_id,
             session_id=req.session_id,
+            correlation_id=req.event_id,
             details={"tool_name": req.tool_name, "approval_id": approval_id, "intent": req.intent},
         )
         # For demo: auto-approve. In production, wait for approval_result topic.
@@ -229,11 +235,16 @@ class Executor(ConsumerService):
                 tool_name=req.tool_name, status="blocked",
                 error=opa_result.get("reason", "tool denied by policy"),
             )
-            safe_send(self.producer, topics.tool_result, tool.model_dump())
+            send_event(
+                self.producer, topics.tool_result, tool,
+                event_type="tool.result",
+                source_service="executor",
+            )
             emit_audit(
                 req.tenant_id, self.service_name, "tool_blocked",
                 event_id=req.event_id, principal=req.user_id,
                 session_id=req.session_id, severity="warning",
+                correlation_id=req.event_id,
                 details={"tool_name": req.tool_name, "reason": opa_result.get("reason"), "intent": req.intent},
             )
             return
@@ -276,11 +287,16 @@ class Executor(ConsumerService):
                 execution_ms=int((time.time() - t0) * 1000),
             )
 
-        safe_send(self.producer, topics.tool_result, tool.model_dump())
+        send_event(
+            self.producer, topics.tool_result, tool,
+            event_type="tool.result",
+            source_service="executor",
+        )
         emit_audit(
             req.tenant_id, self.service_name, "tool_executed",
             event_id=req.event_id, principal=req.user_id,
             session_id=req.session_id,
+            correlation_id=req.event_id,
             details={
                 "tool_name": req.tool_name,
                 "status": tool.status,

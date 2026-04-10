@@ -18,7 +18,7 @@ from platform_shared.base_service import ConsumerService
 from platform_shared.models import ToolResult, ToolObservation
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("tool-parser")
 
@@ -207,12 +207,17 @@ class ToolParser(ConsumerService):
             schema_violations=schema_violations,
         )
 
-        safe_send(self.producer, topics.tool_observation, obs.model_dump())
+        send_event(
+            self.producer, topics.tool_observation, obs,
+            event_type="tool.observation",
+            source_service="tool-parser",
+        )
 
         emit_audit(
             result.tenant_id, self.service_name, "tool_output_parsed",
             event_id=result.event_id, principal=result.user_id,
             session_id=result.session_id,
+            correlation_id=result.event_id,
             details={
                 "tool_name": result.tool_name,
                 "sanitization_notes": sanitization_notes,

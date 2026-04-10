@@ -13,7 +13,7 @@ from platform_shared.models import (
 from platform_shared.topics import topics_for_tenant
 from platform_shared.opa_client import get_opa_client
 from platform_shared.audit import emit_audit
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("agent")
 settings = get_settings()
@@ -169,16 +169,29 @@ class Agent(ConsumerService):
             mem, tool, final = self._plan(decision)
 
             if mem:
-                safe_send(self.producer, topics.memory_request, mem.model_dump())
+                send_event(
+                    self.producer, topics.memory_request, mem,
+                    event_type="memory.request",
+                    source_service="agent",
+                )
             if tool:
-                safe_send(self.producer, topics.tool_request, tool.model_dump())
+                send_event(
+                    self.producer, topics.tool_request, tool,
+                    event_type="tool.request",
+                    source_service="agent",
+                )
             if final:
-                safe_send(self.producer, topics.final_response, final.model_dump())
+                send_event(
+                    self.producer, topics.final_response, final,
+                    event_type="final.response",
+                    source_service="agent",
+                )
 
             emit_audit(
                 decision.tenant_id, self.service_name, "agent_planned",
                 event_id=decision.event_id, principal=decision.user_id,
                 session_id=decision.session_id,
+                correlation_id=decision.event_id,
                 details={
                     "tool": tool.tool_name if tool else None,
                     "intent": tool.intent if tool else None,
@@ -209,11 +222,16 @@ class Agent(ConsumerService):
                     "schema_violations": obs.schema_violations,
                 },
             )
-            safe_send(self.producer, topics.final_response, final.model_dump())
+            send_event(
+                self.producer, topics.final_response, final,
+                event_type="final.response",
+                source_service="agent",
+            )
             emit_audit(
                 obs.tenant_id, self.service_name, "agent_finalized",
                 event_id=obs.event_id, principal=obs.user_id,
                 session_id=obs.session_id,
+                correlation_id=obs.event_id,
                 details={"tool_name": obs.tool_name, "notes": notes},
             )
             return

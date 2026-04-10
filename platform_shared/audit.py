@@ -32,6 +32,7 @@ def emit_audit(
     event_id: Optional[str] = None,
     principal: Optional[str] = None,
     session_id: Optional[str] = None,
+    correlation_id: Optional[str] = None,
     details: Optional[dict] = None,
     severity: str = "info",
     ttp_codes: Optional[List[str]] = None,
@@ -39,6 +40,9 @@ def emit_audit(
     """
     Emit a structured audit event. Always non-blocking.
     Routes to Kafka audit topic; falls back to stdout on failure.
+
+    correlation_id — pass the originating event_id so audit events can be
+    joined back to pipeline events by session consumers.
     """
     event = AuditEvent(
         ts=int(time.time() * 1000),
@@ -48,6 +52,7 @@ def emit_audit(
         event_id=event_id,
         principal=principal,
         session_id=session_id,
+        correlation_id=correlation_id or event_id,
         details=details or {},
         severity=severity,
         ttp_codes=ttp_codes or [],

@@ -8,7 +8,7 @@ from platform_shared.models import PostureEnrichedEvent, DecisionEvent
 from platform_shared.topics import topics_for_tenant
 from platform_shared.opa_client import get_opa_client
 from platform_shared.audit import emit_audit
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("policy-decider")
 
@@ -54,12 +54,17 @@ class PolicyDecider(ConsumerService):
             metadata=event.metadata,
         )
 
-        safe_send(self.producer, topics.decision, decision.model_dump())
+        send_event(
+            self.producer, topics.decision, decision,
+            event_type="policy.decision",
+            source_service="policy-decider",
+        )
 
         emit_audit(
             event.tenant_id, self.service_name, "policy_decision",
             event_id=event.event_id, principal=event.user_id,
             session_id=event.session_id,
+            correlation_id=event.event_id,
             severity="warning" if decision.decision == "block" else "info",
             details={
                 "decision": decision.decision,

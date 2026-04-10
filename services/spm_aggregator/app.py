@@ -125,26 +125,59 @@ def get_rolling_avg(conn, model_id: Optional[str], tenant_id: str,
 
 
 def mirror_audit_event(conn, event: Dict) -> None:
-    """Mirror CPM audit event to audit_export (append-only)."""
+    """
+    Mirror CPM audit event to audit_export (append-only).
+
+    session_id is extracted from the event if present so it can be
+    stored as a first-class column for efficient per-session queries.
+    The DB schema should include: session_id VARCHAR(64) NULL.
+    If the column does not yet exist, the INSERT gracefully falls back
+    to the payload-only variant.
+    """
     event_id = event.get("event_id") or derive_event_id(
         event.get("tenant_id", ""), event.get("event_type", ""), str(event.get("ts", ""))
     )
     ts = datetime.fromtimestamp(event.get("ts", time.time() * 1000) / 1000, tz=timezone.utc)
+
+    # Extract session_id — present on all pipeline events, optional on pure audit
+    session_id: Optional[str] = event.get("session_id") or event.get("details", {}).get("session_id")
+
     sql = """
-    INSERT INTO audit_export (event_id, tenant_id, event_type, actor, timestamp, payload)
-    VALUES (%s, %s, %s, %s, %s, %s)
+    INSERT INTO audit_export (event_id, tenant_id, event_type, actor, session_id, timestamp, payload)
+    VALUES (%s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (event_id) DO NOTHING
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, (
-            event_id,
-            event.get("tenant_id", ""),
-            event.get("event_type", ""),
-            event.get("principal"),
-            ts,
-            psycopg2.extras.Json(event),
-        ))
-    conn.commit()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (
+                event_id,
+                event.get("tenant_id", ""),
+                event.get("event_type", ""),
+                event.get("principal"),
+                session_id,
+                ts,
+                psycopg2.extras.Json(event),
+            ))
+        conn.commit()
+    except Exception:
+        # Graceful fallback for deployments where session_id column doesn't exist yet
+        conn.rollback()
+        sql_legacy = """
+        INSERT INTO audit_export (event_id, tenant_id, event_type, actor, timestamp, payload)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (event_id) DO NOTHING
+        """
+        with conn.cursor() as cur:
+            cur.execute(sql_legacy, (
+                event_id,
+                event.get("tenant_id", ""),
+                event.get("event_type", ""),
+                event.get("principal"),
+                ts,
+                psycopg2.extras.Json(event),
+            ))
+        conn.commit()
+        log.debug("audit_export written without session_id column (schema not yet migrated)")
 
 
 # ── Enforcement ───────────────────────────────────────────────────────────────
@@ -174,10 +207,11 @@ def trigger_enforcement(model_id: str) -> None:
 # ── Message processing ────────────────────────────────────────────────────────
 
 def process_posture_enriched(conn, msg: Dict) -> None:
-    model_id  = msg.get("model_id")
-    tenant_id = msg.get("tenant_id", "unknown")
-    ts        = datetime.fromtimestamp(msg.get("ts", time.time() * 1000) / 1000, tz=timezone.utc)
-    snap_at   = bucket_ts(ts)
+    model_id   = msg.get("model_id")
+    tenant_id  = msg.get("tenant_id", "unknown")
+    session_id = msg.get("session_id")          # now present via send_event() envelope
+    ts         = datetime.fromtimestamp(msg.get("ts", time.time() * 1000) / 1000, tz=timezone.utc)
+    snap_at    = bucket_ts(ts)
 
     decision  = msg.get("decision", "allow")
     is_block  = 1 if decision == "block" else 0

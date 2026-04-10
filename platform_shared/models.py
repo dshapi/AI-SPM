@@ -9,6 +9,42 @@ import time
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Normalized Kafka envelope
+# ─────────────────────────────────────────────────────────────────────────────
+
+class KafkaEnvelope(BaseModel):
+    """
+    Standard outbound event envelope used by send_event() in kafka_utils.
+
+    All fields are merged *flat* into the domain model's dict before
+    serialisation to Kafka, so existing consumers that parse a specific
+    domain model (e.g. PostureEnrichedEvent) continue to work unchanged —
+    Pydantic v2 silently ignores the extra envelope keys they don't declare.
+
+    The WebSocket bridge reads these fields directly from the raw dict to
+    populate WsEvent without additional inference.
+
+    Field notes
+    ──────────
+    event_type      dot-namespaced, e.g. "posture.enriched"
+    source_service  short service name, e.g. "processor"
+    correlation_id  equals event_id of the originating RawEvent — thread of
+                    causality across the whole pipeline for one user request
+    session_id      always present for pipeline events; Optional for audit /
+                    control-plane events
+    timestamp       ISO-8601 UTC string; derived from the model's ts (epoch-ms)
+                    field or set to now() when ts is absent
+    """
+
+    session_id:     Optional[str] = None
+    correlation_id: str
+    event_type:     str
+    source_service: str
+    timestamp:      str           # ISO-8601 UTC
+    payload:        Dict[str, Any] = Field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Auth
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -272,6 +308,7 @@ class ApprovalRequest(BaseModel):
     event_id: str
     tenant_id: str
     user_id: str
+    session_id: Optional[str] = None   # added: required for WS session fan-out
     tool_name: str
     tool_args: Dict[str, Any] = Field(default_factory=dict)
     intent: str
@@ -307,6 +344,7 @@ class AuditEvent(BaseModel):
     event_id: Optional[str] = None
     principal: Optional[str] = None
     session_id: Optional[str] = None
+    correlation_id: Optional[str] = None   # added: links audit event to originating request
     details: Dict[str, Any] = Field(default_factory=dict)
     severity: Literal["info", "warning", "critical"] = "info"
     ttp_codes: List[str] = Field(default_factory=list)

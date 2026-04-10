@@ -31,7 +31,7 @@ from platform_shared.risk import (
     is_critical_combination,
 )
 from platform_shared.audit import emit_audit, emit_security_alert
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("processor")
 settings = get_settings()
@@ -196,12 +196,17 @@ class Processor(ConsumerService):
             model_id=LLM_MODEL_ID,
         )
 
-        safe_send(self.producer, topics.posture_enriched, enriched.model_dump())
+        send_event(
+            self.producer, topics.posture_enriched, enriched,
+            event_type="posture.enriched",
+            source_service="processor",
+        )
 
         emit_audit(
             event.tenant_id, self.service_name, "posture_scored",
             event_id=event.event_id, principal=event.user_id,
             session_id=event.session_id,
+            correlation_id=event.event_id,
             details={
                 "posture_score": posture_score,
                 "prompt_risk": prompt_risk,

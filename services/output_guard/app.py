@@ -15,7 +15,7 @@ from platform_shared.models import FinalResponse
 from platform_shared.topics import topics_for_tenant
 from platform_shared.opa_client import get_opa_client
 from platform_shared.audit import emit_audit, emit_security_alert
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("output-guard")
 settings = get_settings()
@@ -184,6 +184,7 @@ class OutputGuard(ConsumerService):
             resp.tenant_id, self.service_name, "output_checked",
             event_id=resp.event_id, principal=resp.user_id,
             session_id=resp.session_id,
+            correlation_id=resp.event_id,
             severity="warning" if resp.blocked else "info",
             details={
                 "blocked": resp.blocked,

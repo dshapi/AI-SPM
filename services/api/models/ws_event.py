@@ -21,17 +21,22 @@ class WsEvent(BaseModel):
     Fields
     ------
     session_id      UUID of the AI agent session being watched.
-    event_type      Kafka event type string (e.g. "risk.calculated").
-    source_service  Originating microservice ("api", "posture-engine", …).
-    timestamp       ISO-8601 string from the originating service.
-    payload         Remaining event fields verbatim from Kafka.
+    correlation_id  Causal chain ID — equals the originating RawEvent's
+                    event_id so the UI can link all pipeline steps for one
+                    user request.  Empty string when not available.
+    event_type      Dot-namespaced event type (e.g. "risk.calculated",
+                    "policy.decision", "posture.enriched").
+    source_service  Originating microservice ("api", "processor", …).
+    timestamp       ISO-8601 UTC string from the originating service.
+    payload         Domain-specific fields verbatim from Kafka.
     """
 
-    session_id: str
-    event_type: str
+    session_id:     str
+    correlation_id: str = ""
+    event_type:     str
     source_service: str
-    timestamp: str
-    payload: dict[str, Any] = Field(default_factory=dict)
+    timestamp:      str
+    payload:        dict[str, Any] = Field(default_factory=dict)
 
 
 class WsPingFrame(BaseModel):

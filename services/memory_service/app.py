@@ -23,7 +23,7 @@ from platform_shared.models import MemoryRequest, MemoryResult, MemoryNamespace
 from platform_shared.topics import topics_for_tenant
 from platform_shared.opa_client import get_opa_client
 from platform_shared.audit import emit_audit, emit_security_alert
-from platform_shared.kafka_utils import safe_send
+from platform_shared.kafka_utils import safe_send, send_event
 
 log = logging.getLogger("memory-service")
 settings = get_settings()
@@ -256,12 +256,17 @@ class MemoryService(ConsumerService):
                     status="error", reason=f"unknown operation: {req.operation}",
                 )
 
-        safe_send(self.producer, topics.memory_result, mem.model_dump())
+        send_event(
+            self.producer, topics.memory_result, mem,
+            event_type="memory.result",
+            source_service="memory-service",
+        )
 
         emit_audit(
             req.tenant_id, self.service_name, "memory_op",
             event_id=req.event_id, principal=req.user_id,
             session_id=req.session_id,
+            correlation_id=req.event_id,
             details={
                 "operation": req.operation,
                 "namespace": req.namespace,

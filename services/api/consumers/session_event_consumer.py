@@ -182,16 +182,23 @@ class SessionEventConsumer:
         """
         Pull session_id from a Kafka message value.
 
-        Checks:
-          1. Top-level "session_id" or "sessionId"
-          2. Nested under "payload" dict
-        Returns None if not found (event will be ignored).
+        Checks (in order):
+          1. Top-level "session_id" or "sessionId"             (legacy pipeline via send_event)
+          2. Top-level "data.session_id"                        (orchestrator EventEnvelope)
+          3. Nested under "payload" dict                        (original fallback)
+        Returns None if not found (event will be ignored by the bridge).
         """
         if not isinstance(value, dict):
             return None
         for key in ("session_id", "sessionId"):
             if val := value.get(key):
                 return str(val)
+        # orchestrator EventEnvelope: {"event_type": ..., "data": {"session_id": ...}}
+        if isinstance(data := value.get("data"), dict):
+            for key in ("session_id", "sessionId"):
+                if val := data.get(key):
+                    return str(val)
+        # legacy fallback
         if isinstance(payload := value.get("payload"), dict):
             for key in ("session_id", "sessionId"):
                 if val := payload.get(key):
@@ -205,7 +212,20 @@ class SessionEventConsumer:
         Normalizes the raw dict into a WsEvent-compatible shape, then
         dispatches to registered queues.  Messages without a session_id
         are skipped — they have no subscriber anyway.
+
+        Supported envelope formats
+        ──────────────────────────
+        Legacy pipeline (via send_event):
+            {session_id, event_type, source_service, correlation_id,
+             timestamp, ts, ...domain_fields}
+
+        agent-orchestrator EventEnvelope:
+            {event_id, event_type, source, spec_version, time,
+             correlation_id, session_id, tenant_id, data: {...}}
         """
+        if not isinstance(value, dict):
+            return
+
         session_id = self._extract_session_id(value)
         if not session_id:
             return  # no session_id — not bridgeable; skip
@@ -215,18 +235,44 @@ class SessionEventConsumer:
             if session_id not in self._subscribers:
                 return
 
-        if not isinstance(value, dict):
-            return
+        # ── Detect envelope format ────────────────────────────────────────────
+        is_orchestrator_envelope = "data" in value and "spec_version" in value
 
-        # ── Normalize to WsEvent wire shape ───────────────────────────────────
-        _SKIP_KEYS = frozenset({"session_id", "sessionId", "event_type", "source_service", "timestamp", "ts"})
-        event: dict = {
-            "session_id":     session_id,
-            "event_type":     value.get("event_type") or value.get("type") or "unknown",
-            "source_service": value.get("source_service") or infer_source_service(topic),
-            "timestamp":      value.get("timestamp") or value.get("ts") or "",
-            "payload":        {k: v for k, v in value.items() if k not in _SKIP_KEYS},
-        }
+        if is_orchestrator_envelope:
+            # Orchestrator EventEnvelope — structured, already normalized
+            domain_data = value.get("data", {})
+            event: dict = {
+                "session_id":     session_id,
+                "correlation_id": value.get("correlation_id", ""),
+                "event_type":     value.get("event_type", "unknown"),
+                "source_service": value.get("source", infer_source_service(topic)),
+                # orchestrator uses "time" (ISO-8601); send_event uses "timestamp"
+                "timestamp":      str(value.get("time", "")),
+                "payload":        domain_data,
+            }
+        else:
+            # Legacy pipeline event enriched by send_event() — flat dict
+            _SKIP_KEYS = frozenset({
+                "session_id", "sessionId",
+                "event_type", "source_service", "source",
+                "correlation_id", "timestamp", "ts",
+            })
+            event = {
+                "session_id":     session_id,
+                "correlation_id": value.get("correlation_id", ""),
+                "event_type":     value.get("event_type") or value.get("type") or "unknown",
+                "source_service": value.get("source_service") or infer_source_service(topic),
+                # send_event() sets "timestamp" (ISO); fallback to epoch-ms "ts"
+                "timestamp":      value.get("timestamp") or str(value.get("ts", "")),
+                "payload":        {k: v for k, v in value.items() if k not in _SKIP_KEYS},
+            }
+
+        log.debug(
+            "kafka_event_received session_id=%s event_type=%s source=%s",
+            session_id,
+            event["event_type"],
+            event["source_service"],
+        )
         self._dispatch(session_id, event)
 
     # ── Consumer thread ───────────────────────────────────────────────────────

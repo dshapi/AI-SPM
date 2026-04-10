@@ -36,7 +36,7 @@ from platform_shared.security import (
     check_rate_limit,
     get_rate_limit_status,
 )
-from platform_shared.kafka_utils import build_producer, safe_send
+from platform_shared.kafka_utils import build_producer, safe_send, send_event
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
 
@@ -655,13 +655,18 @@ async def chat(
     )
 
     topics = topics_for_tenant(tenant_id)
-    safe_send(get_producer(), topics.raw, event.model_dump())
+    send_event(
+        get_producer(), topics.raw, event,
+        event_type="raw_event",
+        source_service="api",
+    )
 
     emit_audit(
         tenant_id, "api", "event_ingested",
         event_id=event.event_id,
         principal=user_id,
         session_id=req.session_id,
+        correlation_id=event.event_id,
         details={
             "guard_verdict": guard_verdict,
             "guard_score": guard_score,
@@ -801,6 +806,7 @@ async def chat_stream(
             # ── Audit ────────────────────────────────────────────────────────
             emit_audit(tenant_id, "api", "event_ingested", event_id=event_id,
                        principal=user_id, session_id=req.session_id,
+                       correlation_id=event_id,
                        details={"guard_verdict": guard_verdict, "guard_score": guard_score,
                                 "llm_used": True, "tool_calls": tool_uses,
                                 "tool_count": len(tool_uses), "streaming": True})
