@@ -524,36 +524,110 @@ function Sel({ value, onChange, options, className }) {
 // ── Runtime page ───────────────────────────────────────────────────────────────
 
 export default function Runtime() {
+  // ── UI state ───────────────────────────────────────────────────────────────
   const [paused,         setPaused]         = useState(false)
-  const [events,         setEvents]         = useState(INITIAL_EVENTS)
   const [newIds,         setNewIds]         = useState(new Set())
-  const [selectedId,     setSelectedId]     = useState('sess_01HZ9QR2XK')
-  const [eventsPerSec,   setEventsPerSec]   = useState(2.4)
   const [suspiciousOnly, setSuspiciousOnly] = useState(false)
   const [sessionFilter,  setSessionFilter]  = useState({ search: '', risk: 'All', status: 'All' })
   const [streamType,     setStreamType]     = useState('All')
 
+  // ── Sessions list state ────────────────────────────────────────────────────
+  const [sessions,        setSessions]        = useState([])
+  const [selectedId,      setSelectedId]      = useState(null)
+  const [sessionsLoading, setSessionsLoading] = useState(true)
+
+  // ── Per-session event state ────────────────────────────────────────────────
+  const [events,   setEvents]   = useState([])
+  const [wsStatus, setWsStatus] = useState('idle')
+
+  // ── WebSocket hook ─────────────────────────────────────────────────────────
+  const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
+
   const pausedRef = useRef(paused)
   pausedRef.current = paused
 
-  // Simulate live events
+  // ── Load sessions list (poll every 10 s) ──────────────────────────────────
   useEffect(() => {
-    const iv = setInterval(() => {
-      if (pausedRef.current) return
-      const pick = LIVE_POOL[Math.floor(Math.random() * LIVE_POOL.length)]
-      const ev   = { ...pick, id: ++_uid, ts: nowTs() }
-      setEvents(prev => [ev, ...prev].slice(0, 100))
-      setNewIds(new Set([ev.id]))
-      setTimeout(() => setNewIds(new Set()), 1200)
-      setEventsPerSec(p => parseFloat(Math.max(0.8, Math.min(4.2, p + (Math.random() - 0.48) * 0.35)).toFixed(1)))
-    }, 2800)
-    return () => clearInterval(iv)
+    let cancelled = false
+    async function load() {
+      try {
+        const data = await fetchAllSessions(KNOWN_AGENTS)
+        if (!cancelled) {
+          setSessions(data.map(_adaptSession))
+          setSessionsLoading(false)
+        }
+      } catch (err) {
+        console.error('[Runtime] fetchAllSessions error:', err)
+        if (!cancelled) setSessionsLoading(false)
+      }
+    }
+    load()
+    const iv = setInterval(load, 10_000)
+    return () => { cancelled = true; clearInterval(iv) }
   }, [])
 
-  const selectedSession  = MOCK_SESSIONS.find(s => s.id === selectedId) ?? null
-  const activeSessions   = MOCK_SESSIONS.filter(s => s.status === 'Active').length
-  const highRiskSessions = MOCK_SESSIONS.filter(s => s.risk === 'Critical' || s.risk === 'High').length
+  // ── On session select: load history then open WS if active ────────────────
+  useEffect(() => {
+    if (!selectedId) return
+    disconnectWs()
+    setEvents([])
+    setWsStatus('idle')
+    const session = sessions.find(s => s.id === selectedId)
+    async function hydrate() {
+      try {
+        const data = await fetchSessionEvents(selectedId)
+        if (data?.events) {
+          setEvents(data.events.map(e => _adaptEvent(e, selectedId)))
+        }
+      } catch (err) {
+        console.error('[Runtime] fetchSessionEvents error:', err)
+      }
+      if (!session || session.status === 'Active') {
+        connectWs(selectedId)
+      }
+    }
+    hydrate()
+    return () => disconnectWs()
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedId])
+
+  // ── Merge live WS events into events[] ────────────────────────────────────
+  // useSessionSocket already deduplicates WS events by event_type.
+  // We deduplicate against REST history using adapted-event fields (type+ts)
+  // to avoid showing the same pipeline step twice when REST and WS overlap.
+  useEffect(() => {
+    if (paused || liveEvents.length === 0) return
+    const adapted = liveEvents.map(e => _adaptEvent(e, selectedId))
+    setEvents(prev => {
+      const seen = new Set(prev.map(e => `${e.type}:${e.ts}`))
+      const fresh = adapted.filter(e => {
+        const key = `${e.type}:${e.ts}`
+        if (seen.has(key)) return false
+        seen.add(key)
+        return true
+      })
+      if (fresh.length === 0) return prev
+      const merged = [...prev, ...fresh].sort((a, b) => a.ts.localeCompare(b.ts))
+      setNewIds(new Set(fresh.map(e => e.id)))
+      setTimeout(() => setNewIds(new Set()), 1200)
+      return merged.slice(-200)
+    })
+  }, [liveEvents, paused, selectedId])
+
+  // ── Sync WS connection status ──────────────────────────────────────────────
+  useEffect(() => {
+    setWsStatus(connectionStatus)
+  }, [connectionStatus])
+
+  // ── Derived values ─────────────────────────────────────────────────────────
+  // NOTE: selectedSession enrichment is wired in Task 4 via rawEventsRef.
+  // Until then, selectedSession uses unenriched session data.
+  const selectedSession  = sessions.find(s => s.id === selectedId) ?? null
+
+  const activeSessions   = sessions.filter(s => s.status === 'Active').length
+  const highRiskSessions = sessions.filter(s => s.risk === 'Critical' || s.risk === 'High').length
   const blockedCount     = events.filter(e => e.type === 'blocked').length
+  const eventsPerSec     = wsStatus === 'connected' ? '~live' : '—'
 
   const filteredEvents = events.filter(e => {
     if (suspiciousOnly && e.type !== 'blocked' && e.type !== 'policy') return false
@@ -561,7 +635,7 @@ export default function Runtime() {
     return true
   })
 
-  const sessionCount = MOCK_SESSIONS.filter(s => {
+  const sessionCount = sessions.filter(s => {
     const q = sessionFilter.search.toLowerCase()
     if (q && !s.agent.toLowerCase().includes(q) && !s.id.toLowerCase().includes(q)) return false
     if (sessionFilter.risk   !== 'All' && s.risk   !== sessionFilter.risk)   return false
@@ -596,10 +670,10 @@ export default function Runtime() {
 
       {/* ── KPI strip ──────────────────────────────────────────────────────── */}
       <div className="grid grid-cols-4 gap-3">
-        <KpiCard label="Active Sessions"   value={activeSessions}              sub={`${MOCK_SESSIONS.length} total`}  accentClass="border-l-blue-500"    />
-        <KpiCard label="Events / sec"      value={eventsPerSec}                sub={paused ? 'Paused' : 'Live feed'} accentClass={paused ? 'border-l-amber-400' : 'border-l-emerald-500'} dim={paused} />
-        <KpiCard label="Blocked Actions"   value={blockedCount}                sub="In current view"                  accentClass="border-l-red-500"     />
-        <KpiCard label="High Risk Sessions" value={highRiskSessions}           sub="Critical + High"                  accentClass="border-l-orange-500"  />
+        <KpiCard label="Active Sessions"    value={sessionsLoading ? '…' : activeSessions}   sub={`${sessions.length} total`}                                      accentClass="border-l-blue-500"    />
+        <KpiCard label="Events / sec"       value={eventsPerSec}                              sub={paused ? 'Paused' : wsStatus === 'connected' ? 'Live' : 'No session'} accentClass={wsStatus === 'connected' && !paused ? 'border-l-emerald-500' : 'border-l-amber-400'} dim={wsStatus !== 'connected'} />
+        <KpiCard label="Blocked Actions"    value={blockedCount}                              sub="In current view"                                                  accentClass="border-l-red-500"     />
+        <KpiCard label="High Risk Sessions" value={highRiskSessions}                          sub="Critical + High"                                                  accentClass="border-l-orange-500"  />
       </div>
 
       {/* ── Filter bar ─────────────────────────────────────────────────────── */}
@@ -644,13 +718,17 @@ export default function Runtime() {
 
         {/* Spacer + live indicator */}
         <div className="flex-1" />
-        {paused ? (
+        {wsStatus === 'connected' && !paused ? (
+          <span className="flex items-center gap-1.5 text-[11px] text-emerald-600 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
+          </span>
+        ) : paused ? (
           <span className="flex items-center gap-1.5 text-[11px] text-amber-600 font-medium">
             <Pause size={11} strokeWidth={2} /> Stream paused
           </span>
         ) : (
-          <span className="flex items-center gap-1.5 text-[11px] text-emerald-600 font-medium">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> Live
+          <span className="flex items-center gap-1.5 text-[11px] text-gray-400 font-medium">
+            <span className="w-1.5 h-1.5 rounded-full bg-gray-300" /> {wsStatus === 'error' ? 'Disconnected' : 'Select session'}
           </span>
         )}
       </div>
@@ -669,11 +747,14 @@ export default function Runtime() {
         >
           <div className="overflow-y-auto flex-1">
             <SessionList
-              sessions={MOCK_SESSIONS}
+              sessions={sessions}
               selectedId={selectedId}
               onSelect={setSelectedId}
               filter={sessionFilter}
             />
+            {sessionsLoading && sessions.length === 0 && (
+              <p className="text-xs text-gray-400 text-center py-8">Loading sessions…</p>
+            )}
           </div>
         </Panel>
 
