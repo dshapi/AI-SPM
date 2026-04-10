@@ -51,9 +51,7 @@ from models.block_response import (
     _POLICY_UNAVAILABLE_EXPLANATION,
 )
 from models.lexical_screen import screen_lexical
-from promptguard.layers.obfuscation import ObfuscationLayer as _ObfuscationLayer
-
-_obfuscation_layer = _ObfuscationLayer()   # singleton — stateless, reuse across requests
+from models.obfuscation_screen import screen_obfuscation
 
 # ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
 from ws.connection_manager import ConnectionManager
@@ -532,8 +530,8 @@ async def chat(
     check_rate_limit(tenant_id, user_id)
 
     # 3. Obfuscation pre-screen (encoding/steganography tricks)
-    _obf_result = _obfuscation_layer.screen(req.prompt)
-    if _obf_result.blocked:
+    _obf_blocked, _obf_label = screen_obfuscation(req.prompt)
+    if _obf_blocked:
         _obf_corr = str(uuid.uuid4())
         _obf_block = BlockedResponse(
             reason="lexical_block",
@@ -543,12 +541,11 @@ async def chat(
             correlation_id=_obf_corr,
         )
         emit_audit(tenant_id, "api", "obfuscation_block", principal=user_id, severity="warning",
-                   details={"label": _obf_result.label, "correlation_id": _obf_corr,
-                            "score": _obf_result.score, "prompt_len": len(req.prompt),
-                            "session_id": req.session_id})
+                   details={"label": _obf_label, "correlation_id": _obf_corr,
+                            "prompt_len": len(req.prompt), "session_id": req.session_id})
         asyncio.ensure_future(_report_to_orchestrator(
             raw_token=token, prompt=req.prompt, session_id=req.session_id,
-            claims=claims, guard_verdict="block", guard_score=_obf_result.score,
+            claims=claims, guard_verdict="block", guard_score=1.0,
             guard_categories=["obfuscation"], decision="blocked", tool_uses=[],
         ))
         raise HTTPException(status_code=400, detail=_obf_block.model_dump())
@@ -884,8 +881,8 @@ async def chat_stream(
     check_rate_limit(tenant_id, user_id)
 
     # Obfuscation pre-screen
-    _obf_result = _obfuscation_layer.screen(req.prompt)
-    if _obf_result.blocked:
+    _obf_blocked, _obf_label = screen_obfuscation(req.prompt)
+    if _obf_blocked:
         _obf_corr = str(uuid.uuid4())
         _obf_block = BlockedResponse(
             reason="lexical_block",
@@ -895,12 +892,11 @@ async def chat_stream(
             correlation_id=_obf_corr,
         )
         emit_audit(tenant_id, "api", "obfuscation_block", principal=user_id, severity="warning",
-                   details={"label": _obf_result.label, "correlation_id": _obf_corr,
-                            "score": _obf_result.score, "prompt_len": len(req.prompt),
-                            "session_id": req.session_id})
+                   details={"label": _obf_label, "correlation_id": _obf_corr,
+                            "prompt_len": len(req.prompt), "session_id": req.session_id})
         asyncio.ensure_future(_report_to_orchestrator(
             raw_token=token, prompt=req.prompt, session_id=req.session_id,
-            claims=claims, guard_verdict="block", guard_score=_obf_result.score,
+            claims=claims, guard_verdict="block", guard_score=1.0,
             guard_categories=["obfuscation"], decision="blocked", tool_uses=[],
         ))
         raise HTTPException(status_code=400, detail=_obf_block.model_dump())
@@ -1106,7 +1102,7 @@ async def dev_token():
             "tenant_id": "default",
             "email": "dany.shapiro@gmail.com",
             "name": "Dany Shapiro",
-            "roles": ["admin"],
+            "roles": ["chat-user"],
             "groups": [],
             "scopes": [
                 "calendar:read", "calendar:write",

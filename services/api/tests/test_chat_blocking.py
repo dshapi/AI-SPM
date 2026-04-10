@@ -22,7 +22,7 @@ def _make_claims():
     return {
         "sub": "user1", "iss": "cpm-platform", "iat": 1700000000,
         "exp": 9999999999, "tenant_id": "t1",
-        "roles": ["admin"], "scopes": [], "groups": [],
+        "roles": ["chat-user"], "scopes": [], "groups": [],
     }
 
 
