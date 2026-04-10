@@ -1095,13 +1095,13 @@ async def dev_token():
             private_key = f.read()
         now = int(time.time())
         payload = {
-            "sub": "dany.shapiro",
+            "sub": "svc:chat-api",
             "iss": issuer,
             "iat": now,
             "exp": now + 86400,
             "tenant_id": "default",
-            "email": "dany.shapiro@gmail.com",
-            "name": "Dany Shapiro",
+            "email": "chat-api@svc.internal",
+            "name": "Chat API Service",
             "roles": ["chat-user"],
             "groups": [],
             "scopes": [

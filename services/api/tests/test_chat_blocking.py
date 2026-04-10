@@ -20,8 +20,8 @@ os.environ.setdefault("OPA_URL", "http://opa:8181")
 
 def _make_claims():
     return {
-        "sub": "user1", "iss": "cpm-platform", "iat": 1700000000,
-        "exp": 9999999999, "tenant_id": "t1",
+        "sub": "svc:chat-api", "iss": "cpm-platform", "iat": 1700000000,
+        "exp": 9999999999, "tenant_id": "default",
         "roles": ["chat-user"], "scopes": [], "groups": [],
     }
 
