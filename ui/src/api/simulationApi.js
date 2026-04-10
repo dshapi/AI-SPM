@@ -166,3 +166,42 @@ export async function fetchSessionResults(sessionId) {
 
   return res.json()
 }
+
+// ── fetchAllSessions ──────────────────────────────────────────────────────────
+
+/**
+ * Fetch recent sessions for all known agent IDs in parallel.
+ * The backend requires agent_id — no global list endpoint exists.
+ * Uses Promise.allSettled so a single agent failure doesn't block the rest.
+ *
+ * @param {string[]} agentIds   List of agent IDs to query
+ * @param {number}   [limit=20] Max sessions per agent
+ * @returns {Promise<Array<{
+ *   session_id: string, agent_id: string, status: string,
+ *   risk_score: number, risk_tier: string, policy_decision: string,
+ *   created_at: string,
+ * }>>} Flat list sorted by created_at desc
+ */
+export async function fetchAllSessions(agentIds, limit = 20) {
+  const token   = await getToken()
+  const headers = {}
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const results = await Promise.allSettled(
+    agentIds.map(id =>
+      fetch(`${ORCHESTRATOR_BASE}/sessions?agent_id=${encodeURIComponent(id)}&limit=${limit}`, { headers })
+        .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
+        .then(body => body.sessions ?? [])
+    )
+  )
+
+  const all = results
+    .filter(r => r.status === 'fulfilled')
+    .flatMap(r => r.value)
+
+  // Sort newest-first, deduplicate by session_id
+  const seen = new Set()
+  return all
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+    .filter(s => { if (seen.has(s.session_id)) return false; seen.add(s.session_id); return true })
+}
