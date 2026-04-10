@@ -543,6 +543,7 @@ export default function Runtime() {
   // ── WebSocket hook ─────────────────────────────────────────────────────────
   const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
 
+  const rawEventsRef = useRef([])
   const pausedRef = useRef(paused)
   pausedRef.current = paused
 
@@ -571,12 +572,14 @@ export default function Runtime() {
     if (!selectedId) return
     disconnectWs()
     setEvents([])
+    rawEventsRef.current = []
     setWsStatus('idle')
     const session = sessions.find(s => s.id === selectedId)
     async function hydrate() {
       try {
         const data = await fetchSessionEvents(selectedId)
         if (data?.events) {
+          rawEventsRef.current = data.events
           setEvents(data.events.map(e => _adaptEvent(e, selectedId)))
         }
       } catch (err) {
@@ -606,6 +609,7 @@ export default function Runtime() {
         seen.add(key)
         return true
       })
+      rawEventsRef.current = [...rawEventsRef.current, ...liveEvents]
       if (fresh.length === 0) return prev
       const merged = [...prev, ...fresh].sort((a, b) => a.ts.localeCompare(b.ts))
       setNewIds(new Set(fresh.map(e => e.id)))
@@ -620,9 +624,10 @@ export default function Runtime() {
   }, [connectionStatus])
 
   // ── Derived values ─────────────────────────────────────────────────────────
-  // NOTE: selectedSession enrichment is wired in Task 4 via rawEventsRef.
-  // Until then, selectedSession uses unenriched session data.
-  const selectedSession  = sessions.find(s => s.id === selectedId) ?? null
+  const selectedRaw     = sessions.find(s => s.id === selectedId) ?? null
+  const selectedSession = selectedRaw
+    ? _enrichSession(selectedRaw, rawEventsRef.current)
+    : null
 
   const activeSessions   = sessions.filter(s => s.status === 'Active').length
   const highRiskSessions = sessions.filter(s => s.risk === 'Critical' || s.risk === 'High').length
