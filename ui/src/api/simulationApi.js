@@ -174,7 +174,7 @@ export async function fetchSessionResults(sessionId) {
  * The backend requires agent_id — no global list endpoint exists.
  * Uses Promise.allSettled so a single agent failure doesn't block the rest.
  *
- * @param {string[]} agentIds   List of agent IDs to query
+ * @param {string[]} agentIds   List of agent IDs to query (empty array returns [])
  * @param {number}   [limit=20] Max sessions per agent
  * @returns {Promise<Array<{
  *   session_id: string, agent_id: string, status: string,
@@ -190,7 +190,16 @@ export async function fetchAllSessions(agentIds, limit = 20) {
   const results = await Promise.allSettled(
     agentIds.map(id =>
       fetch(`${ORCHESTRATOR_BASE}/sessions?agent_id=${encodeURIComponent(id)}&limit=${limit}`, { headers })
-        .then(r => r.ok ? r.json() : Promise.reject(new Error(`${r.status}`)))
+        .then(async r => {
+          if (r.ok) return r.json()
+          const err    = await r.json().catch(() => ({}))
+          const detail = err.detail
+          const msg =
+            typeof detail === 'object' && detail !== null
+              ? detail.message ?? detail.error ?? JSON.stringify(detail)
+              : detail ?? `Sessions fetch failed (${r.status})`
+          throw new Error(msg)
+        })
         .then(body => body.sessions ?? [])
     )
   )
