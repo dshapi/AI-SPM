@@ -88,6 +88,11 @@ _ROLE_PERMISSIONS: Dict[str, FrozenSet[Permission]] = {
     "viewer": frozenset({
         Permission.SESSION_READ,
     }),
+    "chat-user": frozenset({
+        Permission.AGENT_INVOKE,
+        Permission.SESSION_READ,
+        Permission.SESSION_OVERRIDE,
+    }),
     # Super-roles — assigned programmatically in the role claim
     "admin":     frozenset(Permission),   # all permissions
     "spm:admin": frozenset(Permission),
