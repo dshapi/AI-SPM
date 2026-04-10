@@ -13,6 +13,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -258,6 +259,299 @@ const MOCK_RESULTS = {
       { icon: CheckCircle2, label: 'No action needed', desc: 'Input is clean. All policies evaluated and passed with no triggers.', action: null },
     ],
   },
+}
+
+// ── Live API → UI model transform ─────────────────────────────────────────────
+//
+// transformSessionEvents maps the agent-orchestrator response pair:
+//   • POST /api/v1/sessions       → sessionData
+//   • GET  /api/v1/sessions/{id}/events → eventsData
+// into the same shape used by MOCK_RESULTS, so SimulationResult renders
+// real data identically to mock data.
+//
+// Data contract (backend → UI):
+//   sessionData.risk.score         → anomalyScore (0–1), riskScore (0–100)
+//   sessionData.risk.tier          → riskLevel
+//   sessionData.policy.decision    → verdict (block→blocked, monitor→flagged, allow→allowed)
+//   sessionData.policy.reason      → blockedMessage / explanation
+//   eventsData.events[]            → decisionTrace steps + policyImpact + timing
+
+/**
+ * Derive actionable recommendations from simulation outcomes.
+ * References icon components imported at the top of this file.
+ */
+function buildRecommendations(verdict, anomalyScore, signals, riskTier) {
+  if (verdict === 'blocked') {
+    return [
+      {
+        icon: Shield,
+        label: 'Policy engine correctly blocked this request',
+        desc:  'The evaluation pipeline detected and blocked this adversarial input. No policy changes required.',
+        action: null,
+      },
+      {
+        icon: TrendingUp,
+        label: 'Review risk threshold for this tier',
+        desc:  `Score ${anomalyScore.toFixed(2)} — threshold held. Consider tightening for ${riskTier} tier to catch lower-confidence variants.`,
+        action: 'Edit Policy',
+      },
+    ]
+  }
+  if (verdict === 'flagged') {
+    return [
+      {
+        icon: Shield,
+        label: 'Consider upgrading to BLOCK mode',
+        desc:  'This request was flagged but allowed through. Upgrade the policy action to BLOCK for this risk pattern.',
+        action: 'Edit Policy',
+      },
+      {
+        icon: TrendingUp,
+        label: 'Lower the block threshold',
+        desc:  `Score ${anomalyScore.toFixed(2)} cleared the flag bar but not the block bar. Closing that gap would prevent similar passes.`,
+        action: 'Edit Policy',
+      },
+      {
+        icon: Sparkles,
+        label: 'Add semantic detection layer',
+        desc:  'Embedding-based detectors complement pattern-matching and catch novel adversarial variants.',
+        action: 'Add Policy',
+      },
+    ]
+  }
+  // allowed
+  if (signals.length > 0) {
+    return [
+      {
+        icon: Info,
+        label: 'Low-level signals observed',
+        desc:  `Detected: ${signals.join(', ')}. Risk remained below threshold. Monitor for frequency patterns.`,
+        action: null,
+      },
+      {
+        icon: Shield,
+        label: 'Consider lowering alert threshold',
+        desc:  'If these signal types should trigger a flag, reduce the policy threshold for this tier.',
+        action: 'Edit Policy',
+      },
+    ]
+  }
+  return [
+    {
+      icon: CheckCircle2,
+      label: 'No action needed',
+      desc:  'Input is clean. All policies evaluated and passed with no triggers.',
+      action: null,
+    },
+  ]
+}
+
+/**
+ * transformSessionEvents(sessionData, eventsData) → MOCK_RESULTS-compatible object
+ *
+ * @param {Object} sessionData  Response from POST /api/v1/sessions
+ * @param {Object} eventsData   Response from GET  /api/v1/sessions/{id}/events
+ */
+function transformSessionEvents(sessionData, eventsData) {
+  const events = (eventsData?.events ?? []).slice().sort((a, b) => a.step - b.step)
+  const risk   = sessionData?.risk   ?? {}
+  const policy = sessionData?.policy ?? {}
+
+  // ── Verdict ──────────────────────────────────────────────────────────────────
+  const decisionRaw = (policy.decision ?? 'allow').toLowerCase()
+  const verdict =
+    decisionRaw === 'block'   ? 'blocked' :
+    decisionRaw === 'monitor' ? 'flagged' :
+    risk.score >= 0.5         ? 'flagged' :
+    'allowed'
+
+  // ── Risk scores ───────────────────────────────────────────────────────────────
+  const anomalyScore = typeof risk.score === 'number' ? risk.score : 0
+  const riskScore    = Math.min(100, Math.round(anomalyScore * 100))
+  const riskTierRaw  = (risk.tier ?? 'low').toLowerCase()
+  const riskLevel    = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' }[riskTierRaw] ?? 'Low'
+
+  // ── Execution time ────────────────────────────────────────────────────────────
+  // Prefer the authoritative duration_ms from session.completed payload.
+  const completedEvt = events.find(e => e.event_type === 'session.completed')
+  const firstEvt     = events.find(e => e.event_type === 'prompt.received')
+  const executionMs  =
+    completedEvt?.payload?.duration_ms ??
+    (firstEvt && completedEvt
+      ? Math.max(0, new Date(completedEvt.timestamp) - new Date(firstEvt.timestamp))
+      : 0)
+
+  // ── Decision trace ────────────────────────────────────────────────────────────
+  const EVENT_LABELS = {
+    'prompt.received':   'Prompt received',
+    'risk.calculated':   'Risk assessed',
+    'policy.decision':   'Policy evaluated',
+    'llm.response':      'Model response',
+    'output.scanned':    'Output scanned',
+    'session.created':   'Session created',
+    'session.blocked':   'Request terminated',
+    'session.completed': 'Session completed',
+  }
+
+  const decisionTrace = events.map(e => {
+    // Determine visual status for this step
+    let stepStatus = 'ok'
+    if (e.event_type === 'session.blocked') {
+      stepStatus = 'blocked'
+    } else if (e.event_type === 'risk.calculated') {
+      const s = e.payload?.risk_score ?? anomalyScore
+      stepStatus = s >= 0.85 ? 'critical' : s >= 0.5 ? 'warn' : 'ok'
+    } else if (e.event_type === 'policy.decision') {
+      const d = (e.payload?.decision ?? '').toLowerCase()
+      stepStatus = d === 'block' ? 'critical' : d === 'monitor' ? 'warn' : 'ok'
+    } else {
+      const raw = (e.status ?? 'ok').toLowerCase()
+      stepStatus = raw === 'warn' || raw === 'warning' ? 'warn' : raw === 'error' ? 'critical' : 'ok'
+    }
+
+    // Build human-readable detail line from event payload
+    let detail = e.summary ?? e.event_type
+    switch (e.event_type) {
+      case 'prompt.received':
+        detail = [
+          e.payload?.prompt_len != null ? `${e.payload.prompt_len} tokens` : null,
+          e.payload?.agent_id           ? `agent: ${e.payload.agent_id}`   : null,
+        ].filter(Boolean).join(' · ') || detail
+        break
+      case 'risk.calculated': {
+        const s    = e.payload?.risk_score ?? anomalyScore
+        const t    = e.payload?.risk_tier  ?? riskTierRaw
+        const sigs = (e.payload?.signals ?? risk.signals ?? []).filter(x => x && x !== 'none')
+        detail = `Score: ${s.toFixed(3)} · tier: ${t}${sigs.length ? ' · ' + sigs[0] : ''}`
+        break
+      }
+      case 'policy.decision': {
+        const d  = (e.payload?.decision ?? decisionRaw).toUpperCase()
+        const r  = e.payload?.reason ?? policy.reason ?? ''
+        const pv = e.payload?.policy_version ?? policy.policy_version ?? ''
+        detail = `${d} — ${r}${pv ? ' [' + pv + ']' : ''}`
+        break
+      }
+      case 'llm.response':
+        detail = e.payload?.output_tokens != null
+          ? `${e.payload.output_tokens} output tokens · response generated`
+          : 'Response generated'
+        break
+      case 'output.scanned':
+        detail = `Scan verdict: ${e.payload?.verdict ?? 'clean'}`
+        break
+      case 'session.blocked':
+        detail = `Request terminated — ${policy.reason ?? 'policy violation'}`
+        break
+      case 'session.completed': {
+        const dur = e.payload?.duration_ms ?? executionMs
+        const cnt = e.payload?.event_count ?? events.length
+        detail = `${cnt} events · ${dur}ms total`
+        break
+      }
+    }
+
+    // Format timestamp as HH:MM:SS.mmm
+    const ts = (() => {
+      const d = new Date(e.timestamp)
+      if (isNaN(d)) return '--:--:--.---'
+      return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0')
+    })()
+
+    return {
+      step:   e.step,
+      label:  EVENT_LABELS[e.event_type] ?? e.event_type,
+      status: stepStatus,
+      detail,
+      ts,
+    }
+  })
+
+  // ── Policies triggered ────────────────────────────────────────────────────────
+  const signals = (risk.signals ?? []).filter(s => s && s !== 'none')
+  const pv      = policy.policy_version ?? ''
+  const policiesTriggered = [
+    ...(verdict !== 'allowed' && pv ? [`Policy ${pv}`] : []),
+    ...signals.slice(0, 3).map(s =>
+      s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+    ),
+  ]
+
+  // ── Output & blocked message ──────────────────────────────────────────────────
+  const llmEvt = events.find(e => e.event_type === 'llm.response')
+  let output        = null
+  let blockedMessage = null
+
+  if (verdict === 'blocked') {
+    blockedMessage =
+      `Your request was terminated by the policy engine. ` +
+      `${policy.reason ?? 'A security policy violation was detected.'} ` +
+      `This event has been logged for security review.`
+  } else {
+    output = llmEvt?.payload?.response_text ?? null
+    if (!output && verdict === 'allowed') {
+      output = 'Request processed successfully. All policy checks passed with no adversarial signals detected.'
+    }
+  }
+
+  // ── Policy impact ─────────────────────────────────────────────────────────────
+  const ACTION_MAP   = { block: 'BLOCK', monitor: 'FLAG', allow: 'SKIP' }
+  const SEVERITY_MAP = { block: 'critical', monitor: 'high', allow: 'neutral' }
+
+  const policyEvt = events.find(e => e.event_type === 'policy.decision')
+  const policyImpact = []
+
+  if (policyEvt) {
+    policyImpact.push({
+      policy:   `Policy Engine${pv ? ' · ' + pv : ''}`,
+      action:   ACTION_MAP[decisionRaw]   ?? 'SKIP',
+      trigger:  policy.reason             ?? 'Policy evaluation complete',
+      severity: SEVERITY_MAP[decisionRaw] ?? 'neutral',
+    })
+  }
+
+  signals.forEach(sig => {
+    policyImpact.push({
+      policy:   sig.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+      action:   verdict === 'blocked' ? 'BLOCK' : verdict === 'flagged' ? 'FLAG' : 'SKIP',
+      trigger:  'Signal detected during risk assessment',
+      severity: verdict === 'blocked' ? 'critical' : verdict === 'flagged' ? 'high' : 'neutral',
+    })
+  })
+
+  // ── Risk analysis ─────────────────────────────────────────────────────────────
+  const INJECTION_KEYWORDS = ['injection', 'override', 'jailbreak', 'adversarial', 'bypass']
+  const injectionDetected  = signals.some(s =>
+    INJECTION_KEYWORDS.some(kw => s.toLowerCase().includes(kw))
+  )
+  const techniques = signals.map(s =>
+    s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+  )
+  const explanation =
+    `Risk score ${anomalyScore.toFixed(3)} (${riskLevel} tier). ` + (
+    verdict === 'blocked'
+      ? `Policy engine blocked this request: "${policy.reason ?? 'policy violation'}". ${signals.length ? 'Signals: ' + signals.join(', ') + '.' : 'No specific signals recorded.'}`
+    : verdict === 'flagged'
+      ? `Request flagged and processed with restrictions. ${signals.length ? 'Active signals: ' + signals.join(', ') + '.' : 'Monitoring threshold exceeded.'}`
+    : `All policies passed. No adversarial signals detected. Request processed normally.`
+    )
+
+  // ── Recommendations ───────────────────────────────────────────────────────────
+  const recommendations = buildRecommendations(verdict, anomalyScore, signals, riskTierRaw)
+
+  return {
+    verdict,
+    riskScore,
+    riskLevel,
+    executionMs,
+    policiesTriggered,
+    decisionTrace,
+    output,
+    blockedMessage,
+    policyImpact,
+    risk: { injectionDetected, anomalyScore, techniques, explanation },
+    recommendations,
+  }
 }
 
 // ── Small primitives ───────────────────────────────────────────────────────────
@@ -647,7 +941,7 @@ function DecisionTrace({ trace }) {
 
 const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations']
 
-function SimulationResult({ result, attackType, config, running }) {
+function SimulationResult({ result, attackType, config, running, apiError, sessionId }) {
   const [activeTab, setActiveTab] = useState('Summary')
   const [copied, setCopied] = useState(false)
 
@@ -708,19 +1002,38 @@ function SimulationResult({ result, attackType, config, running }) {
 
       {/* Panel header */}
       <div className="h-10 px-4 flex items-center justify-between border-b border-gray-100 shrink-0">
-        <div className="flex items-center gap-2">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
+        <div className="flex items-center gap-2 min-w-0">
+          <Target size={13} className="text-gray-400 shrink-0" strokeWidth={1.75} />
+          <span className="text-[12px] font-semibold text-gray-700 shrink-0">Results</span>
           {/* Verdict chip */}
           <span className={cn(
-            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold',
+            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold shrink-0',
             vcfg.bg, vcfg.border, vcfg.txt,
           )}>
             <span className={cn('w-1.5 h-1.5 rounded-full', vcfg.dot)} />
             {vcfg.label}
           </span>
+          {/* Data-source indicator: green "Live" when real API data, amber "Simulated" on fallback */}
+          {sessionId && !apiError && (
+            <span
+              title={`Session: ${sessionId}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[9.5px] font-semibold text-emerald-700 shrink-0"
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Live
+            </span>
+          )}
+          {apiError && (
+            <span
+              title={`API error: ${apiError}`}
+              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-[9.5px] font-semibold text-amber-700 shrink-0 cursor-help"
+            >
+              <AlertCircle size={9} strokeWidth={2.5} />
+              Simulated
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-gray-400">
+        <div className="flex items-center gap-2 text-[10px] text-gray-400 shrink-0">
           <Clock size={10} strokeWidth={2} />
           <span className="font-mono">{result.executionMs}ms</span>
         </div>
@@ -1130,35 +1443,72 @@ const DEFAULT_CONFIG = {
 }
 
 export default function Simulation() {
-  const [config,     setConfig]     = useState(DEFAULT_CONFIG)
-  const [running,    setRunning]    = useState(false)
-  const [result,     setResult]     = useState(null)
-  const [compareMode,setCompareMode]= useState(false)
-  const [resultA,    setResultA]    = useState(null)   // before
-  const [resultB,    setResultB]    = useState(null)   // after
+  const [config,      setConfig]     = useState(DEFAULT_CONFIG)
+  const [running,     setRunning]    = useState(false)
+  const [result,      setResult]     = useState(null)
+  // apiError: non-null string means the live call failed and we fell back to mock
+  const [apiError,    setApiError]   = useState(null)
+  // sessionId: truthy when result came from the real orchestrator (not mock)
+  const [sessionId,   setSessionId]  = useState(null)
+  const [compareMode, setCompareMode]= useState(false)
+  const [resultA,     setResultA]    = useState(null)   // before
+  const [resultB,     setResultB]    = useState(null)   // after
 
   const handleChange = (key, val) => setConfig(c => ({ ...c, [key]: val }))
 
-  const handleRun = () => {
+  const handleRun = async () => {
     setRunning(true)
     setResult(null)
+    setApiError(null)
+    setSessionId(null)
 
-    const delay = 1200 + Math.random() * 800
-    setTimeout(() => {
-      const r = MOCK_RESULTS[config.attackType] ?? MOCK_RESULTS.custom
-      setRunning(false)
+    try {
+      // ── Step 1: Submit prompt to agent-orchestrator ───────────────────────
+      const sessionData = await createSession({
+        agentId: config.agent,
+        prompt:  config.prompt,
+        tools:   [],
+        context: {
+          model:       config.model,
+          environment: config.environment,
+          attack_type: config.attackType,
+          exec_mode:   config.execMode,
+        },
+      })
+
+      // ── Step 2: Fetch the lifecycle event log ─────────────────────────────
+      const eventsData = await fetchSessionEvents(String(sessionData.session_id))
+
+      // ── Step 3: Transform to the UI result model ──────────────────────────
+      const r = transformSessionEvents(sessionData, eventsData)
+
+      setSessionId(String(sessionData.session_id))
       setResult(r)
       if (compareMode) {
         if (!resultA) setResultA(r)
         else          setResultB(r)
       }
-    }, delay)
+    } catch (err) {
+      // Graceful degradation — live call failed, fall back to deterministic mock
+      console.warn('[SimLab] Live API unavailable — showing simulated results:', err.message)
+      const r = MOCK_RESULTS[config.attackType] ?? MOCK_RESULTS.custom
+      setApiError(err.message)
+      setResult(r)
+      if (compareMode) {
+        if (!resultA) setResultA(r)
+        else          setResultB(r)
+      }
+    } finally {
+      setRunning(false)
+    }
   }
 
   const handleReset = () => {
     setResult(null)
     setResultA(null)
     setResultB(null)
+    setApiError(null)
+    setSessionId(null)
   }
 
   return (
@@ -1244,10 +1594,10 @@ export default function Simulation() {
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
-              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} />
+              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} />
             </>
           ) : (
-            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} />
+            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} />
           )}
         </div>
 
@@ -1262,7 +1612,7 @@ export default function Simulation() {
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />
             </div>
-            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} />
+            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} />
           </div>
         )}
       </div>
