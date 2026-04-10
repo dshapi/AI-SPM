@@ -13,6 +13,7 @@ Responsibilities:
 - /health, /inventory, /rate-limit-status endpoints
 """
 from __future__ import annotations
+import asyncio
 import os
 import re
 import json
@@ -51,8 +52,9 @@ settings = get_settings()
 _start_time = time.time()
 _producer = None
 
-OPA_URL_FOR_GATE = os.getenv("OPA_URL", "http://opa:8181")
-_redis_gate_client = None
+OPA_URL_FOR_GATE    = os.getenv("OPA_URL", "http://opa:8181")
+ORCHESTRATOR_URL    = os.getenv("ORCHESTRATOR_URL", "http://agent-orchestrator:8094")
+_redis_gate_client  = None
 
 # ── Anthropic client ──────────────────────────────────────────────────────────
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
@@ -272,6 +274,64 @@ async def _check_model_gate(model_id: str, tenant_id: str) -> bool:
         return False  # fail-closed on timeout/network error
 
 
+async def _report_to_orchestrator(
+    raw_token: str,
+    prompt: str,
+    session_id: str | None,
+    claims: dict,
+    guard_verdict: str,
+    guard_score: float,
+    guard_categories: list,
+    decision: str,
+    tool_uses: list,
+) -> None:
+    """
+    Fire-and-forget: register this chat interaction as a session in the
+    agent-orchestrator service so it appears on the Runtime dashboard.
+    Errors are logged and swallowed — never allowed to affect the chat response.
+    """
+    try:
+        payload = {
+            "agent_id": "chat-agent",
+            "prompt": prompt,
+            "tools": tool_uses or [],
+            "context": {
+                "source": "chat-ui",
+                # Full user identity extracted from JWT
+                "user_id":    claims.get("sub", "unknown"),
+                "email":      claims.get("email"),
+                "name":       claims.get("name"),
+                "tenant_id":  claims.get("tenant_id"),
+                "roles":      claims.get("roles", []),
+                "groups":     claims.get("groups", []),
+                # Session & policy info
+                "session_id":       session_id,
+                "guard_verdict":    guard_verdict,
+                "guard_score":      round(guard_score, 4),
+                "guard_categories": guard_categories,
+                "policy_decision":  decision,
+            },
+        }
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.post(
+                f"{ORCHESTRATOR_URL}/api/v1/sessions",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {raw_token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            if resp.status_code not in (200, 201):
+                log.warning(
+                    "orchestrator session report failed status=%d body=%s",
+                    resp.status_code, resp.text[:200],
+                )
+            else:
+                log.debug("orchestrator session created: %s", resp.json().get("session_id"))
+    except Exception as exc:
+        log.warning("orchestrator session report error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("API service starting...")
@@ -465,6 +525,17 @@ async def chat(
                 "session_id": req.session_id,
             },
         )
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token,
+            prompt=req.prompt,
+            session_id=req.session_id,
+            claims=claims,
+            guard_verdict=guard_verdict,
+            guard_score=guard_score,
+            guard_categories=guard_categories,
+            decision="blocked",
+            tool_uses=[],
+        ))
         raise HTTPException(
             status_code=400,
             detail=f"Request blocked by content policy: {', '.join(guard_categories)}",
@@ -679,6 +750,19 @@ async def chat(
         },
     )
 
+    # 7. Register session in agent-orchestrator (Runtime dashboard)
+    asyncio.ensure_future(_report_to_orchestrator(
+        raw_token=token,
+        prompt=req.prompt,
+        session_id=req.session_id,
+        claims=claims,
+        guard_verdict=guard_verdict,
+        guard_score=guard_score,
+        guard_categories=guard_categories,
+        decision=output_action if guard_verdict != "block" else "blocked",
+        tool_uses=tool_uses,
+    ))
+
     return ChatResponse(
         event_id=event.event_id,
         status="accepted" if llm_response is None else "completed",
@@ -710,6 +794,17 @@ async def chat_stream(
         emit_audit(tenant_id, "api", "guard_model_block", principal=user_id, severity="warning",
                    details={"guard_score": guard_score, "categories": guard_categories,
                             "prompt_len": len(req.prompt), "session_id": req.session_id})
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token,
+            prompt=req.prompt,
+            session_id=req.session_id,
+            claims=claims,
+            guard_verdict=guard_verdict,
+            guard_score=guard_score,
+            guard_categories=guard_categories,
+            decision="blocked",
+            tool_uses=[],
+        ))
         raise HTTPException(status_code=400,
                             detail=f"Request blocked by content policy: {', '.join(guard_categories)}")
 
@@ -813,6 +908,19 @@ async def chat_stream(
 
             yield f"data: {json.dumps({'type': 'done', 'event_id': event_id})}\n\n"
 
+            # Register session in agent-orchestrator (Runtime dashboard)
+            asyncio.ensure_future(_report_to_orchestrator(
+                raw_token=token,
+                prompt=req.prompt,
+                session_id=req.session_id,
+                claims=claims,
+                guard_verdict=guard_verdict,
+                guard_score=guard_score,
+                guard_categories=guard_categories,
+                decision="allow",
+                tool_uses=tool_uses,
+            ))
+
         except Exception as e:
             log.error("Streaming LLM error: %s", e)
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -844,10 +952,13 @@ async def dev_token():
             private_key = f.read()
         now = int(time.time())
         payload = {
-            "sub": "ui-user",
+            "sub": "dany.shapiro",
             "iss": issuer,
             "iat": now,
             "exp": now + 86400,
+            "tenant_id": "default",
+            "email": "dany.shapiro@gmail.com",
+            "name": "Dany Shapiro",
             "roles": ["admin"],
             "groups": [],
             "scopes": [
