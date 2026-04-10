@@ -286,6 +286,32 @@ async def _check_model_gate(model_id: str, tenant_id: str) -> bool:
         return False  # fail-closed on timeout/network error
 
 
+def _get_service_token() -> str:
+    """
+    Mint a short-lived JWT for the chat-api service account.
+    Used for internal calls to the orchestrator — keeps the service identity
+    separate from whatever end-user token arrived on the request.
+    """
+    import jwt as pyjwt
+    key_path = os.getenv("JWT_PRIVATE_KEY_PATH", "/keys/private.pem")
+    issuer   = os.getenv("JWT_ISSUER", "cpm-platform")
+    with open(key_path) as f:
+        private_key = f.read()
+    now = int(time.time())
+    payload = {
+        "sub":       "svc:chat-api",
+        "iss":       issuer,
+        "iat":       now,
+        "exp":       now + 3600,          # 1-hour service token
+        "tenant_id": "default",
+        "email":     "chat-api@svc.internal",
+        "name":      "Chat API Service",
+        "roles":     ["chat-user"],
+        "groups":    [],
+    }
+    return pyjwt.encode(payload, private_key, algorithm="RS256")
+
+
 async def _report_to_orchestrator(
     raw_token: str,
     prompt: str,
@@ -300,16 +326,18 @@ async def _report_to_orchestrator(
     """
     Fire-and-forget: register this chat interaction as a session in the
     agent-orchestrator service so it appears on the Runtime dashboard.
+    Authenticates as the chat-api service account (not the end-user).
     Errors are logged and swallowed — never allowed to affect the chat response.
     """
     try:
+        service_token = _get_service_token()
         payload = {
             "agent_id": "chat-agent",
             "prompt": prompt,
             "tools": tool_uses or [],
             "context": {
                 "source": "chat-ui",
-                # Full user identity extracted from JWT
+                # End-user identity carried in context (informational only)
                 "user_id":    claims.get("sub", "unknown"),
                 "email":      claims.get("email"),
                 "name":       claims.get("name"),
@@ -329,7 +357,7 @@ async def _report_to_orchestrator(
                 f"{ORCHESTRATOR_URL}/api/v1/sessions",
                 json=payload,
                 headers={
-                    "Authorization": f"Bearer {raw_token}",
+                    "Authorization": f"Bearer {service_token}",
                     "Content-Type": "application/json",
                 },
             )
@@ -1095,14 +1123,14 @@ async def dev_token():
             private_key = f.read()
         now = int(time.time())
         payload = {
-            "sub": "svc:chat-api",
+            "sub": "dany.shapiro",
             "iss": issuer,
             "iat": now,
             "exp": now + 86400,
             "tenant_id": "default",
-            "email": "chat-api@svc.internal",
-            "name": "Chat API Service",
-            "roles": ["chat-user"],
+            "email": "dany.shapiro@gmail.com",
+            "name": "Dany Shapiro",
+            "roles": ["admin"],
             "groups": [],
             "scopes": [
                 "calendar:read", "calendar:write",
