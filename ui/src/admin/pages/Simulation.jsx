@@ -13,11 +13,8 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
-import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
+import { createSession, fetchSessionEvents, fetchSessionResults } from '../../api/simulationApi.js'
 import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
-import {
-  transformSessionEvents as transformWsEvents,
-} from '../../lib/sessionResults.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -351,279 +348,94 @@ function buildRecommendations(verdict, anomalyScore, signals, riskTier) {
 }
 
 /**
- * _adaptSessionResults(SessionResults) → MOCK_RESULTS-compatible object
+ * _adaptBackendResults(backendSr) → MOCK_RESULTS-compatible object
  *
- * Maps the canonical SessionResults shape produced by transformWsEvents()
- * to the legacy shape consumed by SimulationResult, so the UI renders
- * correctly from both the REST hydration and WebSocket live-update paths.
+ * Maps the backend SessionResults shape (from GET /api/v1/sessions/{id}/results)
+ * to the legacy shape consumed by SimulationResult.
  *
- * @param {import('../../lib/sessionResults.js').SessionResults} sr
+ * Backend shape: { meta, status, decision, decision_trace, risk, policy, output, recommendations }
+ * Legacy shape:  { verdict, riskScore, riskLevel, executionMs, decisionTrace, policyImpact, risk, recommendations }
  */
-function _adaptSessionResults(sr) {
-  // Recommendation icons — mapped from priority/category
+function _adaptBackendResults(sr) {
+  // ── Verdict ────────────────────────────────────────────────────────────────
+  const verdict = sr.decision === 'block'
+    ? 'blocked'
+    : sr.decision === 'escalate'
+      ? 'escalated'
+      : 'allowed'
+
+  // ── Risk ───────────────────────────────────────────────────────────────────
+  const riskFloat   = sr.risk?.score ?? 0
+  const riskScore   = Math.round(riskFloat * 100)            // 0-1 → 0-100
+  const tierMap     = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical', unknown: 'Unknown' }
+  const riskLevel   = tierMap[sr.risk?.tier ?? 'unknown'] ?? 'Unknown'
+  const signals     = sr.risk?.signals ?? []
+  const anomalyFlags = sr.risk?.anomaly_flags ?? []
+
+  // ── Decision trace ─────────────────────────────────────────────────────────
+  const decisionTrace = (sr.decision_trace ?? []).map(s => {
+    const label = s.event_type
+      .split('.').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    const ts = s.timestamp
+      ? (() => { try { return new Date(s.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) } catch { return '' } })()
+      : ''
+    return { step: s.step, label, status: s.status, detail: s.summary || label, ts }
+  })
+
+  // ── Policy impact ──────────────────────────────────────────────────────────
+  const policyImpact = []
+  if (sr.policy?.decision && sr.policy.decision !== 'unknown') {
+    policyImpact.push({
+      policy:   `Policy Engine ${sr.policy.policy_version || 'v1'}`,
+      action:   sr.policy.decision.toUpperCase(),
+      trigger:  sr.policy.reason || `Risk score ${riskFloat.toFixed(2)}`,
+      severity: sr.decision === 'block' ? 'critical' : sr.decision === 'escalate' ? 'warning' : 'ok',
+    })
+  }
+
+  // ── Risk object ────────────────────────────────────────────────────────────
+  const risk = {
+    injectionDetected: anomalyFlags.includes('injection'),
+    anomalyScore:      riskFloat,
+    techniques: signals
+      .map(s => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
+      .filter(Boolean),
+    explanation: signals.length
+      ? `Risk signals detected: ${signals.join(', ')}. Score: ${riskFloat.toFixed(2)} (${riskLevel}).`
+      : `Risk score: ${riskFloat.toFixed(2)} (${riskLevel}).`,
+  }
+
+  // ── Recommendations ────────────────────────────────────────────────────────
   const _recIcon = r => {
-    if (r.category === 'security')    return Shield
-    if (r.category === 'compliance') return Lock
-    if (r.category === 'policy')     return TrendingUp
-    if (r.category === 'operations') return Wrench
+    if (r.priority === 'urgent')                             return Shield
+    if (r.id?.includes('policy') || r.id?.includes('threshold')) return TrendingUp
+    if (r.id?.includes('tool'))                              return Wrench
     return Info
   }
-
-  return {
-    verdict:           sr.summary.verdict === 'pending' ? 'allowed' : sr.summary.verdict,
-    riskScore:         sr.summary.risk_score,
-    riskLevel:         sr.summary.risk_level,
-    executionMs:       sr.summary.execution_ms,
-    policiesTriggered: sr.summary.policies_triggered,
-
-    decisionTrace: sr.decision_trace.map(s => ({
-      step:   s.step,
-      label:  s.title,
-      status: s.status,
-      detail: s.detail,
-      ts:     s.ts ?? s.timestamp,
-    })),
-
-    output: sr.output.status === 'available' ? sr.output.final_text : null,
-    blockedMessage: sr.summary.verdict === 'blocked'
-      ? `Your request was terminated by the policy engine. ${sr.summary.verdict_reason} This event has been logged for security review.`
-      : null,
-
-    policyImpact: sr.policy_impact.rules_triggered.map(r => ({
-      policy:   r.rule_name,
-      action:   r.action,
-      trigger:  r.trigger,
-      severity: r.severity,
-    })),
-
-    risk: {
-      injectionDetected: sr.risk_analysis.anomaly_flags.injection_detected,
-      anomalyScore:      sr.risk_analysis.score,
-      techniques: [
-        ...sr.risk_analysis.signals,
-        ...sr.risk_analysis.behavioral_signals,
-      ]
-        .filter((s, i, a) => s && s !== 'none' && a.indexOf(s) === i)
-        .map(s => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())),
-      explanation: sr.risk_analysis.explanation,
-    },
-
-    recommendations: sr.recommendations.map(r => ({
-      icon:   _recIcon(r),
-      label:  r.title,
-      desc:   r.detail,
-      action: r.action ?? null,
-    })),
-  }
-}
-
-/**
- * transformSessionEvents(sessionData, eventsData) → MOCK_RESULTS-compatible object
- *
- * @param {Object} sessionData  Response from POST /api/v1/sessions
- * @param {Object} eventsData   Response from GET  /api/v1/sessions/{id}/events
- */
-function transformSessionEvents(sessionData, eventsData) {
-  const events = (eventsData?.events ?? []).slice().sort((a, b) => a.step - b.step)
-  const risk   = sessionData?.risk   ?? {}
-  const policy = sessionData?.policy ?? {}
-
-  // ── Verdict ──────────────────────────────────────────────────────────────────
-  const decisionRaw = (policy.decision ?? 'allow').toLowerCase()
-  const verdict =
-    decisionRaw === 'block'   ? 'blocked' :
-    decisionRaw === 'monitor' ? 'flagged' :
-    risk.score >= 0.5         ? 'flagged' :
-    'allowed'
-
-  // ── Risk scores ───────────────────────────────────────────────────────────────
-  const anomalyScore = typeof risk.score === 'number' ? risk.score : 0
-  const riskScore    = Math.min(100, Math.round(anomalyScore * 100))
-  const riskTierRaw  = (risk.tier ?? 'low').toLowerCase()
-  const riskLevel    = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' }[riskTierRaw] ?? 'Low'
-
-  // ── Execution time ────────────────────────────────────────────────────────────
-  // Prefer the authoritative duration_ms from session.completed payload.
-  const completedEvt = events.find(e => e.event_type === 'session.completed')
-  const firstEvt     = events.find(e => e.event_type === 'prompt.received')
-  const executionMs  =
-    completedEvt?.payload?.duration_ms ??
-    (firstEvt && completedEvt
-      ? Math.max(0, new Date(completedEvt.timestamp) - new Date(firstEvt.timestamp))
-      : 0)
-
-  // ── Decision trace ────────────────────────────────────────────────────────────
-  const EVENT_LABELS = {
-    'prompt.received':   'Prompt received',
-    'risk.calculated':   'Risk assessed',
-    'policy.decision':   'Policy evaluated',
-    'llm.response':      'Model response',
-    'output.scanned':    'Output scanned',
-    'session.created':   'Session created',
-    'session.blocked':   'Request terminated',
-    'session.completed': 'Session completed',
-  }
-
-  const decisionTrace = events.map(e => {
-    // Determine visual status for this step
-    let stepStatus = 'ok'
-    if (e.event_type === 'session.blocked') {
-      stepStatus = 'blocked'
-    } else if (e.event_type === 'risk.calculated') {
-      const s = e.payload?.risk_score ?? anomalyScore
-      stepStatus = s >= 0.85 ? 'critical' : s >= 0.5 ? 'warn' : 'ok'
-    } else if (e.event_type === 'policy.decision') {
-      const d = (e.payload?.decision ?? '').toLowerCase()
-      stepStatus = d === 'block' ? 'critical' : d === 'monitor' ? 'warn' : 'ok'
-    } else {
-      const raw = (e.status ?? 'ok').toLowerCase()
-      stepStatus = raw === 'warn' || raw === 'warning' ? 'warn' : raw === 'error' ? 'critical' : 'ok'
-    }
-
-    // Build human-readable detail line from event payload
-    let detail = e.summary ?? e.event_type
-    switch (e.event_type) {
-      case 'prompt.received':
-        detail = [
-          e.payload?.prompt_len != null ? `${e.payload.prompt_len} tokens` : null,
-          e.payload?.agent_id           ? `agent: ${e.payload.agent_id}`   : null,
-        ].filter(Boolean).join(' · ') || detail
-        break
-      case 'risk.calculated': {
-        const s    = e.payload?.risk_score ?? anomalyScore
-        const t    = e.payload?.risk_tier  ?? riskTierRaw
-        const sigs = (e.payload?.signals ?? risk.signals ?? []).filter(x => x && x !== 'none')
-        detail = `Score: ${s.toFixed(3)} · tier: ${t}${sigs.length ? ' · ' + sigs[0] : ''}`
-        break
-      }
-      case 'policy.decision': {
-        const d  = (e.payload?.decision ?? decisionRaw).toUpperCase()
-        const r  = e.payload?.reason ?? policy.reason ?? ''
-        const pv = e.payload?.policy_version ?? policy.policy_version ?? ''
-        detail = `${d} — ${r}${pv ? ' [' + pv + ']' : ''}`
-        break
-      }
-      case 'llm.response':
-        detail = e.payload?.output_tokens != null
-          ? `${e.payload.output_tokens} output tokens · response generated`
-          : 'Response generated'
-        break
-      case 'output.scanned':
-        detail = `Scan verdict: ${e.payload?.verdict ?? 'clean'}`
-        break
-      case 'session.blocked':
-        detail = `Request terminated — ${policy.reason ?? 'policy violation'}`
-        break
-      case 'session.completed': {
-        const dur = e.payload?.duration_ms ?? executionMs
-        const cnt = e.payload?.event_count ?? events.length
-        detail = `${cnt} events · ${dur}ms total`
-        break
-      }
-    }
-
-    // Format timestamp as HH:MM:SS.mmm
-    const ts = (() => {
-      const d = new Date(e.timestamp)
-      if (isNaN(d)) return '--:--:--.---'
-      return d.toTimeString().slice(0, 8) + '.' + String(d.getMilliseconds()).padStart(3, '0')
-    })()
-
-    return {
-      step:   e.step,
-      label:  EVENT_LABELS[e.event_type] ?? e.event_type,
-      status: stepStatus,
-      detail,
-      ts,
-    }
-  })
-
-  // ── Policies triggered ────────────────────────────────────────────────────────
-  const signals = (risk.signals ?? []).filter(s => s && s !== 'none')
-  const pv      = policy.policy_version ?? ''
-  const policiesTriggered = [
-    ...(verdict !== 'allowed' && pv ? [`Policy ${pv}`] : []),
-    ...signals.slice(0, 3).map(s =>
-      s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-    ),
-  ]
-
-  // ── Output & blocked message ──────────────────────────────────────────────────
-  const llmEvt = events.find(e => e.event_type === 'llm.response')
-  let output        = null
-  let blockedMessage = null
-
-  if (verdict === 'blocked') {
-    blockedMessage =
-      `Your request was terminated by the policy engine. ` +
-      `${policy.reason ?? 'A security policy violation was detected.'} ` +
-      `This event has been logged for security review.`
-  } else {
-    output = llmEvt?.payload?.response_text ?? null
-    if (!output && verdict === 'allowed') {
-      output = 'Request processed successfully. All policy checks passed with no adversarial signals detected.'
-    }
-  }
-
-  // ── Policy impact ─────────────────────────────────────────────────────────────
-  const ACTION_MAP   = { block: 'BLOCK', monitor: 'FLAG', allow: 'SKIP' }
-  const SEVERITY_MAP = { block: 'critical', monitor: 'high', allow: 'neutral' }
-
-  const policyEvt = events.find(e => e.event_type === 'policy.decision')
-  const policyImpact = []
-
-  if (policyEvt) {
-    policyImpact.push({
-      policy:   `Policy Engine${pv ? ' · ' + pv : ''}`,
-      action:   ACTION_MAP[decisionRaw]   ?? 'SKIP',
-      trigger:  policy.reason             ?? 'Policy evaluation complete',
-      severity: SEVERITY_MAP[decisionRaw] ?? 'neutral',
-    })
-  }
-
-  signals.forEach(sig => {
-    policyImpact.push({
-      policy:   sig.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-      action:   verdict === 'blocked' ? 'BLOCK' : verdict === 'flagged' ? 'FLAG' : 'SKIP',
-      trigger:  'Signal detected during risk assessment',
-      severity: verdict === 'blocked' ? 'critical' : verdict === 'flagged' ? 'high' : 'neutral',
-    })
-  })
-
-  // ── Risk analysis ─────────────────────────────────────────────────────────────
-  const INJECTION_KEYWORDS = ['injection', 'override', 'jailbreak', 'adversarial', 'bypass']
-  const injectionDetected  = signals.some(s =>
-    INJECTION_KEYWORDS.some(kw => s.toLowerCase().includes(kw))
-  )
-  const techniques = signals.map(s =>
-    s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-  )
-  const explanation =
-    `Risk score ${anomalyScore.toFixed(3)} (${riskLevel} tier). ` + (
-    verdict === 'blocked'
-      ? `Policy engine blocked this request: "${policy.reason ?? 'policy violation'}". ${signals.length ? 'Signals: ' + signals.join(', ') + '.' : 'No specific signals recorded.'}`
-    : verdict === 'flagged'
-      ? `Request flagged and processed with restrictions. ${signals.length ? 'Active signals: ' + signals.join(', ') + '.' : 'Monitoring threshold exceeded.'}`
-    : `All policies passed. No adversarial signals detected. Request processed normally.`
-    )
-
-  // ── Recommendations ───────────────────────────────────────────────────────────
-  const recommendations = buildRecommendations(verdict, anomalyScore, signals, riskTierRaw)
+  const recommendations = (sr.recommendations ?? []).map(r => ({
+    icon:   _recIcon(r),
+    label:  r.title,
+    desc:   r.detail,
+    action: r.action || null,
+  }))
 
   return {
     verdict,
     riskScore,
     riskLevel,
-    executionMs,
-    policiesTriggered,
+    executionMs:       sr.output?.latency_ms ?? null,
+    policiesTriggered: sr.policy?.policy_version ? [sr.policy.policy_version] : [],
     decisionTrace,
-    output,
-    blockedMessage,
+    output:            sr.output?.verdict === 'allow' ? '[Output generated]' : null,
+    blockedMessage:    verdict === 'blocked'
+      ? `Your request was terminated by the policy engine. ${sr.policy?.reason ?? ''} This event has been logged for security review.`.trim()
+      : null,
     policyImpact,
-    risk: { injectionDetected, anomalyScore, techniques, explanation },
+    risk,
     recommendations,
   }
 }
+
 
 // ── Small primitives ───────────────────────────────────────────────────────────
 
@@ -1563,19 +1375,21 @@ export default function Simulation() {
   const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
 
   /**
-   * Re-derive the full result model whenever the WS event buffer grows.
+   * Fetch structured results from backend whenever a WS event arrives.
    *
-   * Calls the canonical transformWsEvents() which accepts the raw WsEvent[]
-   * directly and produces a structured SessionResults.  A thin adapter maps
-   * SessionResults → the legacy UI shape used by SimulationResult.
+   * Each WS event triggers a GET /api/v1/sessions/{id}/results call
+   * to retrieve the latest structured results built by the backend.
+   * A thin adapter maps backend shape → legacy UI shape.
    *
    * Only fires when we have a live session (not the mock-fallback path).
    */
   useEffect(() => {
     if (!sessionId || apiError || liveEvents.length === 0) return
 
-    const sr = transformWsEvents(liveEvents)
-    setResult(_adaptSessionResults(sr))
+    // WS event arrived → pull fresh structured results from backend
+    fetchSessionResults(sessionId)
+      .then(sr => setResult(_adaptBackendResults(sr)))
+      .catch(err => console.warn('[SimLab] Results refresh failed:', err.message))
   }, [liveEvents, sessionId, apiError])
 
   // ── Config change handler ───────────────────────────────────────────────────
@@ -1606,19 +1420,19 @@ export default function Simulation() {
       const sid = String(sessionData.session_id)
       setSessionId(sid)
 
-      // ── Step 2: REST hydration — get any events already persisted ─────────
-      // This handles synchronous pipelines that complete before WS connects.
+      // ── Step 2: REST hydration — fetch structured results from backend ─────
+      // This handles pipelines that complete before the WS connection is ready.
       try {
-        const eventsData = await fetchSessionEvents(sid)
-        const r = transformSessionEvents(sessionData, eventsData)
+        const sr = await fetchSessionResults(sid)
+        const r  = _adaptBackendResults(sr)
         setResult(r)
         if (compareMode) {
           if (!resultA) setResultA(r)
           else          setResultB(r)
         }
       } catch (evtErr) {
-        // Events endpoint unavailable — WS will populate result as events arrive
-        console.warn('[SimLab] Events fetch failed (WS will hydrate):', evtErr.message)
+        // Results endpoint unavailable — WS refresh path will hydrate on first event
+        console.warn('[SimLab] Results fetch failed (WS will hydrate):', evtErr.message)
       }
 
       // ── Step 3: Open WebSocket for real-time incremental updates ──────────

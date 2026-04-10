@@ -126,3 +126,43 @@ export async function fetchSessionEvents(sessionId) {
 
   return res.json()
 }
+
+// ── fetchSessionResults ───────────────────────────────────────────────────────
+
+/**
+ * GET /api/v1/sessions/{id}/results
+ *
+ * Returns the structured SessionResults object built from lifecycle events.
+ * Returns partial results (meta.partial=true) while the pipeline is running.
+ *
+ * @param {string} sessionId  UUID returned by createSession
+ * @returns {Promise<{
+ *   meta:           { session_id: string, agent_id: string|null, event_count: number, partial: boolean },
+ *   status:         string,
+ *   decision:       string,
+ *   decision_trace: Array<{ step: number, event_type: string, status: string, summary: string, timestamp: string, latency_ms: number|null, payload: Object }>,
+ *   risk:           { score: number, tier: string, signals: string[], anomaly_flags: string[] },
+ *   policy:         { decision: string, reason: string, policy_version: string, risk_score_at_decision: number|null },
+ *   output:         { verdict: string|null, pii_types: string[], secret_types: string[], scan_notes: string[], llm_model: string|null, response_length: number|null, latency_ms: number|null },
+ *   recommendations: Array<{ id: string, priority: string, title: string, detail: string, action: string }>,
+ * }>}
+ */
+export async function fetchSessionResults(sessionId) {
+  const token   = await getToken()
+  const headers = {}
+  if (token) headers.Authorization = `Bearer ${token}`
+
+  const res = await fetch(`${ORCHESTRATOR_BASE}/sessions/${sessionId}/results`, { headers })
+
+  if (!res.ok) {
+    const err    = await res.json().catch(() => ({}))
+    const detail = err.detail
+    const msg =
+      typeof detail === 'object' && detail !== null
+        ? detail.message ?? detail.error ?? JSON.stringify(detail)
+        : detail ?? `Results fetch failed (${res.status})`
+    throw new Error(msg)
+  }
+
+  return res.json()
+}
