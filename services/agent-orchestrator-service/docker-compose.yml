@@ -53,11 +53,12 @@ services:
       - "8094:8094"
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      DB_PATH: /data/agent_orchestrator.db
+      DB_PATH: /app/agent_orchestrator.db
       LOG_LEVEL: DEBUG
       CORS_ORIGINS: "http://localhost:3000,http://localhost:5173"
     volumes:
       - orchestrator_data:/data
+      - ../../platform_shared:/app/platform_shared
     depends_on:
       kafka:
         condition: service_healthy

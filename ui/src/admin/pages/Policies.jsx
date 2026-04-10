@@ -29,7 +29,6 @@ const TYPE_CFG = {
   'data-access':       { label: 'Data Access',        color: 'text-cyan-600',   bg: 'bg-cyan-50',   border: 'border-cyan-200',   icon: Database     },
   'output-validation': { label: 'Output Validation',  color: 'text-emerald-600',bg: 'bg-emerald-50',border: 'border-emerald-200',icon: CheckCircle2 },
   'privacy':           { label: 'Privacy / Redaction',color: 'text-pink-600',   bg: 'bg-pink-50',   border: 'border-pink-200',   icon: Lock         },
-  'tenant-isolation':  { label: 'Tenant Isolation',   color: 'text-indigo-600', bg: 'bg-indigo-50', border: 'border-indigo-200', icon: Building2    },
   'rate-limit':        { label: 'Budget / Rate Limits',color: 'text-amber-600', bg: 'bg-amber-50',  border: 'border-amber-200',  icon: Zap          },
 }
 
@@ -181,47 +180,6 @@ const POLICIES = [
       { t: 'pr', v: '      "replacement"' }, { t: 'tx', v: ': ' }, { t: 'str', v: '"[REDACTED]"' }, { t: 'tx', v: '\n    }\n' },
       { t: 'tx', v: '  ],\n' },
       { t: 'pr', v: '  "apply_to"' }, { t: 'tx', v: ': [' }, { t: 'str', v: '"model_input"' }, { t: 'tx', v: ', ' }, { t: 'str', v: '"model_output"' }, { t: 'tx', v: ', ' }, { t: 'str', v: '"rag_context"' }, { t: 'tx', v: ']\n' },
-      { t: 'tx', v: '}\n' },
-    ],
-  },
-  {
-    id: 'ti-v1',
-    name: 'Tenant-Isolate',
-    version: 'v1',
-    type: 'tenant-isolation',
-    mode: 'Enforce',
-    status: 'Active',
-    scope: 'All Tenants',
-    owner: 'platform-eng',
-    createdBy: 'platform-eng@orbyx.ai',
-    created: 'Feb 1, 2026',
-    updated: '2w ago',
-    updatedFull: 'Mar 26, 2026 · 14:30 UTC',
-    description: 'Prevents cross-tenant data access during RAG retrieval and model context injection. Validates tenant boundary on every knowledge-base query.',
-    affectedAssets: 19,
-    relatedAlerts: 0,
-    linkedSimulations: 1,
-    agents: ['CustomerSupport-GPT', 'HRIntake-Bot', 'DataPipeline-Orchestrator'],
-    tools: [],
-    dataSources: ['Customer-Records-DB', 'HR-Knowledge-Base', 'SIEM-Event-Stream'],
-    environments: ['Production', 'Staging'],
-    exceptions: [],
-    impact: { blocked: 0, flagged: 2, unchanged: 118, total: 120 },
-    history: [
-      { version: 'v1', by: 'platform-eng@orbyx.ai', when: 'Mar 26, 2026 · 14:30', change: 'Added SIEM-Event-Stream to covered data sources.' },
-      { version: 'v1', by: 'admin@orbyx.ai',         when: 'Feb 1, 2026 · 08:45',  change: 'Initial tenant isolation policy.' },
-    ],
-    logic: [
-      { t: 'kw', v: 'package' }, { t: 'tx', v: ' ai.security.tenant_isolation\n\n' },
-      { t: 'kw', v: 'default' }, { t: 'tx', v: ' allow := ' }, { t: 'bl', v: 'false\n\n' },
-      { t: 'fn', v: 'allow' }, { t: 'tx', v: ' ' }, { t: 'kw', v: 'if' }, { t: 'tx', v: ' {\n' },
-      { t: 'tx', v: '    input.session.tenant_id == input.resource.tenant_id\n' },
-      { t: 'tx', v: '    input.session.tenant_id != ' }, { t: 'str', v: '""' }, { t: 'tx', v: '\n' },
-      { t: 'tx', v: '}\n\n' },
-      { t: 'fn', v: 'allow' }, { t: 'tx', v: ' ' }, { t: 'kw', v: 'if' }, { t: 'tx', v: ' {\n' },
-      { t: 'cm', v: '    # Super-admin bypass with audit log\n' },
-      { t: 'tx', v: '    input.session.role == ' }, { t: 'str', v: '"platform-admin"\n' },
-      { t: 'fn', v: '    audit_log' }, { t: 'tx', v: '(input.session, input.resource)\n' },
       { t: 'tx', v: '}\n' },
     ],
   },
@@ -736,7 +694,7 @@ function DetailPanel({ policy }) {
 
   const typeCfg = TYPE_CFG[policy.type] ?? TYPE_CFG['prompt-safety']
   const TypeIcon = typeCfg.icon
-  const isRego = policy.type === 'prompt-safety' || policy.type === 'tenant-isolation'
+  const isRego = policy.type === 'prompt-safety'
 
   return (
     <div className="flex flex-col h-full">
@@ -1244,7 +1202,6 @@ export default function Policies() {
           { value: 'data-access',       label: 'Data Access'        },
           { value: 'output-validation', label: 'Output Validation'  },
           { value: 'privacy',           label: 'Privacy / Redaction'},
-          { value: 'tenant-isolation',  label: 'Tenant Isolation'   },
           { value: 'rate-limit',        label: 'Budget / Rate Limits'},
         ]} />
 

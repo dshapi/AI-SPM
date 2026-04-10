@@ -116,7 +116,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Raj Patel',
     team: 'ML Platform',
     environment: 'Production',
-    tenant: 'core-platform',
     connector: 'Pinecone (v2.1)',
     location: 'pinecone://prod-vector-index',
     createdAt: 'Jan 10, 2026',
@@ -167,7 +166,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Sarah Chen',
     team: 'Finance Ops',
     environment: 'Production',
-    tenant: 'finance-ops',
     connector: 'AWS S3 (us-east-1)',
     location: 's3://finance-rag-bucket-prod',
     createdAt: 'Oct 3, 2025',
@@ -219,7 +217,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Raj Patel',
     team: 'ML Platform',
     environment: 'Production',
-    tenant: 'customer-success',
     connector: 'GitHub Connector (v3)',
     location: 'github://acme-org/customer-docs',
     createdAt: 'Nov 20, 2025',
@@ -270,7 +267,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Sarah Chen',
     team: 'Security Ops',
     environment: 'Production',
-    tenant: 'security-ops',
     connector: 'Redis Enterprise (v7.2)',
     location: 'redis://policy-memory-prod.internal:6379',
     createdAt: 'Jan 5, 2026',
@@ -321,7 +317,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Sarah Chen',
     team: 'Security Ops',
     environment: 'Production',
-    tenant: 'security-ops',
     connector: 'Confluence Cloud (REST v2)',
     location: 'confluence://acme.atlassian.net/secops',
     createdAt: 'Feb 14, 2026',
@@ -372,7 +367,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Raj Patel',
     team: 'ML Platform',
     environment: 'Production',
-    tenant: 'core-platform',
     connector: 'REST Webhook (v1)',
     location: 'https://api.external-knowledge.io/v2/query',
     createdAt: 'Mar 1, 2026',
@@ -423,7 +417,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Platform Admin',
     team: 'HR / People Ops',
     environment: 'Production',
-    tenant: 'hr-ops',
     connector: 'Microsoft Graph API (v1.0)',
     location: 'sharepoint://acme.sharepoint.com/sites/hr-docs',
     createdAt: 'Sep 15, 2025',
@@ -475,7 +468,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Raj Patel',
     team: 'ML Platform',
     environment: 'Production',
-    tenant: 'core-platform',
     connector: 'Internal Git (main)',
     location: 'git://core-platform/prompt-registry',
     createdAt: 'Dec 1, 2025',
@@ -526,7 +518,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Platform Admin',
     team: 'Billing Platform',
     environment: 'Production',
-    tenant: 'billing-ops',
     connector: 'PostgreSQL (v15.2)',
     location: 'postgres://billing-prod.internal:5432/billing',
     createdAt: 'Nov 5, 2025',
@@ -577,7 +568,6 @@ const MOCK_SOURCES = [
     ownerDisplay: 'Sarah Chen',
     team: 'Security Ops',
     environment: 'Production',
-    tenant: 'security-ops',
     connector: 'STIX/TAXII 2.1 Feed',
     location: 'taxii://threat-intel.internal/feeds/v2',
     createdAt: 'Feb 28, 2026',
@@ -891,8 +881,7 @@ function SourceRow({ source: src, isSelected, onSelect }) {
               {src.name}
             </p>
             <p className="text-[10px] font-medium truncate leading-tight flex items-center gap-1">
-              <span className="text-gray-400">{src.tenant}</span>
-              {src.piiPresent && <span className="text-red-500 font-black">· PII</span>}
+                {src.piiPresent && <span className="text-red-500 font-black">· PII</span>}
             </p>
           </div>
         </div>
@@ -1206,7 +1195,6 @@ function SourceDetailPanel({ source: src, onClose }) {
                 <MetaRow label="Owner"       value={src.ownerDisplay} />
                 <MetaRow label="Team"        value={src.team} />
                 <MetaRow label="Environment" value={src.environment} />
-                <MetaRow label="Tenant"      value={src.tenant}     mono />
                 <MetaRow label="Connector"   value={src.connector} />
                 <MetaRow label="Location"    value={src.location}   mono />
                 <MetaRow label="Created"     value={src.createdAt} />
@@ -1698,7 +1686,7 @@ export default function Data() {
 
   const filtered = sources.filter(src => {
     const q = search.toLowerCase()
-    if (q && !src.name.toLowerCase().includes(q) && !src.type.toLowerCase().includes(q) && !src.tenant.toLowerCase().includes(q)) return false
+    if (q && !src.name.toLowerCase().includes(q) && !src.type.toLowerCase().includes(q)) return false
     if (filterType   !== 'All Types'        && src.type        !== filterType)   return false
     if (filterSens   !== 'All Sensitivity'  && src.sensitivity !== filterSens)   return false
     if (filterStatus !== 'All Statuses'     && src.status      !== filterStatus) return false

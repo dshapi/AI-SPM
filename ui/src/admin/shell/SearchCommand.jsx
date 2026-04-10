@@ -34,8 +34,8 @@ const GROUPS = [
     key: 'sessions',
     label: 'Sessions',
     items: [
-      { id: 'd1', title: 'Session #4821', sub: 'tenant-1 · 5m ago'  },
-      { id: 'd2', title: 'Session #4820', sub: 'tenant-2 · 12m ago' },
+      { id: 'd1', title: 'Session #4821', sub: '5m ago'  },
+      { id: 'd2', title: 'Session #4820', sub: '12m ago' },
     ],
   },
 ]

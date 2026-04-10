@@ -12,7 +12,7 @@ const SEV = { Critical: 'critical', High: 'high', Medium: 'medium', Low: 'low' }
  *   rule text    → text-[13px] text-gray-600 (same scale as model)
  *   time         → text-[12px] text-gray-400 tabular-nums
  */
-export default function AlertRow({ sev, model, rule, tenant, time }) {
+export default function AlertRow({ sev, model, rule, time }) {
   return (
     <tr className="border-b border-gray-100 last:border-0 hover:bg-gray-50/70 transition-colors cursor-pointer">
       <td className="px-6 py-3.5">
@@ -23,9 +23,6 @@ export default function AlertRow({ sev, model, rule, tenant, time }) {
       </td>
       <td className="px-6 py-3.5">
         <span className="text-[13px] text-gray-600">{rule}</span>
-      </td>
-      <td className="px-6 py-3.5">
-        <MetricBadge label={tenant} variant="info" />
       </td>
       <td className="px-6 py-3.5 text-right">
         <span className="text-[12px] text-gray-400 tabular-nums">{time}</span>

@@ -35,6 +35,7 @@ from events.store import EventStore
 from models.event import EventRecord, EventRepository
 from models.session import SessionRecord, SessionRepository
 from schemas.events import (
+    EventType,
     PolicyDecisionPayload,
     PromptReceivedPayload,
     RiskCalculatedPayload,
@@ -129,6 +130,7 @@ class SessionService:
                 tenant_id=tenant_id,
                 prompt_hash=prompt_hash,
                 prompt_len=len(request.prompt),
+                prompt=request.prompt,
                 tools=request.tools,
                 context_keys=list(request.context.keys()),
             ),
@@ -394,9 +396,117 @@ class SessionService:
         return await self._repo.get_by_id(session_id)
 
     async def get_events(self, session_id: str) -> List[SessionLifecycleEvent]:
-        return await self._store.get_events(session_id)
+        """
+        Return lifecycle events for a session.
+
+        Priority: DB (durable, survives restarts) → in-memory store (active
+        sessions mid-flight that have not been persisted yet).
+        """
+        import json as _json
+        from uuid import UUID as _UUID
+
+        # ── DB path (primary) ─────────────────────────────────────────────
+        if self._event_repo:
+            logger.debug("get_events: querying DB for session_id=%s", session_id)
+            try:
+                db_records = await self._event_repo.get_by_session_id(session_id)
+            except Exception as exc:
+                logger.error("get_events: DB query failed session_id=%s err=%s", session_id, exc)
+                db_records = []
+
+            logger.info("get_events: DB returned %d records for session_id=%s", len(db_records), session_id)
+
+            if db_records:
+                _STATUS_MAP = {
+                    "prompt.received":   "received",
+                    "risk.calculated":   "scored",
+                    "policy.decision":   "decided",
+                    "session.created":   "ok",
+                    "session.blocked":   "blocked",
+                    "session.completed": "completed",
+                    "llm.response":      "ok",
+                    "output.scanned":    "ok",
+                }
+
+                def _summarise(event_type: str, payload: dict) -> str:
+                    if event_type == "prompt.received":
+                        prompt = payload.get("prompt", "")
+                        if prompt:
+                            return prompt[:120]
+                        return f"Prompt received ({payload.get('prompt_len', '?')} chars)"
+                    if event_type == "risk.calculated":
+                        tier  = payload.get("risk_tier", "?")
+                        score = payload.get("risk_score", 0)
+                        sigs  = ", ".join(payload.get("signals", []))
+                        return f"Risk: {tier} ({int(score * 100)}/100){' — ' + sigs if sigs else ''}"
+                    if event_type == "policy.decision":
+                        dec    = payload.get("decision", "?")
+                        reason = payload.get("reason", "")
+                        return f"Policy {dec}: {reason}"
+                    if event_type == "session.created":
+                        return "Session created — pipeline complete"
+                    if event_type == "session.blocked":
+                        return f"Session blocked: {payload.get('reason', '?')}"
+                    if event_type == "session.completed":
+                        return f"Session completed ({payload.get('final_status', '?')})"
+                    if event_type == "llm.response":
+                        return f"LLM responded ({payload.get('output_tokens', '?')} tokens)"
+                    if event_type == "output.scanned":
+                        return f"Output scanned: {payload.get('verdict', 'ok')}"
+                    if event_type == "tool.request":
+                        return f"Tool call: {payload.get('tool_name', '?')}"
+                    if event_type == "tool.observation":
+                        return f"Tool result: {payload.get('tool_name', '?')} → {payload.get('result', '?')}"
+                    if event_type == "memory.request":
+                        return "Memory read requested"
+                    if event_type == "memory.result":
+                        return "Memory returned"
+                    if event_type == "final.response":
+                        return "Final response generated"
+                    return event_type
+
+                db_records_sorted = sorted(db_records, key=lambda r: r.timestamp)
+                events: List[SessionLifecycleEvent] = []
+                for step_idx, rec in enumerate(db_records_sorted, start=1):
+                    try:
+                        payload = _json.loads(rec.payload) if rec.payload else {}
+                    except Exception:
+                        payload = {}
+                    try:
+                        et = EventType(rec.event_type)
+                    except ValueError:
+                        et = EventType.UNKNOWN
+                    status = _STATUS_MAP.get(rec.event_type, "ok")
+                    if rec.event_type == "policy.decision":
+                        status = payload.get("decision", "decided")
+                    try:
+                        events.append(SessionLifecycleEvent(
+                            event_type=et,
+                            session_id=_UUID(session_id),
+                            correlation_id=session_id,
+                            timestamp=rec.timestamp,
+                            step=step_idx,
+                            status=status,
+                            summary=_summarise(rec.event_type, payload),
+                            payload=payload,
+                        ))
+                    except Exception as exc:
+                        logger.error("get_events: failed to build event step=%d type=%s err=%s",
+                                     step_idx, rec.event_type, exc)
+                logger.info("get_events: returning %d events from DB for session_id=%s", len(events), session_id)
+                return events
+        else:
+            logger.warning("get_events: _event_repo is None, falling back to in-memory store for session_id=%s", session_id)
+
+        # ── In-memory path (active sessions only) ────────────────────────
+        mem_events = await self._store.get_events(session_id)
+        logger.info("get_events: in-memory store returned %d events for session_id=%s", len(mem_events), session_id)
+        return mem_events
 
     async def list_sessions_for_agent(
         self, agent_id: str, limit: int = 50
     ) -> List[SessionRecord]:
         return await self._repo.list_by_agent(agent_id, limit=limit)
+
+    async def list_all_sessions(self, limit: int = 200) -> List[SessionRecord]:
+        return await self._repo.list_all(limit=limit)

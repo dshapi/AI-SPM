@@ -7,13 +7,21 @@
  * GET /api/v1/sessions/{id}/events) to run real policy simulations.
  *
  * URL resolution:
- *   VITE_ORCHESTRATOR_URL  — override base for the orchestrator (e.g. http://localhost:8094/api/v1)
+ *   VITE_ORCHESTRATOR_URL  — relative override only (e.g. /api/v1). Absolute http://
+ *                            URLs are intentionally ignored because a direct browser
+ *                            request to the service port bypasses the Vite proxy and
+ *                            is blocked by CORS.
  *   VITE_API_URL           — shared API base (e.g. /api), used to derive the default
- *   default                — /api/v1  (assumes a reverse-proxy mapping /api/v1/* → orchestrator)
+ *   default                — /api/v1  (Vite proxy maps /api/v1/* → orchestrator:8094)
  */
 
-const BASE             = import.meta.env.VITE_API_URL        || '/api'
-const ORCHESTRATOR_BASE = import.meta.env.VITE_ORCHESTRATOR_URL || `${BASE}/v1`
+const BASE = import.meta.env.VITE_API_URL || '/api'
+
+// Only use VITE_ORCHESTRATOR_URL when it is a relative path (starts with '/').
+// If it is an absolute http(s):// URL, ignore it and fall back to the proxy path —
+// direct browser requests to the service port are blocked by CORS.
+const _rawOrch = import.meta.env.VITE_ORCHESTRATOR_URL || ''
+const ORCHESTRATOR_BASE = (_rawOrch && !_rawOrch.startsWith('http')) ? _rawOrch : `${BASE}/v1`
 
 // ── Token management ──────────────────────────────────────────────────────────
 // Mirrors the pattern in api.js — fetches a dev JWT from the platform gateway.
@@ -23,15 +31,19 @@ let _tokenExpiry = 0
 
 async function getToken() {
   const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
+  if (_token && _tokenExpiry > now + 60) { console.log('[SimAPI] getToken: cache hit'); return _token }
+  console.log('[SimAPI] getToken: fetching from', `${BASE}/dev-token`)
   try {
     const res = await fetch(`${BASE}/dev-token`)
+    console.log('[SimAPI] getToken: fetch returned status', res.status)
     if (!res.ok) throw new Error('Token fetch failed')
     const data = await res.json()
     _token       = data.token
     _tokenExpiry = now + (data.expires_in ?? 86400)
+    console.log('[SimAPI] getToken: token cached, expiry in', data.expires_in, 's')
     return _token
-  } catch {
+  } catch (e) {
+    console.error('[SimAPI] getToken: error', e.message)
     return null   // callers send requests unauthenticated; orchestrator may reject
   }
 }
@@ -112,7 +124,10 @@ export async function fetchSessionEvents(sessionId) {
   const headers = {}
   if (token) headers.Authorization = `Bearer ${token}`
 
-  const res = await fetch(`${ORCHESTRATOR_BASE}/sessions/${sessionId}/events`, { headers })
+  const url = `${ORCHESTRATOR_BASE}/sessions/${sessionId}/events`
+  console.log('[SimAPI] fetchSessionEvents: GET', url, 'hasToken=', !!token)
+  const res = await fetch(url, { headers })
+  console.log('[SimAPI] fetchSessionEvents: response status', res.status)
 
   if (!res.ok) {
     const err    = await res.json().catch(() => ({}))
@@ -170,43 +185,33 @@ export async function fetchSessionResults(sessionId) {
 // ── fetchAllSessions ──────────────────────────────────────────────────────────
 
 /**
- * Fetch recent sessions for all known agent IDs in parallel.
- * The backend requires agent_id — no global list endpoint exists.
- * Uses Promise.allSettled so a single agent failure doesn't block the rest.
+ * Fetch all recent sessions across all agents.
  *
- * @param {string[]} agentIds   List of agent IDs to query (empty array returns [])
- * @param {number}   [limit=20] Max sessions per agent
+ * @param {string[]} agentIds   Ignored — kept for API compatibility
+ * @param {number}   [limit=200] Max sessions to return
  * @returns {Promise<Array<{
  *   session_id: string, agent_id: string, status: string,
  *   risk_score: number, risk_tier: string, policy_decision: string,
  *   created_at: string,
  * }>>} Flat list sorted by created_at desc
  */
-export async function fetchAllSessions(agentIds, limit = 20) {
+export async function fetchAllSessions(agentIds, limit = 200) {
   const token   = await getToken()
   const headers = {}
   if (token) headers.Authorization = `Bearer ${token}`
 
-  const results = await Promise.allSettled(
-    agentIds.map(id =>
-      fetch(`${ORCHESTRATOR_BASE}/sessions?agent_id=${encodeURIComponent(id)}&limit=${limit}`, { headers })
-        .then(async r => {
-          if (r.ok) return r.json()
-          const err    = await r.json().catch(() => ({}))
-          const detail = err.detail
-          const msg =
-            typeof detail === 'object' && detail !== null
-              ? detail.message ?? detail.error ?? JSON.stringify(detail)
-              : detail ?? `Sessions fetch failed (${r.status})`
-          throw new Error(msg)
-        })
-        .then(body => body.sessions ?? [])
-    )
-  )
-
-  const all = results
-    .filter(r => r.status === 'fulfilled')
-    .flatMap(r => r.value)
+  const r = await fetch(`${ORCHESTRATOR_BASE}/sessions?limit=${limit}`, { headers })
+  if (!r.ok) {
+    const err    = await r.json().catch(() => ({}))
+    const detail = err.detail
+    const msg =
+      typeof detail === 'object' && detail !== null
+        ? detail.message ?? detail.error ?? JSON.stringify(detail)
+        : detail ?? `Sessions fetch failed (${r.status})`
+    throw new Error(msg)
+  }
+  const body = await r.json()
+  const all  = body.sessions ?? []
 
   // Sort newest-first, deduplicate by session_id
   const seen = new Set()

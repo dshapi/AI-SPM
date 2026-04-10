@@ -19,6 +19,7 @@ call.  Routes receive the IdentityContext directly from the dependency
 from __future__ import annotations
 
 import logging
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -311,7 +312,7 @@ async def get_session_events(
     },
 )
 async def list_sessions(
-    agent_id: str,
+    agent_id: Optional[str] = None,
     limit: int = 50,
     request: Request = None,
     response: Response = None,
@@ -321,13 +322,18 @@ async def list_sessions(
     if response:
         response.headers["X-Trace-ID"] = request.state.trace_id
 
-    records = await service.list_sessions_for_agent(agent_id, limit=limit)
+    if agent_id:
+        records = await service.list_sessions_for_agent(agent_id, limit=limit)
+    else:
+        records = await service.list_all_sessions(limit=limit)
+
     return {
         "agent_id": agent_id,
         "count":    len(records),
         "sessions": [
             {
                 "session_id":      r.session_id,
+                "agent_id":        r.agent_id,
                 "status":          r.status,
                 "risk_score":      r.risk_score,
                 "risk_tier":       r.risk_tier,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import {
   Search, Pause, Play, Download,
   Cpu, Wrench,
@@ -7,7 +7,7 @@ import {
   Clock,
   Terminal, Lock, ArrowUpRight,
   Bell, UserX, Key,
-  Activity,
+  Activity, AlertCircle, X,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
 import { PageContainer } from '../../components/layout/PageContainer.jsx'
@@ -371,7 +371,132 @@ function SectionLabel({ children }) {
   )
 }
 
+// ── Escalate confirm modal ─────────────────────────────────────────────────────
+
+function EscalateConfirmModal({ open, onConfirm, onCancel, loading }) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+        onClick={onCancel}
+      />
+      {/* Dialog */}
+      <div className="relative z-10 bg-white rounded-xl shadow-xl border border-gray-200 w-[340px] p-5">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-9 h-9 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-center shrink-0">
+            <AlertCircle size={16} className="text-amber-600" strokeWidth={2} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold text-gray-900">Escalate Session to Case</p>
+            <p className="text-[12px] text-gray-500 mt-0.5 leading-relaxed">
+              Are you sure you want to escalate this session for investigation?
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2 justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-[12px] h-8 px-3"
+            onClick={onCancel}
+            disabled={loading}
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            className="text-[12px] h-8 px-3 bg-amber-600 hover:bg-amber-700 text-white border-0"
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? 'Escalating…' : 'Yes, Escalate'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Toast ──────────────────────────────────────────────────────────────────────
+
+function Toast({ message, variant = 'success', onDismiss }) {
+  useEffect(() => {
+    const t = setTimeout(onDismiss, 4000)
+    return () => clearTimeout(t)
+  }, [onDismiss])
+
+  const styles = variant === 'error'
+    ? 'bg-red-600 border-red-700'
+    : 'bg-emerald-600 border-emerald-700'
+
+  return (
+    <div className={cn(
+      'fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3',
+      'rounded-xl border shadow-lg text-white text-[12px] font-medium',
+      styles,
+    )}>
+      {variant === 'error'
+        ? <AlertCircle size={14} strokeWidth={2} />
+        : <CheckCircle2 size={14} strokeWidth={2} />}
+      {message}
+      <button onClick={onDismiss} className="ml-1 opacity-70 hover:opacity-100">
+        <X size={13} />
+      </button>
+    </div>
+  )
+}
+
+// ── ControlPanel ───────────────────────────────────────────────────────────────
+
 function ControlPanel({ session }) {
+  const [showConfirm, setShowConfirm]   = useState(false)
+  const [escalating,  setEscalating]    = useState(false)
+  const [toast,       setToast]         = useState(null)   // { message, variant }
+
+  const dismissToast = useCallback(() => setToast(null), [])
+
+  async function handleEscalateConfirm() {
+    setEscalating(true)
+    try {
+      // Resolve base URL — same logic as simulationApi.js: ignore absolute URLs (CORS).
+      const base             = import.meta.env.VITE_API_URL || '/api'
+      const _rawO            = import.meta.env.VITE_ORCHESTRATOR_URL || ''
+      const orchestratorBase = (_rawO && !_rawO.startsWith('http')) ? _rawO : `${base}/v1`
+
+      // Fetch a dev token the same way simulationApi does
+      let token = null
+      try {
+        const r = await fetch(`${base}/dev-token`)
+        if (r.ok) token = (await r.json()).token
+      } catch { /* unauthenticated fallback */ }
+
+      const headers = { 'Content-Type': 'application/json' }
+      if (token) headers.Authorization = `Bearer ${token}`
+
+      const res = await fetch(`${orchestratorBase}/cases`, {
+        method:  'POST',
+        headers,
+        body: JSON.stringify({ session_id: session.id, reason: 'manual_escalation' }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err?.detail?.message ?? err?.error ?? `Request failed (${res.status})`)
+      }
+
+      const data = await res.json()
+      setShowConfirm(false)
+      setToast({ message: 'Case created successfully', variant: 'success' })
+    } catch (err) {
+      setShowConfirm(false)
+      setToast({ message: err.message || 'Failed to create case', variant: 'error' })
+    } finally {
+      setEscalating(false)
+    }
+  }
+
   if (!session) return (
     <div className="flex flex-col items-center justify-center h-full text-center">
       <div className="w-9 h-9 rounded-xl bg-gray-100 flex items-center justify-center mb-3">
@@ -468,9 +593,23 @@ function ControlPanel({ session }) {
               <Key size={11} strokeWidth={2} /> Revoke Tool Access
             </Button>
             <Button variant="outline" size="sm"
-              className="w-full justify-start gap-2 text-[12px] h-8">
+              className="w-full justify-start gap-2 text-[12px] h-8 text-amber-700 border-amber-200 hover:bg-amber-50"
+              onClick={() => setShowConfirm(true)}>
               <Bell size={11} strokeWidth={2} /> Escalate to Case
             </Button>
+            <EscalateConfirmModal
+              open={showConfirm}
+              loading={escalating}
+              onConfirm={handleEscalateConfirm}
+              onCancel={() => setShowConfirm(false)}
+            />
+            {toast && (
+              <Toast
+                message={toast.message}
+                variant={toast.variant}
+                onDismiss={dismissToast}
+              />
+            )}
             <Button variant="outline" size="sm"
               className="w-full justify-start gap-2 text-[12px] h-8">
               <ArrowUpRight size={11} strokeWidth={2} /> Open Lineage
@@ -554,8 +693,11 @@ export default function Runtime() {
       try {
         const data = await fetchAllSessions(KNOWN_AGENTS)
         if (!cancelled) {
-          setSessions(data.map(_adaptSession))
+          const adapted = data.map(_adaptSession)
+          setSessions(adapted)
           setSessionsLoading(false)
+          // Auto-select first session on initial load
+          setSelectedId(prev => prev ?? adapted[0]?.id ?? null)
         }
       } catch (err) {
         console.error('[Runtime] fetchAllSessions error:', err)
@@ -577,10 +719,15 @@ export default function Runtime() {
     const session = sessions.find(s => s.id === selectedId)
     async function hydrate() {
       try {
+        console.log('[Runtime] hydrate: fetching events for', selectedId)
         const data = await fetchSessionEvents(selectedId)
+        console.log('[Runtime] hydrate: got data', data?.event_count, 'events', data?.events?.length)
         if (data?.events) {
           rawEventsRef.current = data.events
           setEvents(data.events.map(e => _adaptEvent(e, selectedId)))
+          console.log('[Runtime] hydrate: setEvents called with', data.events.length, 'events')
+        } else {
+          console.warn('[Runtime] hydrate: data.events is falsy', data)
         }
       } catch (err) {
         console.error('[Runtime] fetchSessionEvents error:', err)

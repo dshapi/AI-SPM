@@ -70,7 +70,6 @@ const MOCK_CASES = [
     priority: 'P1',
     owner: 'sarah.chen',
     ownerDisplay: 'Sarah Chen',
-    tenant: 'acme-corp',
     environment: 'Production',
     createdAt: 'Apr 8, 2026 · 14:32 UTC',
     updatedAt: '2m ago',
@@ -129,7 +128,6 @@ const MOCK_CASES = [
     priority: 'P1',
     owner: 'mike.torres',
     ownerDisplay: 'Mike Torres',
-    tenant: 'globex-inc',
     environment: 'Production',
     createdAt: 'Apr 8, 2026 · 11:15 UTC',
     updatedAt: '47m ago',
@@ -185,7 +183,6 @@ const MOCK_CASES = [
     priority: 'P2',
     owner: null,
     ownerDisplay: null,
-    tenant: 'acme-corp',
     environment: 'Production',
     createdAt: 'Apr 8, 2026 · 09:44 UTC',
     updatedAt: '3h ago',
@@ -233,7 +230,6 @@ const MOCK_CASES = [
     priority: 'P2',
     owner: 'alex.kim',
     ownerDisplay: 'Alex Kim',
-    tenant: 'acme-corp',
     environment: 'Sandbox',
     createdAt: 'Apr 7, 2026 · 16:20 UTC',
     updatedAt: '18h ago',
@@ -280,7 +276,6 @@ const MOCK_CASES = [
     priority: 'P2',
     owner: 'lisa.wong',
     ownerDisplay: 'Lisa Wong',
-    tenant: 'globex-inc',
     environment: 'Production',
     createdAt: 'Apr 6, 2026 · 09:48 UTC',
     updatedAt: '1d ago',
@@ -747,7 +742,6 @@ function CaseDetailPanel({ caseData, onClose }) {
                 {[
                   { label: 'Created',     value: caseData.createdAt,              icon: Clock     },
                   { label: 'Owner',       value: caseData.ownerDisplay ?? '—',    icon: User      },
-                  { label: 'Tenant',      value: caseData.tenant,                 icon: Briefcase },
                   { label: 'Environment', value: caseData.environment,            icon: Network   },
                 ].map(({ label, value, icon: Icon }) => (
                   <div key={label} className="flex items-center justify-between px-3 py-2 bg-gray-50/50">

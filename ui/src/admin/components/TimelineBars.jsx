@@ -12,7 +12,7 @@
  */
 export default function TimelineBars({
   title    = 'Alerts Timeline',
-  subtitle = 'Daily event count across all tenants',
+  subtitle = 'Daily event count',
   bars,
   labels   = ['Mar 9', 'Mar 23', 'Apr 8'],
 }) {

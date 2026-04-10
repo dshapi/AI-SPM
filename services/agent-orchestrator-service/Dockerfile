@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libffi-dev libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY services/agent-orchestrator-service/requirements.txt .
 RUN pip install --upgrade pip \
  && pip install --prefix=/install --no-cache-dir -r requirements.txt
 
@@ -27,13 +27,19 @@ LABEL org.opencontainers.image.version="1.0.0"
 # Non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
+# Create data directory with correct ownership before switching users
+RUN mkdir -p /data && chown appuser:appgroup /data
+
 WORKDIR /app
 
 # Copy installed packages from builder
 COPY --from=builder /install /usr/local
 
+# Copy shared platform library
+COPY --chown=appuser:appgroup platform_shared/ ./platform_shared/
+
 # Copy application source
-COPY --chown=appuser:appgroup . .
+COPY --chown=appuser:appgroup services/agent-orchestrator-service/ .
 
 USER appuser
 

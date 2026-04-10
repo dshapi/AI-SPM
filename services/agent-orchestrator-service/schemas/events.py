@@ -41,6 +41,12 @@ class EventType(str, Enum):
     SESSION_COMPLETED = "session.completed"
     LLM_RESPONSE     = "llm.response"
     OUTPUT_SCANNED   = "output.scanned"
+    TOOL_REQUEST     = "tool.request"
+    TOOL_OBSERVATION = "tool.observation"
+    MEMORY_REQUEST   = "memory.request"
+    MEMORY_RESULT    = "memory.result"
+    FINAL_RESPONSE   = "final.response"
+    UNKNOWN          = "unknown"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -93,8 +99,9 @@ class PromptReceivedPayload(BaseModel):
     agent_id:     str
     user_id:      str
     tenant_id:    Optional[str]
-    prompt_hash:  str               # SHA-256 — raw prompt is never stored
+    prompt_hash:  str               # SHA-256
     prompt_len:   int               # Character count
+    prompt:       Optional[str]     = None  # Raw prompt text (stored for dev/demo)
     tools:        List[str]
     context_keys: List[str]         # Keys present in context (not values)
     received_at:  datetime          = Field(default_factory=_utcnow)

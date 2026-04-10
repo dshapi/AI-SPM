@@ -105,7 +105,7 @@ const MOCK_IDENTITIES = [
     id: 'id-005', name: 'sarah.chen', displayName: 'Sarah Chen',
     type: 'Human User', trustScore: 94, trustTrend: 'stable', status: 'Active', flags: [],
     owner: 'sarah.chen', ownerDisplay: 'Sarah Chen',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'SSO + MFA',
+    environment: 'Production', authMethod: 'SSO + MFA',
     createdAt: 'Sep 1, 2025', lastActivity: '5m ago', lastActivityFull: 'Apr 8 · 14:27 UTC',
     description: 'Senior Security Engineer. Manages threat-hunter-agent, Splunk and Sentinel integrations, and case escalation workflows. Fully MFA-enrolled with clean access history.',
     scopes: ['agents:manage', 'alerts:admin', 'integrations:manage', 'cases:admin'],
@@ -128,7 +128,7 @@ const MOCK_IDENTITIES = [
     id: 'id-009', name: 'raj.patel', displayName: 'Raj Patel',
     type: 'Human User', trustScore: 87, trustTrend: 'stable', status: 'Active', flags: ['Delegated'],
     owner: 'raj.patel', ownerDisplay: 'Raj Patel',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'SSO + MFA',
+    environment: 'Production', authMethod: 'SSO + MFA',
     createdAt: 'Aug 15, 2025', lastActivity: '18m ago', lastActivityFull: 'Apr 8 · 14:14 UTC',
     description: 'Principal ML Engineer. Manages AI provider integrations, agent lifecycle, and model governance. Has delegated model:admin to lim-agent-prod for operational automation.',
     scopes: ['agents:admin', 'models:admin', 'integrations:manage', 'policies:read'],
@@ -158,7 +158,7 @@ const MOCK_IDENTITIES = [
     id: 'id-001', name: 'lim-agent-prod', displayName: 'LIM Agent (Production)',
     type: 'Agent', trustScore: 71, trustTrend: 'down', status: 'Active', flags: ['Delegated', 'Elevated Access'],
     owner: 'raj.patel', ownerDisplay: 'Raj Patel',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'Service Token',
+    environment: 'Production', authMethod: 'Service Token',
     createdAt: 'Jan 15, 2026', lastActivity: '3m ago', lastActivityFull: 'Apr 8 · 14:29 UTC',
     description: 'Production LLM inference management agent. Handles model routing, rate limiting, and session context. Elevated access granted for cross-tenant model switching.',
     scopes: ['model:invoke', 'session:read', 'session:write', 'config:read'],
@@ -193,7 +193,7 @@ const MOCK_IDENTITIES = [
     id: 'id-002', name: 'threat-hunter-agent', displayName: 'Threat Hunter Agent',
     type: 'Agent', trustScore: 88, trustTrend: 'up', status: 'Active', flags: [],
     owner: 'sarah.chen', ownerDisplay: 'Sarah Chen',
-    environment: 'Production', tenant: 'security-ops', authMethod: 'OAuth',
+    environment: 'Production', authMethod: 'OAuth',
     createdAt: 'Feb 1, 2026', lastActivity: '12m ago', lastActivityFull: 'Apr 8 · 14:20 UTC',
     description: 'Security analysis agent for threat hunting across logs, alerts, and behavioral data. Runs on isolated compute with restricted data access.',
     scopes: ['alerts:read', 'logs:read', 'cases:write', 'runtime:read'],
@@ -224,7 +224,7 @@ const MOCK_IDENTITIES = [
     id: 'id-010', name: 'compliance-agent', displayName: 'Compliance Agent',
     type: 'Agent', trustScore: 62, trustTrend: 'down', status: 'Active', flags: ['Policy Violation'],
     owner: 'sarah.chen', ownerDisplay: 'Sarah Chen',
-    environment: 'Production', tenant: 'compliance', authMethod: 'Service Token',
+    environment: 'Production', authMethod: 'Service Token',
     createdAt: 'Mar 10, 2026', lastActivity: '45m ago', lastActivityFull: 'Apr 8 · 13:47 UTC',
     description: 'Automated compliance checking agent. Reviews policy adherence for runtime agents and generates audit reports. Recently violated output-filtering policy on 3 consecutive sessions.',
     scopes: ['policies:read', 'reports:write', 'runtime:read', 'audit:write'],
@@ -255,7 +255,7 @@ const MOCK_IDENTITIES = [
     id: 'id-007', name: 'data-pipeline-agent', displayName: 'Data Pipeline Agent',
     type: 'Agent', trustScore: 76, trustTrend: 'stable', status: 'Active', flags: ['Cross-Tenant Access'],
     owner: 'mike.torres', ownerDisplay: 'Mike Torres',
-    environment: 'Production', tenant: 'data-platform', authMethod: 'IAM Role',
+    environment: 'Production', authMethod: 'IAM Role',
     createdAt: 'Feb 15, 2026', lastActivity: '21m ago', lastActivityFull: 'Apr 8 · 14:11 UTC',
     description: 'Orchestration agent for AI data pipelines. Reads from S3, writes to vector store, and syncs with Confluence knowledge base. Cross-tenant access is intentional but flagged for review.',
     scopes: ['s3:read', 'vectorstore:write', 'confluence:read', 'pipeline:manage'],
@@ -287,7 +287,7 @@ const MOCK_IDENTITIES = [
     id: 'id-003', name: 'finance-ops-service', displayName: 'Finance Ops Service Account',
     type: 'Service Account', trustScore: 42, trustTrend: 'down', status: 'Suspicious', flags: ['Elevated Access', 'Unused Credential', 'Risk Spike'],
     owner: 'mike.torres', ownerDisplay: 'Mike Torres',
-    environment: 'Production', tenant: 'finance', authMethod: 'API Key',
+    environment: 'Production', authMethod: 'API Key',
     createdAt: 'Nov 5, 2025', lastActivity: '6h ago', lastActivityFull: 'Apr 8 · 08:15 UTC',
     description: 'Finance data pipeline service account. Granted elevated database read access for reporting. Credential has not been rotated in 152 days. Recent spike in unusual query patterns flagged.',
     scopes: ['db:read', 'db:admin', 'reports:write', 'export:all'],
@@ -318,7 +318,7 @@ const MOCK_IDENTITIES = [
     id: 'id-012', name: 'sentinel-sync-svc', displayName: 'Sentinel Sync Service',
     type: 'Service Account', trustScore: 78, trustTrend: 'stable', status: 'Active', flags: ['Cross-Tenant Access'],
     owner: 'sarah.chen', ownerDisplay: 'Sarah Chen',
-    environment: 'Production', tenant: 'security-ops', authMethod: 'Service Account',
+    environment: 'Production', authMethod: 'Service Account',
     createdAt: 'Feb 10, 2026', lastActivity: '18m ago', lastActivityFull: 'Apr 8 · 14:14 UTC',
     description: 'Microsoft Sentinel sync service. Forwards AI security events to the Sentinel SIEM workspace. Cross-tenant read access required for multi-tenant alert ingestion.',
     scopes: ['SecurityInsights/alertRules/write', 'SecurityInsights/incidents/read'],
@@ -344,7 +344,7 @@ const MOCK_IDENTITIES = [
     id: 'id-014', name: 'bedrock-runtime-svc', displayName: 'Bedrock Runtime Service',
     type: 'Service Account', trustScore: 90, trustTrend: 'stable', status: 'Active', flags: [],
     owner: 'mike.torres', ownerDisplay: 'Mike Torres',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'IAM Role',
+    environment: 'Production', authMethod: 'IAM Role',
     createdAt: 'Jan 20, 2026', lastActivity: '6m ago', lastActivityFull: 'Apr 8 · 14:26 UTC',
     description: 'AWS Bedrock inference service account. Operates under least-privilege IAM policy with SCP guardrails. Handles Titan Embeddings and Claude 3 invocations for the platform.',
     scopes: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream', 'bedrock:ListFoundationModels'],
@@ -371,7 +371,7 @@ const MOCK_IDENTITIES = [
     id: 'id-006', name: 'customer-analytics-key', displayName: 'Customer Analytics API Key',
     type: 'API Key', trustScore: 55, trustTrend: 'down', status: 'Suspicious', flags: ['Unused Credential', 'Risk Spike'],
     owner: 'alex.kim', ownerDisplay: 'Alex Kim',
-    environment: 'Production', tenant: 'analytics', authMethod: 'API Key',
+    environment: 'Production', authMethod: 'API Key',
     createdAt: 'Oct 12, 2025', lastActivity: '14d ago', lastActivityFull: 'Mar 25 · 09:00 UTC',
     description: 'API key for customer analytics pipeline. Unused for 14 days. Sudden burst of 340 requests from an unrecognized IP on Mar 25, then complete silence.',
     scopes: ['analytics:read', 'analytics:write', 'export:customers'],
@@ -401,7 +401,7 @@ const MOCK_IDENTITIES = [
     id: 'id-011', name: 'prod-api-key-01', displayName: 'Production API Key #01',
     type: 'API Key', trustScore: 38, trustTrend: 'down', status: 'Expired', flags: ['Unused Credential', 'Expired'],
     owner: 'mike.torres', ownerDisplay: 'Mike Torres',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'API Key',
+    environment: 'Production', authMethod: 'API Key',
     createdAt: 'Jul 1, 2025', lastActivity: '32d ago', lastActivityFull: 'Mar 7 · 00:00 UTC',
     description: 'Legacy production API key from the initial platform deployment. Expired Mar 8. Used for external webhook callbacks, now superseded by service account tokens.',
     scopes: ['webhooks:receive', 'events:write'],
@@ -425,7 +425,7 @@ const MOCK_IDENTITIES = [
     id: 'id-008', name: 'rag-retrieval-tool', displayName: 'RAG Retrieval Tool',
     type: 'Tool Principal', trustScore: 89, trustTrend: 'stable', status: 'Active', flags: [],
     owner: 'raj.patel', ownerDisplay: 'Raj Patel',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'Service Token',
+    environment: 'Production', authMethod: 'Service Token',
     createdAt: 'Jan 20, 2026', lastActivity: '2m ago', lastActivityFull: 'Apr 8 · 14:30 UTC',
     description: 'Vector search and retrieval tool. Invoked by multiple agents for knowledge base lookups. Access is strictly read-only across all configured data sources.',
     scopes: ['vectorstore:read', 'confluence:read', 's3:read'],
@@ -453,7 +453,7 @@ const MOCK_IDENTITIES = [
     id: 'id-013', name: 'code-exec-tool', displayName: 'Code Execution Tool',
     type: 'Tool Principal', trustScore: 51, trustTrend: 'down', status: 'Suspicious', flags: ['Elevated Access', 'Risk Spike'],
     owner: 'raj.patel', ownerDisplay: 'Raj Patel',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'Service Token',
+    environment: 'Production', authMethod: 'Service Token',
     createdAt: 'Mar 5, 2026', lastActivity: '3m ago', lastActivityFull: 'Apr 8 · 14:29 UTC',
     description: 'Code execution sandbox tool. Invoked by lim-agent-prod for dynamic code evaluation. Spike of 12 invocations in 5 minutes triggered a risk alert. Elevated network access not in original scope.',
     scopes: ['exec:code', 'network:egress', 'fs:read', 'fs:write'],
@@ -483,7 +483,7 @@ const MOCK_IDENTITIES = [
     id: 'id-004', name: 'jira-sync-bot', displayName: 'Jira Sync Bot',
     type: 'Integration Identity', trustScore: 83, trustTrend: 'stable', status: 'Active', flags: [],
     owner: 'alex.kim', ownerDisplay: 'Alex Kim',
-    environment: 'Production', tenant: 'core-platform', authMethod: 'API Key',
+    environment: 'Production', authMethod: 'API Key',
     createdAt: 'Jan 15, 2026', lastActivity: '8m ago', lastActivityFull: 'Apr 8 · 14:24 UTC',
     description: 'Atlassian Jira integration bot for bi-directional case sync. Operates within strict scope — ticket creation, status updates, and user assignment only.',
     scopes: ['read:jira-work', 'write:jira-work', 'read:jira-user'],
@@ -511,7 +511,7 @@ const MOCK_IDENTITIES = [
     id: 'id-015', name: 'okta-sync-user', displayName: 'Okta Sync Service User',
     type: 'Integration Identity', trustScore: 74, trustTrend: 'down', status: 'Active', flags: ['Cross-Tenant Access'],
     owner: 'mike.torres', ownerDisplay: 'Mike Torres',
-    environment: 'Production', tenant: 'identity', authMethod: 'OAuth',
+    environment: 'Production', authMethod: 'OAuth',
     createdAt: 'Feb 20, 2026', lastActivity: '11m ago', lastActivityFull: 'Apr 8 · 14:21 UTC',
     description: 'Okta identity sync integration. Reads user profiles and group memberships for trust scoring. Missing groups:read scope causing partial sync failures and degraded trust data quality.',
     scopes: ['openid', 'profile', 'email', 'okta.users.read'],
@@ -759,7 +759,6 @@ function IdentityRow({ identity: id, isSelected, onSelect }) {
             <p className={cn('text-[12.5px] font-semibold font-mono leading-snug truncate', isSelected ? 'text-blue-700' : 'text-gray-800')}>
               {id.name}
             </p>
-            <p className="text-[10px] text-gray-400 font-medium truncate leading-tight">{id.tenant}</p>
           </div>
         </div>
       </td>
@@ -1115,7 +1114,6 @@ function IdentityDetailPanel({ identity: id, onClose }) {
                 <MetaRow label="Owner"         value={id.ownerDisplay} />
                 <MetaRow label="Auth Method"   value={id.authMethod} />
                 <MetaRow label="Environment"   value={id.environment} />
-                <MetaRow label="Tenant"        value={id.tenant}     mono />
                 <MetaRow label="Created"       value={id.createdAt} />
                 <MetaRow label="Last Active"   value={id.lastActivityFull} mono />
               </div>
@@ -1491,7 +1489,7 @@ export default function Identity() {
 
   const filtered = identities.filter(id => {
     const q = search.toLowerCase()
-    if (q && !id.name.toLowerCase().includes(q) && !id.type.toLowerCase().includes(q) && !id.tenant.toLowerCase().includes(q)) return false
+    if (q && !id.name.toLowerCase().includes(q) && !id.type.toLowerCase().includes(q)) return false
     if (filterType !== 'All Types' && id.type !== filterType) return false
     if (filterStatus !== 'All Statuses' && id.status !== filterStatus) return false
     if (filterEnv !== 'All Environments' && id.environment !== filterEnv) return false

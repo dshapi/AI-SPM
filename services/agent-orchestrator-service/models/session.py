@@ -116,6 +116,14 @@ class SessionRepository:
         )
         return [_orm_to_record(row) for row in result.scalars()]
 
+    async def list_all(self, limit: int = 200) -> List[SessionRecord]:
+        result = await self._session.execute(
+            select(AgentSessionORM)
+            .order_by(AgentSessionORM.created_at.desc())
+            .limit(limit)
+        )
+        return [_orm_to_record(row) for row in result.scalars()]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mapping helper

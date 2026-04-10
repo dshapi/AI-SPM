@@ -22,14 +22,14 @@ const KPIS = [
 const SEV_VARIANT = { Critical: 'critical', High: 'high', Medium: 'medium', Low: 'low' }
 
 const ALERTS = [
-  { sev: 'High',     model: 'gpt-4-turbo',      rule: 'Prompt injection detected', tenant: 't-1', time: '2m ago'  },
-  { sev: 'Medium',   model: 'claude-sonnet-4-6', rule: 'Output PII exposure',       tenant: 't-1', time: '15m ago' },
-  { sev: 'Low',      model: 'llama-3-70b',       rule: 'Rate limit threshold hit',  tenant: 't-2', time: '1h ago'  },
-  { sev: 'High',     model: 'gpt-4o',            rule: 'Model gate block',          tenant: 't-1', time: '2h ago'  },
-  { sev: 'Critical', model: 'mixtral-8x7b',      rule: 'Jailbreak pattern matched', tenant: 't-2', time: '3h ago'  },
+  { sev: 'High',     model: 'gpt-4-turbo',      rule: 'Prompt injection detected', time: '2m ago'  },
+  { sev: 'Medium',   model: 'claude-sonnet-4-6', rule: 'Output PII exposure',       time: '15m ago' },
+  { sev: 'Low',      model: 'llama-3-70b',       rule: 'Rate limit threshold hit',  time: '1h ago'  },
+  { sev: 'High',     model: 'gpt-4o',            rule: 'Model gate block',          time: '2h ago'  },
+  { sev: 'Critical', model: 'mixtral-8x7b',      rule: 'Jailbreak pattern matched', time: '3h ago'  },
 ]
 
-const TABLE_HEADERS = ['Severity', 'Model', 'Rule', 'Tenant', 'Time']
+const TABLE_HEADERS = ['Severity', 'Model', 'Rule', 'Time']
 
 // ── Dashboard page — thin composition layer ───────────────────────────────────
 
@@ -40,7 +40,7 @@ export default function Dashboard() {
       {/* Page header */}
       <PageHeader
         title="Dashboard"
-        subtitle="AI security posture across all tenants and models"
+        subtitle="AI security posture across all agents and models"
         actions={
           <>
             <Button variant="outline">Export</Button>
@@ -110,9 +110,6 @@ export default function Dashboard() {
                 </td>
                 <td className="px-6 py-3.5">
                   <span className="text-[13px] text-gray-600">{row.rule}</span>
-                </td>
-                <td className="px-6 py-3.5">
-                  <Badge variant="info">{row.tenant}</Badge>
                 </td>
                 <td className="px-6 py-3.5 text-right">
                   <span className="text-[12px] text-gray-400 tabular-nums">{row.time}</span>

@@ -102,13 +102,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # `alembic upgrade head` before deploying.
     if os.getenv("DB_AUTO_CREATE_TABLES", "true").lower() == "true":
         async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
         logger.info("create_all complete (dev mode)")
 
     session_factory: async_sessionmaker = make_session_factory(engine)
     app.state.db_engine = engine
     app.state.db_session_factory = session_factory
     logger.info("Database engine initialised: %s", db_url)
+
+    # Seed demo data on first boot (no-op if DB already has sessions)
+    try:
+        from seed_demo import seed_demo_data
+        await seed_demo_data(session_factory)
+    except Exception as _seed_err:
+        logger.warning("seed_demo: skipped — %s", _seed_err)
 
     # -- In-memory event store -----------------------------------------------
     store = EventStore(max_events_per_session=500)

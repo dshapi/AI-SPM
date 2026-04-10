@@ -168,7 +168,7 @@ const MOCK_PLAYBOOKS = [
     description: 'Scheduled daily report summarizing risk scores, open cases, and policy hit rates. Delivered to security leadership at 08:00 UTC.',
     status: 'Active',
     trigger: 'Schedule',
-    scope: 'All Tenants',
+    scope: 'Global',
     owner: 'alex.kim',
     ownerDisplay: 'Alex Kim',
     lastRun: '6h ago',
@@ -179,7 +179,7 @@ const MOCK_PLAYBOOKS = [
     tags: ['reporting', 'scheduled'],
     conditions: [
       { label: 'Schedule', op: 'cron',    value: '0 8 * * * (UTC)'   },
-      { label: 'Scope',    op: 'equals',  value: 'All tenants'        },
+      { label: 'Scope',    op: 'equals',  value: 'Global'        },
     ],
     actions: [
       { step: 1, type: 'Send Email',   config: 'security-leadership@company.com · HTML digest'  },
@@ -190,7 +190,7 @@ const MOCK_PLAYBOOKS = [
     workflow: [
       { nodeType: 'trigger',   icon: Calendar,    title: 'Daily Schedule',              detail: 'Cron: 0 8 * * * (08:00 UTC every day)'                },
       { nodeType: 'condition', icon: Activity,    title: 'Data Freshness Check',        detail: 'Verify posture data < 1h old before generating report' },
-      { nodeType: 'action',    icon: Terminal,    title: 'Compile Posture Digest',      detail: 'Aggregate risk scores, cases, policy hits per tenant'   },
+      { nodeType: 'action',    icon: Terminal,    title: 'Compile Posture Digest',      detail: 'Aggregate risk scores, cases, and policy hits'   },
       { nodeType: 'output',    icon: Mail,        title: 'Distribute Report',           detail: 'Email leadership · Slack digest · Splunk log'          },
     ],
     auditHistory: [

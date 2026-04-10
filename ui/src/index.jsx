@@ -2,7 +2,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { TenantProvider }  from './context/TenantContext.jsx'
 import App                 from './App.jsx'
 import { AppShell as DashboardLayout } from './admin/shell/AppShell.jsx'
 import Overview      from './admin/pages/Overview.jsx'
@@ -25,8 +24,7 @@ import './index.css'
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <BrowserRouter>
-      <TenantProvider>
-        <Routes>
+      <Routes>
           {/* Chat UI */}
           <Route path="/" element={<App />} />
 
@@ -66,13 +64,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 
             {/* ── Platform ── */}
             <Route path="integrations" element={<Integrations />} />
-            <Route path="settings"     element={<Placeholder title="Settings" description="Tenant configuration, thresholds, and notifications." />} />
+            <Route path="settings"     element={<Placeholder title="Settings" description="Configuration, thresholds, and notifications." />} />
           </Route>
 
           {/* Any unknown path → Overview */}
           <Route path="*" element={<Navigate to="/admin/overview" replace />} />
         </Routes>
-      </TenantProvider>
     </BrowserRouter>
   </React.StrictMode>
 )

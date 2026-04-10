@@ -297,7 +297,6 @@ services:
     depends_on:
       spm-db:
         condition: service_healthy
-      <<: *depends-platform
 
   spm-aggregator:
     build:
@@ -350,6 +349,25 @@ services:
       prometheus:
         condition: service_healthy
 
+  agent-orchestrator:
+    build:
+      context: .
+      dockerfile: services/agent-orchestrator-service/Dockerfile
+    container_name: cpm-agent-orchestrator
+    environment:
+      DB_PATH: /data/agent_orchestrator.db
+      LOG_LEVEL: INFO
+      KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+    volumes:
+      - agent-orchestrator-data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      <<: *depends-platform
+
   ui:
     build: {context: ./ui, dockerfile: Dockerfile}
     container_name: cpm-ui
@@ -357,7 +375,9 @@ services:
     ports: ["3001:3001"]
     depends_on:
       - api
+      - agent-orchestrator
 
 volumes:
   spm-db-data:
   grafana-data:
+  agent-orchestrator-data:

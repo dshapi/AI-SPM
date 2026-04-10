@@ -848,8 +848,8 @@ async def dev_token():
             "iss": issuer,
             "iat": now,
             "exp": now + 86400,
-            "tenant_id": "t1",
-            "roles": ["user"],
+            "roles": ["admin"],
+            "groups": [],
             "scopes": [
                 "calendar:read", "calendar:write",
                 "gmail:read", "gmail:send",

@@ -13,11 +13,11 @@ const TYPE = {
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 const INITIAL = [
-  { id: 1, type: 'alert',   title: 'Prompt injection detected',  sub: 'gpt-4-turbo · tenant-1', time: '2m ago',  unread: true  },
+  { id: 1, type: 'alert',   title: 'Prompt injection detected',  sub: 'gpt-4-turbo', time: '2m ago',  unread: true  },
   { id: 2, type: 'policy',  title: 'Policy violation threshold',  sub: '27 violations today',    time: '14m ago', unread: true  },
   { id: 3, type: 'info',    title: 'New model registered',        sub: 'llama-3-70b added',      time: '1h ago',  unread: true  },
   { id: 4, type: 'success', title: 'Simulation run complete',     sub: 'Policy v3 passed',       time: '3h ago',  unread: false },
-  { id: 5, type: 'alert',   title: 'Jailbreak pattern matched',   sub: 'mixtral-8x7b · tenant-2','time': '5h ago', unread: false },
+  { id: 5, type: 'alert',   title: 'Jailbreak pattern matched',   sub: 'mixtral-8x7b','time': '5h ago', unread: false },
 ]
 
 // ── Component ──────────────────────────────────────────────────────────────────
