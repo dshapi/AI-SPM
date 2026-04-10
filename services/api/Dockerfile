@@ -7,5 +7,4 @@ COPY services/api/app.py .
 COPY services/api/ws/ ./ws/
 COPY services/api/consumers/ ./consumers/
 COPY services/api/models/ ./models/
-COPY services/api/promptguard/ ./promptguard/
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "2"]
