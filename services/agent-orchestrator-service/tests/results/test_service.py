@@ -85,8 +85,10 @@ async def test_get_results_empty_session_returns_partial(mock_repo):
 @pytest.mark.asyncio
 async def test_invalidate_clears_cache(mock_repo):
     svc = ResultsService()
-    r1 = await svc.get_results("sess-abc", mock_repo)
+    r1 = await svc.get_results("sess-abc", mock_repo)  # call 1: miss, transforms
     svc.invalidate("sess-abc")
-    r2 = await svc.get_results("sess-abc", mock_repo)
-    # After invalidation, same count but new object computed
+    r2 = await svc.get_results("sess-abc", mock_repo)  # call 2: cache cleared, transforms again
+    # repo called twice total (once per get_results call)
+    assert mock_repo.get_by_session_id.call_count == 2
+    # new object created (cache was busted, not a hit)
     assert r1 is not r2

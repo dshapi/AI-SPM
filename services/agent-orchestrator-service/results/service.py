@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from models.event import EventRecord, EventRepository
 from results.schemas import SessionResults
@@ -73,10 +73,12 @@ class ResultsService:
 
     def invalidate(self, session_id: str) -> None:
         """Manually evict a session from the cache."""
-        self._cache.pop(session_id, None)
+        evicted = self._cache.pop(session_id, None)
+        if evicted is not None:
+            logger.debug("results cache evicted session=%s", session_id)
 
 
-def _records_to_dicts(records: List[EventRecord]) -> List[dict]:
+def _records_to_dicts(records: List[EventRecord]) -> List[Dict[str, Any]]:
     """Convert EventRecord objects to dicts for transform_session_events."""
     out = []
     for r in records:
@@ -87,11 +89,11 @@ def _records_to_dicts(records: List[EventRecord]) -> List[dict]:
         out.append({
             "event_type":     r.event_type,
             "session_id":     r.session_id,
-            "correlation_id": "",
+            "correlation_id": "",      # not stored on EventRecord; unused by transformer
             "timestamp":      r.timestamp.isoformat() if r.timestamp else None,
-            "step":           0,
-            "status":         "ok",
-            "summary":        "",
+            "step":           0,       # not stored on EventRecord; transformer uses 0 as default
+            "status":         "ok",    # not stored on EventRecord; default for DB-sourced events
+            "summary":        "",      # not stored on EventRecord; transformer skips empty
             "payload":        payload,
         })
     return out
