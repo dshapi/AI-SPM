@@ -51,6 +51,9 @@ from models.block_response import (
     _POLICY_UNAVAILABLE_EXPLANATION,
 )
 from models.lexical_screen import screen_lexical
+from promptguard.layers.obfuscation import ObfuscationLayer as _ObfuscationLayer
+
+_obfuscation_layer = _ObfuscationLayer()   # singleton — stateless, reuse across requests
 
 # ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
 from ws.connection_manager import ConnectionManager
@@ -528,7 +531,29 @@ async def chat(
     # 2. Rate limiting
     check_rate_limit(tenant_id, user_id)
 
-    # 3. Lexical pre-screen (fast regex, before LLM guard)
+    # 3. Obfuscation pre-screen (encoding/steganography tricks)
+    _obf_result = _obfuscation_layer.screen(req.prompt)
+    if _obf_result.blocked:
+        _obf_corr = str(uuid.uuid4())
+        _obf_block = BlockedResponse(
+            reason="lexical_block",
+            categories=[],
+            explanation=_LEXICAL_EXPLANATION,
+            session_id=req.session_id,
+            correlation_id=_obf_corr,
+        )
+        emit_audit(tenant_id, "api", "obfuscation_block", principal=user_id, severity="warning",
+                   details={"label": _obf_result.label, "correlation_id": _obf_corr,
+                            "score": _obf_result.score, "prompt_len": len(req.prompt),
+                            "session_id": req.session_id})
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict="block", guard_score=_obf_result.score,
+            guard_categories=["obfuscation"], decision="blocked", tool_uses=[],
+        ))
+        raise HTTPException(status_code=400, detail=_obf_block.model_dump())
+
+    # 3a. Lexical pre-screen (fast regex patterns)
     _lex_blocked, _lex_label = screen_lexical(req.prompt)
     if _lex_blocked:
         _lex_corr = str(uuid.uuid4())
@@ -549,7 +574,7 @@ async def chat(
         ))
         raise HTTPException(status_code=400, detail=_lex_block.model_dump())
 
-    # 3a. Guard model pre-screen (Llama Guard)
+    # 3b. Guard model pre-screen (Llama Guard)
     guard_verdict, guard_score, guard_categories = await _call_guard_model(req.prompt)
 
     if guard_verdict == "block":
@@ -857,6 +882,28 @@ async def chat_stream(
     user_id: str   = claims.get("sub", "unknown")
 
     check_rate_limit(tenant_id, user_id)
+
+    # Obfuscation pre-screen
+    _obf_result = _obfuscation_layer.screen(req.prompt)
+    if _obf_result.blocked:
+        _obf_corr = str(uuid.uuid4())
+        _obf_block = BlockedResponse(
+            reason="lexical_block",
+            categories=[],
+            explanation=_LEXICAL_EXPLANATION,
+            session_id=req.session_id,
+            correlation_id=_obf_corr,
+        )
+        emit_audit(tenant_id, "api", "obfuscation_block", principal=user_id, severity="warning",
+                   details={"label": _obf_result.label, "correlation_id": _obf_corr,
+                            "score": _obf_result.score, "prompt_len": len(req.prompt),
+                            "session_id": req.session_id})
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict="block", guard_score=_obf_result.score,
+            guard_categories=["obfuscation"], decision="blocked", tool_uses=[],
+        ))
+        raise HTTPException(status_code=400, detail=_obf_block.model_dump())
 
     # Lexical pre-screen
     _lex_blocked, _lex_label = screen_lexical(req.prompt)
