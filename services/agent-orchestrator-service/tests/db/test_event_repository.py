@@ -82,7 +82,6 @@ async def test_get_latest_by_type(db_session):
     await SessionRepository(db_session).insert(_make_session_rec("s-ev-003"))
     repo = EventRepository(db_session)
 
-    import datetime as dt
     now = datetime.now(timezone.utc)
     ev1 = EventRecord(
         session_id="s-ev-003",
