@@ -112,6 +112,121 @@ def _parse_ts(ts: Any) -> Optional[datetime]:
         return None
 
 
+def _extract_state(deduped: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Extract state variables from deduped events.
+    Returns a dict with all state keys needed by transform_session_events.
+    """
+    session_id = ""
+    agent_id: Optional[str] = None
+    risk_score: float = 0.0
+    risk_tier: str = "unknown"
+    signals: List[str] = []
+    policy_decision: str = "unknown"
+    policy_reason: str = ""
+    policy_version: str = ""
+    risk_score_at_decision: Optional[float] = None
+    output_verdict: Optional[str] = None
+    pii_types: List[str] = []
+    secret_types: List[str] = []
+    scan_notes: List[str] = []
+    llm_model: Optional[str] = None
+    response_length: Optional[int] = None
+    llm_latency_ms: Optional[int] = None
+    status: str = "unknown"
+    terminal_reached: bool = False
+    tools_blocked: bool = False
+    output_flagged: bool = False
+    pii_redacted: bool = False
+
+    for ev in deduped:
+        ctype = ev["_canonical"]
+        p = _parse_payload(ev)
+        sid = p.get("session_id") or ev.get("session_id") or ""
+        if sid and not session_id:
+            session_id = str(sid)
+        if not agent_id:
+            agent_id = p.get("agent_id")
+
+        if ctype == "risk.calculated":
+            risk_score = float(p.get("risk_score", 0.0))
+            risk_tier = p.get("risk_tier", "unknown")
+            signals = list(p.get("signals", []))
+
+        elif ctype in ("policy.allowed", "policy.blocked", "policy.escalated"):
+            policy_decision = {
+                "policy.allowed": "allow",
+                "policy.blocked": "block",
+                "policy.escalated": "escalate",
+            }[ctype]
+            policy_reason = p.get("reason", "")
+            policy_version = p.get("policy_version", "")
+            risk_score_at_decision = p.get("risk_score_at_decision")
+
+        elif ctype == "session.created":
+            status = "active"
+
+        elif ctype == "session.blocked":
+            status = "blocked"
+            terminal_reached = True
+
+        elif ctype == "session.completed":
+            final = p.get("final_status", "")
+            if final in ("blocked", "failed"):
+                status = final
+            else:
+                status = "completed"
+            terminal_reached = True
+
+        elif ctype == "session.failed":
+            status = "failed"
+            terminal_reached = True
+
+        elif ctype in ("tool.completed", "tool.invoked"):
+            if p.get("blocked") or p.get("status") == "blocked":
+                tools_blocked = True
+
+        elif ctype == "output.scanned":
+            output_verdict = p.get("verdict")
+            pii_types = list(p.get("pii_types", []))
+            secret_types = list(p.get("secret_types", []))
+            scan_notes = list(p.get("scan_notes", []))
+            if output_verdict == "flag":
+                output_flagged = True
+
+        elif ctype == "agent.response.ready":
+            llm_model = p.get("model")
+            response_length = p.get("response_length")
+            llm_latency_ms = p.get("latency_ms")
+
+        if "pii_redacted" in signals or (isinstance(p, dict) and "pii_detected" in p):
+            pii_redacted = True
+
+    return {
+        "session_id": session_id,
+        "agent_id": agent_id,
+        "risk_score": risk_score,
+        "risk_tier": risk_tier,
+        "signals": signals,
+        "policy_decision": policy_decision,
+        "policy_reason": policy_reason,
+        "policy_version": policy_version,
+        "risk_score_at_decision": risk_score_at_decision,
+        "output_verdict": output_verdict,
+        "pii_types": pii_types,
+        "secret_types": secret_types,
+        "scan_notes": scan_notes,
+        "llm_model": llm_model,
+        "response_length": response_length,
+        "llm_latency_ms": llm_latency_ms,
+        "status": status,
+        "terminal_reached": terminal_reached,
+        "tools_blocked": tools_blocked,
+        "output_flagged": output_flagged,
+        "pii_redacted": pii_redacted,
+    }
+
+
 def _build_recommendations(
     signals: List[str],
     decision: str,
@@ -124,7 +239,9 @@ def _build_recommendations(
     """
     17-rule deterministic recommendations engine.
     Evaluated in priority order (urgent → high → medium → low).
-    Each rule fires at most once per session.
+    Each rule ID fires at most once per session. Multiple rules can fire on
+    overlapping conditions (e.g., high risk score may trigger both
+    'upgrade-to-block' and 'high-behavioral-risk').
     """
     recs: List[RecommendationItem] = []
     fired: Set[str] = set()
@@ -275,98 +392,43 @@ def transform_session_events(events: List[Dict[str, Any]]) -> SessionResults:
 
     # ── 2. Dedup by canonical event_type (first occurrence wins) ────────────
     seen_canonical: Set[str] = set()
+    policy_seen: bool = False
     deduped: List[Dict[str, Any]] = []
     for ev in sorted_events:
         ctype = canonicalise(ev)
-        if ctype not in seen_canonical:
-            seen_canonical.add(ctype)
-            deduped.append({**ev, "_canonical": ctype})
+        # Treat all policy.* variants as a single slot (first wins)
+        if ctype.startswith("policy."):
+            if policy_seen:
+                continue
+            policy_seen = True
+        elif ctype in seen_canonical:
+            continue
+        seen_canonical.add(ctype)
+        deduped.append({**ev, "_canonical": ctype})
 
     # ── 3. Extract state from events ────────────────────────────────────────
-    session_id = ""
-    agent_id: Optional[str] = None
-    risk_score: float = 0.0
-    risk_tier: str = "unknown"
-    signals: List[str] = []
-    policy_decision: str = "unknown"
-    policy_reason: str = ""
-    policy_version: str = ""
-    risk_score_at_decision: Optional[float] = None
-    output_verdict: Optional[str] = None
-    pii_types: List[str] = []
-    secret_types: List[str] = []
-    scan_notes: List[str] = []
-    llm_model: Optional[str] = None
-    response_length: Optional[int] = None
-    llm_latency_ms: Optional[int] = None
-    status: str = "unknown"
-    terminal_reached: bool = False
-    tools_blocked: bool = False
-    output_flagged: bool = False
-    pii_redacted: bool = False
-
-    for ev in deduped:
-        ctype = ev["_canonical"]
-        p = _parse_payload(ev)
-        sid = p.get("session_id") or ev.get("session_id") or ""
-        if sid and not session_id:
-            session_id = str(sid)
-        if not agent_id:
-            agent_id = p.get("agent_id")
-
-        if ctype == "risk.calculated":
-            risk_score = float(p.get("risk_score", 0.0))
-            risk_tier = p.get("risk_tier", "unknown")
-            signals = list(p.get("signals", []))
-
-        elif ctype in ("policy.allowed", "policy.blocked", "policy.escalated"):
-            policy_decision = {
-                "policy.allowed": "allow",
-                "policy.blocked": "block",
-                "policy.escalated": "escalate",
-            }[ctype]
-            policy_reason = p.get("reason", "")
-            policy_version = p.get("policy_version", "")
-            risk_score_at_decision = p.get("risk_score_at_decision")
-
-        elif ctype == "session.created":
-            status = "active"
-
-        elif ctype == "session.blocked":
-            status = "blocked"
-            terminal_reached = True
-
-        elif ctype == "session.completed":
-            final = p.get("final_status", "")
-            if final in ("blocked", "failed"):
-                status = final
-            else:
-                status = "completed"
-            terminal_reached = True
-
-        elif ctype == "session.failed":
-            status = "failed"
-            terminal_reached = True
-
-        elif ctype in ("tool.completed", "tool.invoked"):
-            if p.get("blocked") or p.get("status") == "blocked":
-                tools_blocked = True
-
-        elif ctype == "output.scanned":
-            output_verdict = p.get("verdict")
-            pii_types = list(p.get("pii_types", []))
-            secret_types = list(p.get("secret_types", []))
-            scan_notes = list(p.get("scan_notes", []))
-            if output_verdict == "flag":
-                output_flagged = True
-
-        elif ctype == "agent.response.ready":
-            llm_model = p.get("model")
-            response_length = p.get("response_length")
-            llm_latency_ms = p.get("latency_ms")
-
-        if "pii_redacted" in signals or "pii_detected" in str(p):
-            pii_redacted = True
+    state = _extract_state(deduped)
+    session_id       = state["session_id"]
+    agent_id         = state["agent_id"]
+    risk_score       = state["risk_score"]
+    risk_tier        = state["risk_tier"]
+    signals          = state["signals"]
+    policy_decision  = state["policy_decision"]
+    policy_reason    = state["policy_reason"]
+    policy_version   = state["policy_version"]
+    risk_score_at_decision = state["risk_score_at_decision"]
+    output_verdict   = state["output_verdict"]
+    pii_types        = state["pii_types"]
+    secret_types     = state["secret_types"]
+    scan_notes       = state["scan_notes"]
+    llm_model        = state["llm_model"]
+    response_length  = state["response_length"]
+    llm_latency_ms   = state["llm_latency_ms"]
+    status           = state["status"]
+    terminal_reached = state["terminal_reached"]
+    tools_blocked    = state["tools_blocked"]
+    output_flagged   = state["output_flagged"]
+    pii_redacted     = state["pii_redacted"]
 
     # ── 4. Build decision_trace ──────────────────────────────────────────────
     trace_steps: List[TraceStep] = []

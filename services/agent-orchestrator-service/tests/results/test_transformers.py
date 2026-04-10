@@ -130,3 +130,28 @@ def test_transform_empty_events():
     result = transform_session_events([])
     assert result.meta.partial is True
     assert result.meta.event_count == 0
+
+
+def test_transform_first_policy_decision_wins():
+    """When two conflicting policy events arrive, the first one wins."""
+    events = [
+        _make_event("prompt.received", {"agent_id": "Bot", "prompt_len": 50, "tools": []}, 0),
+        _make_event("risk.calculated", {"risk_score": 0.5, "risk_tier": "medium", "signals": []}, 1),
+        _make_event("policy.decision", {"decision": "allow", "reason": "first", "policy_version": "v1", "risk_score_at_decision": 0.5}, 2),
+        _make_event("policy.decision", {"decision": "block", "reason": "second", "policy_version": "v1", "risk_score_at_decision": 0.5}, 3),
+        _make_event("session.completed", {"final_status": "completed", "policy_decision": "allow", "risk_score": 0.5, "duration_ms": 300, "event_count": 4}, 4),
+    ]
+    result = transform_session_events(events)
+    assert result.decision == "allow", f"Expected 'allow' (first policy), got '{result.decision}'"
+
+
+def test_transform_pii_detection_no_false_positives():
+    """pii_detected check should not fire on string values containing the substring."""
+    events = [
+        _make_event("prompt.received", {"agent_id": "Bot", "prompt_len": 50, "tools": []}, 0),
+        _make_event("risk.calculated", {"risk_score": 0.1, "risk_tier": "low", "signals": [], "scan_notes": ["no pii_detected issues found"]}, 1),
+        _make_event("session.completed", {"final_status": "completed", "policy_decision": "allow", "risk_score": 0.1, "duration_ms": 100, "event_count": 2}, 2),
+    ]
+    result = transform_session_events(events)
+    pii_recs = [r for r in result.recommendations if r.id == "pii-redacted"]
+    assert len(pii_recs) == 0, "PII redacted recommendation should not fire on false positive"
