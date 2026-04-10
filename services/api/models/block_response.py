@@ -7,15 +7,23 @@ Rules enforced here:
 - Explanations come ONLY from this mapping (never raw model output)
 - No internal policy rules, system prompts, or model internals exposed
 - User-facing language is plain English
+
+Exports:
+  BlockedResponse              — Pydantic model for all block-path HTTP 400 details
+  map_categories_to_explanation — Maps S-codes to user-facing explanation string
+  _UNAVAILABLE_EXPLANATION     — Guard timeout/unavailable explanation
+  _LEXICAL_EXPLANATION         — Lexical/regex block explanation
+  _OPA_EXPLANATION             — OPA policy block explanation
+  _POLICY_UNAVAILABLE_EXPLANATION — OPA unavailable explanation
 """
 from __future__ import annotations
-from typing import List, Optional
-from pydantic import BaseModel
+from typing import Dict, List, Optional
+from pydantic import BaseModel, Field
 
 # ── Per-category user-facing explanations ────────────────────────────────────
 # Derived from Llama Guard 3 S1–S15 taxonomy.
 # NEVER expose: raw model output, policy rule names, system prompt details.
-_CATEGORY_EXPLANATIONS: dict[str, str] = {
+_CATEGORY_EXPLANATIONS: Dict[str, str] = {
     "S1":  "This request involves violent activity, which is not allowed.",
     "S2":  "This request involves illegal activity, which cannot be assisted with.",
     "S3":  "This request involves sexual crimes content, which is strictly prohibited.",
@@ -40,7 +48,7 @@ _OPA_EXPLANATION        = "This request was blocked by the platform's security p
 _POLICY_UNAVAILABLE_EXPLANATION = "Policy evaluation is temporarily unavailable. Request blocked for safety."
 
 
-def map_categories_to_explanation(categories: List[str]) -> str:
+def map_categories_to_explanation(categories: Optional[List[str]]) -> str:
     """
     Map a list of Llama Guard category codes → a single user-facing explanation.
 
@@ -49,6 +57,8 @@ def map_categories_to_explanation(categories: List[str]) -> str:
     - Falls back to generic if no known category matched.
     - NEVER returns raw model text (input must be category codes only).
     """
+    if not categories:
+        return _GENERIC_EXPLANATION
     known = [c for c in categories if c in _CATEGORY_EXPLANATIONS]
     if not known:
         return _GENERIC_EXPLANATION
@@ -63,9 +73,14 @@ def map_categories_to_explanation(categories: List[str]) -> str:
 
 class BlockedResponse(BaseModel):
     """Returned as HTTP 400 detail on every blocked request."""
-    error: str = "blocked_by_policy"
-    reason: str          # llama_guard_unsafe_category | lexical_block | policy_block | guard_unavailable | policy_unavailable
-    categories: List[str] = []
-    explanation: str
-    session_id: Optional[str] = None
-    correlation_id: Optional[str] = None
+    error: str = Field(default="blocked_by_policy", description="Always 'blocked_by_policy'")
+    reason: str = Field(
+        ...,
+        description="Why the request was blocked. One of: "
+                    "llama_guard_unsafe_category | lexical_block | policy_block | "
+                    "guard_unavailable | policy_unavailable",
+    )
+    categories: List[str] = Field(default_factory=list, description="Llama Guard S-codes that triggered block, e.g. ['S9']")
+    explanation: str = Field(..., description="User-facing plain English explanation. Never exposes raw model output.")
+    session_id: Optional[str] = Field(None, description="Client-supplied session identifier")
+    correlation_id: Optional[str] = Field(None, description="UUID for correlating this block across logs")

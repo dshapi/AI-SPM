@@ -41,6 +41,17 @@ from platform_shared.kafka_utils import build_producer, safe_send, send_event
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
 
+# ── Prompt screening helpers ──────────────────────────────────────────────────
+from models.block_response import (
+    BlockedResponse,
+    map_categories_to_explanation,
+    _UNAVAILABLE_EXPLANATION,
+    _LEXICAL_EXPLANATION,
+    _OPA_EXPLANATION,
+    _POLICY_UNAVAILABLE_EXPLANATION,
+)
+from models.lexical_screen import screen_lexical
+
 # ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
 from ws.connection_manager import ConnectionManager
 from ws.session_ws import init_ws_layer, router as ws_router
@@ -425,12 +436,17 @@ class ChatResponse(BaseModel):
 
 async def _call_guard_model(prompt: str) -> tuple[str, float, list[str]]:
     """
-    Call guard model service.
+    Call Llama Guard 3 guard model service.
     Returns (verdict, score, categories).
-    Fails open (flag, 0.5) if guard model is unavailable.
+
+    FAILS CLOSED: timeout or unavailability → ("block", 0.5, ["unavailable"])
+    ALL unsafe categories S1–S15 → verdict forced to "block".
     """
     if not settings.guard_model_enabled:
         return "allow", 0.0, []
+
+    # All Llama Guard 3 unsafe categories — any match forces block
+    _ALL_UNSAFE = {f"S{i}" for i in range(1, 16)}  # S1 through S15
 
     try:
         async with httpx.AsyncClient(timeout=settings.guard_model_timeout) as client:
@@ -440,17 +456,19 @@ async def _call_guard_model(prompt: str) -> tuple[str, float, list[str]]:
             )
             resp.raise_for_status()
             data = resp.json()
-            return (
-                data.get("verdict", "allow"),
-                float(data.get("score", 0.0)),
-                data.get("categories", []),
-            )
+            verdict    = data.get("verdict", "block")   # fail-closed default
+            score      = float(data.get("score", 1.0))
+            categories = data.get("categories", [])
+            # Force block if ANY S1–S15 category present (regardless of guard's own verdict)
+            if categories and set(categories) & _ALL_UNSAFE:
+                verdict = "block"
+            return verdict, score, categories
     except httpx.TimeoutException:
-        log.warning("Guard model timeout — failing open with flag")
-        return "flag", 0.5, ["timeout"]
+        log.warning("Guard model timeout — failing CLOSED")
+        return "block", 0.5, ["timeout"]
     except Exception as e:
-        log.warning("Guard model unavailable: %s — failing open with flag", e)
-        return "flag", 0.3, ["unavailable"]
+        log.warning("Guard model unavailable: %s — failing CLOSED", e)
+        return "block", 0.5, ["unavailable"]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -510,36 +528,66 @@ async def chat(
     # 2. Rate limiting
     check_rate_limit(tenant_id, user_id)
 
-    # 3. Guard model pre-screen
+    # 3. Lexical pre-screen (fast regex, before LLM guard)
+    _lex_blocked, _lex_label = screen_lexical(req.prompt)
+    if _lex_blocked:
+        _lex_corr = str(uuid.uuid4())
+        _lex_block = BlockedResponse(
+            reason="lexical_block",
+            categories=[],
+            explanation=_LEXICAL_EXPLANATION,
+            session_id=req.session_id,
+            correlation_id=_lex_corr,
+        )
+        emit_audit(tenant_id, "api", "lexical_block", principal=user_id, severity="warning",
+                   details={"label": _lex_label, "correlation_id": _lex_corr,
+                            "prompt_len": len(req.prompt), "session_id": req.session_id})
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict="block", guard_score=1.0,
+            guard_categories=["lexical"], decision="blocked", tool_uses=[],
+        ))
+        raise HTTPException(status_code=400, detail=_lex_block.model_dump())
+
+    # 3a. Guard model pre-screen (Llama Guard)
     guard_verdict, guard_score, guard_categories = await _call_guard_model(req.prompt)
 
     if guard_verdict == "block":
+        _categories = guard_categories or []
+        _is_unavailable = bool(set(_categories) & {"timeout", "unavailable"})
+        _explanation = (
+            _UNAVAILABLE_EXPLANATION if _is_unavailable
+            else map_categories_to_explanation(_categories)
+        )
+        _reason = "guard_unavailable" if _is_unavailable else "llama_guard_unsafe_category"
+        _correlation_id = str(uuid.uuid4())
+        _block = BlockedResponse(
+            reason=_reason,
+            categories=_categories,
+            explanation=_explanation,
+            session_id=req.session_id,
+            correlation_id=_correlation_id,
+        )
         emit_audit(
             tenant_id, "api", "guard_model_block",
             principal=user_id,
             severity="warning",
             details={
-                "guard_score": guard_score,
-                "categories": guard_categories,
-                "prompt_len": len(req.prompt),
-                "session_id": req.session_id,
+                "guard_score":    guard_score,
+                "categories":     _categories,
+                "explanation":    _explanation,
+                "reason":         _reason,
+                "correlation_id": _correlation_id,
+                "prompt_len":     len(req.prompt),
+                "session_id":     req.session_id,
             },
         )
         asyncio.ensure_future(_report_to_orchestrator(
-            raw_token=token,
-            prompt=req.prompt,
-            session_id=req.session_id,
-            claims=claims,
-            guard_verdict=guard_verdict,
-            guard_score=guard_score,
-            guard_categories=guard_categories,
-            decision="blocked",
-            tool_uses=[],
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict=guard_verdict, guard_score=guard_score,
+            guard_categories=_categories, decision="blocked", tool_uses=[],
         ))
-        raise HTTPException(
-            status_code=400,
-            detail=f"Request blocked by content policy: {', '.join(guard_categories)}",
-        )
+        raise HTTPException(status_code=400, detail=_block.model_dump())
 
     # 3b. Model gate (SPM) — fail-closed
     _model_id = os.getenv("LLM_MODEL_ID")
@@ -550,39 +598,60 @@ async def chat(
         raise HTTPException(status_code=403,
                             detail={"error": "model_not_approved", "model_id": _model_id})
 
-    # 3c. OPA prompt policy
+    # 3c. OPA prompt policy — fail-closed, real guard signals
     opa_prompt_input = {
-        "posture_score": 0.05,
-        "signals": [],
-        "behavioral_signals": [],
-        "retrieval_trust": 1.0,
-        "intent_drift": 0.0,
-        "guard_verdict": guard_verdict,
-        "guard_score": guard_score,
-        "guard_categories": guard_categories,
+        "posture_score":      min(guard_score, 1.0),
+        "signals":            guard_categories,
+        "behavioral_signals": guard_categories,
+        "retrieval_trust":    0.5 if guard_verdict == "flag" else 1.0,
+        "intent_drift":       guard_score,
+        "guard_verdict":      guard_verdict,
+        "guard_score":        guard_score,
+        "guard_categories":   guard_categories,
         "auth_context": {
-            "sub": user_id,
+            "sub":       user_id,
             "tenant_id": tenant_id,
-            "roles": claims.get("roles", []),
-            "scopes": claims.get("scopes", []),
-            "claims": {},
+            "roles":     claims.get("roles", []),
+            "scopes":    claims.get("scopes", []),
+            "claims":    {},
         },
     }
     try:
-        async with httpx.AsyncClient(timeout=1.0) as client:
-            opa_resp = await client.post(
+        async with httpx.AsyncClient(timeout=settings.opa_timeout) as opa_client:
+            opa_resp = await opa_client.post(
                 f"{OPA_URL_FOR_GATE}/v1/data/spm/prompt/allow",
                 json={"input": opa_prompt_input},
             )
-            if opa_resp.status_code == 200:
-                opa_result = opa_resp.json().get("result", {})
-                if isinstance(opa_result, dict) and opa_result.get("decision") == "block":
-                    raise HTTPException(status_code=400,
-                                        detail=f"Prompt policy block: {opa_result.get('reason','policy')}")
+            if opa_resp.status_code != 200:
+                raise Exception(f"OPA returned HTTP {opa_resp.status_code}")
+            opa_result = opa_resp.json().get("result", {})
+            if isinstance(opa_result, dict) and opa_result.get("decision") == "block":
+                _opa_corr = str(uuid.uuid4())
+                _block = BlockedResponse(
+                    reason="policy_block",
+                    categories=guard_categories,
+                    explanation=_OPA_EXPLANATION,
+                    session_id=req.session_id,
+                    correlation_id=_opa_corr,
+                )
+                emit_audit(tenant_id, "api", "opa_prompt_block", principal=user_id,
+                           details={"opa_reason": opa_result.get("reason", "policy"),
+                                    "explanation": _OPA_EXPLANATION,
+                                    "correlation_id": _opa_corr,
+                                    "session_id": req.session_id})
+                raise HTTPException(status_code=400, detail=_block.model_dump())
     except HTTPException:
         raise
     except Exception as e:
-        log.warning("OPA prompt policy check failed: %s — continuing", e)
+        log.warning("OPA prompt policy unavailable: %s — failing CLOSED", e)
+        _block = BlockedResponse(
+            reason="policy_unavailable",
+            categories=[],
+            explanation=_POLICY_UNAVAILABLE_EXPLANATION,
+            session_id=req.session_id,
+            correlation_id=str(uuid.uuid4()),
+        )
+        raise HTTPException(status_code=400, detail=_block.model_dump())
 
     # 4. Call Anthropic with tool loop (web_search + web_fetch)
     llm_response: str | None = None
@@ -789,24 +858,55 @@ async def chat_stream(
 
     check_rate_limit(tenant_id, user_id)
 
-    guard_verdict, guard_score, guard_categories = await _call_guard_model(req.prompt)
-    if guard_verdict == "block":
-        emit_audit(tenant_id, "api", "guard_model_block", principal=user_id, severity="warning",
-                   details={"guard_score": guard_score, "categories": guard_categories,
+    # Lexical pre-screen
+    _lex_blocked, _lex_label = screen_lexical(req.prompt)
+    if _lex_blocked:
+        _lex_corr = str(uuid.uuid4())
+        _lex_block = BlockedResponse(
+            reason="lexical_block",
+            categories=[],
+            explanation=_LEXICAL_EXPLANATION,
+            session_id=req.session_id,
+            correlation_id=_lex_corr,
+        )
+        emit_audit(tenant_id, "api", "lexical_block", principal=user_id, severity="warning",
+                   details={"label": _lex_label, "correlation_id": _lex_corr,
                             "prompt_len": len(req.prompt), "session_id": req.session_id})
         asyncio.ensure_future(_report_to_orchestrator(
-            raw_token=token,
-            prompt=req.prompt,
-            session_id=req.session_id,
-            claims=claims,
-            guard_verdict=guard_verdict,
-            guard_score=guard_score,
-            guard_categories=guard_categories,
-            decision="blocked",
-            tool_uses=[],
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict="block", guard_score=1.0,
+            guard_categories=["lexical"], decision="blocked", tool_uses=[],
         ))
-        raise HTTPException(status_code=400,
-                            detail=f"Request blocked by content policy: {', '.join(guard_categories)}")
+        raise HTTPException(status_code=400, detail=_lex_block.model_dump())
+
+    guard_verdict, guard_score, guard_categories = await _call_guard_model(req.prompt)
+    if guard_verdict == "block":
+        _categories = guard_categories or []
+        _is_unavailable = bool(set(_categories) & {"timeout", "unavailable"})
+        _explanation = (
+            _UNAVAILABLE_EXPLANATION if _is_unavailable
+            else map_categories_to_explanation(_categories)
+        )
+        _reason = "guard_unavailable" if _is_unavailable else "llama_guard_unsafe_category"
+        _correlation_id = str(uuid.uuid4())
+        _block = BlockedResponse(
+            reason=_reason,
+            categories=_categories,
+            explanation=_explanation,
+            session_id=req.session_id,
+            correlation_id=_correlation_id,
+        )
+        emit_audit(tenant_id, "api", "guard_model_block", principal=user_id, severity="warning",
+                   details={"guard_score": guard_score, "categories": _categories,
+                            "explanation": _explanation, "reason": _reason,
+                            "correlation_id": _correlation_id,
+                            "prompt_len": len(req.prompt), "session_id": req.session_id})
+        asyncio.ensure_future(_report_to_orchestrator(
+            raw_token=token, prompt=req.prompt, session_id=req.session_id,
+            claims=claims, guard_verdict=guard_verdict, guard_score=guard_score,
+            guard_categories=_categories, decision="blocked", tool_uses=[],
+        ))
+        raise HTTPException(status_code=400, detail=_block.model_dump())
 
     _model_id = os.getenv("LLM_MODEL_ID")
     if _model_id and not await _check_model_gate(_model_id, tenant_id):

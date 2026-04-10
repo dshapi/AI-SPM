@@ -20,7 +20,7 @@ def test_s6_explanation():
 
 def test_s15_explanation():
     result = map_categories_to_explanation(["S15"])
-    assert any(w in result.lower() for w in ("override", "jailbreak", "system", "safety"))
+    assert any(w in result.lower() for w in ("override", "system", "safety"))
 
 def test_multiple_categories_returns_single_string():
     result = map_categories_to_explanation(["S1", "S9"])
