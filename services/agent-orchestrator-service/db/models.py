@@ -96,3 +96,25 @@ class SessionEventORM(Base):
         Index("ix_session_events_session_id", "session_id"),
         Index("ix_session_events_event_type", "event_type"),
     )
+
+
+class CaseORM(Base):
+    """
+    Persistent record for one escalated AI security case.
+    Replaces the former in-memory dict in CasesService.
+    """
+    __tablename__ = "agent_cases"
+
+    case_id    = Column(String,               primary_key=True)
+    session_id = Column(String,               nullable=False)
+    reason     = Column(String,               nullable=False)
+    summary    = Column(Text,                 nullable=False)
+    risk_score = Column(Float,                nullable=False)
+    decision   = Column(String,               nullable=False)
+    status     = Column(String,               nullable=False, default="open")
+    created_at = Column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        Index("ix_agent_cases_session_id", "session_id"),
+        Index("ix_agent_cases_created_at", "created_at"),
+    )

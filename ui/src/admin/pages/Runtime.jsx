@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   Search, Pause, Play, Download,
   Cpu, Wrench,
@@ -454,6 +455,7 @@ function ControlPanel({ session }) {
   const [showConfirm, setShowConfirm]   = useState(false)
   const [escalating,  setEscalating]    = useState(false)
   const [toast,       setToast]         = useState(null)   // { message, variant }
+  const navigate = useNavigate()
 
   const dismissToast = useCallback(() => setToast(null), [])
 
@@ -488,7 +490,8 @@ function ControlPanel({ session }) {
 
       const data = await res.json()
       setShowConfirm(false)
-      setToast({ message: 'Case created successfully', variant: 'success' })
+      setToast({ message: 'Case created — redirecting…', variant: 'success' })
+      setTimeout(() => navigate(`/admin/cases?case_id=${data.case_id}`, { state: { escalatedCase: data } }), 800)
     } catch (err) {
       setShowConfirm(false)
       setToast({ message: err.message || 'Failed to create case', variant: 'error' })

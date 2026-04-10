@@ -6,6 +6,7 @@ FastAPI dependency functions for database access.
 get_async_db       — yields a fresh AsyncSession per request (auto-closed).
 get_session_repo   — returns SessionRepository bound to the request's session.
 get_event_repo     — returns EventRepository bound to the request's session.
+get_case_repo      — returns CaseRepository bound to the request's session.
 
 IMPORTANT: SessionRepository and EventRepository are instantiated per-request,
 not stored on app.state. The shared state is app.state.db_session_factory
@@ -24,6 +25,7 @@ from typing import AsyncGenerator
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.cases import CaseRepository
 from models.event import EventRepository
 from models.session import SessionRepository
 
@@ -52,3 +54,10 @@ async def get_event_repo(
 ) -> EventRepository:
     """FastAPI dependency: returns EventRepository for the current request."""
     return EventRepository(session)
+
+
+async def get_case_repo(
+    session: AsyncSession = Depends(get_async_db),
+) -> CaseRepository:
+    """FastAPI dependency: returns CaseRepository for the current request."""
+    return CaseRepository(session)

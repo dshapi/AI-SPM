@@ -132,7 +132,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.results_service = ResultsService()
     logger.info("ResultsService initialised")
     app.state.cases_service = CasesService()
-    logger.info("CasesService initialised (in-memory)")
+    logger.info("CasesService initialised (DB-backed)")
 
     # ── LLM Client (optional — disabled gracefully if key not set) -────────
     llm_api_key = os.getenv("LLM_API_KEY", "")

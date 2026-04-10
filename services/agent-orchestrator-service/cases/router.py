@@ -11,7 +11,7 @@ RBAC:
   GET  requires session.read     (all authenticated roles)
 
 The router reads the shared CasesService and ResultsService from app.state,
-and receives SessionRepository + EventRepository as per-request dependencies.
+and receives per-request repositories as FastAPI dependencies.
 """
 from __future__ import annotations
 
@@ -21,9 +21,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from cases.schemas import CaseListResponse, CaseResponse, CreateCaseRequest
 from cases.service import CasesService
-from dependencies.db import get_event_repo, get_session_repo
+from dependencies.db import get_case_repo, get_event_repo, get_session_repo
 from dependencies.auth import IdentityContext
 from dependencies.rbac import require_session_override, require_session_read
+from models.cases import CaseRepository
 from models.event import EventRepository
 from models.session import SessionRepository
 from results.service import ResultsService
@@ -67,6 +68,7 @@ async def create_case(
     identity: IdentityContext = Depends(require_session_override),
     session_repo: SessionRepository = Depends(get_session_repo),
     event_repo: EventRepository = Depends(get_event_repo),
+    case_repo: CaseRepository = Depends(get_case_repo),
 ) -> CaseResponse:
     trace_id = request.state.trace_id
     response.headers["X-Trace-ID"] = trace_id
@@ -85,6 +87,7 @@ async def create_case(
         session_repo=session_repo,
         event_repo=event_repo,
         results_svc=results_svc,
+        case_repo=case_repo,
     )
 
     if case is None:
@@ -118,6 +121,7 @@ async def list_cases(
     request: Request,
     response: Response,
     identity: IdentityContext = Depends(require_session_read),
+    case_repo: CaseRepository = Depends(get_case_repo),
 ) -> CaseListResponse:
     trace_id = request.state.trace_id
     response.headers["X-Trace-ID"] = trace_id
@@ -125,6 +129,6 @@ async def list_cases(
     logger.info("GET /cases user=%s trace=%s", identity.user_id, trace_id)
 
     cases_svc = _get_cases_service(request)
-    records = cases_svc.list_cases()
+    records = await cases_svc.list_cases(case_repo)
     cases = [CaseResponse.from_record(r) for r in records]
     return CaseListResponse(cases=cases, total=len(cases))

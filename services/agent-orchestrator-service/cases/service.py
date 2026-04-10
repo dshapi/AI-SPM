@@ -1,23 +1,23 @@
 """
 cases/service.py
 ────────────────
-CasesService: builds and stores CaseRecord objects in an in-memory dict.
+CasesService: builds CaseRecord objects and persists them via CaseRepository.
 
 Usage
 ─────
-  One shared instance wired to app.state.cases_service in main.py lifespan.
-  All repo/service arguments are injected per-request by the router.
+  One shared *stateless* instance wired to app.state.cases_service in main.py.
+  All repository arguments are injected per-request by the router.
 
-create_case() returns None when the session_id does not exist in the DB —
-the router is responsible for converting that to a 404 HTTP response.
+  State now lives in the DB — the service survives container restarts.
 """
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import List, Optional
 from uuid import uuid4
 
 from cases.schemas import CaseRecord
+from models.cases import CaseRepository
 from models.event import EventRepository
 from models.session import SessionRecord, SessionRepository
 from results.schemas import SessionResults
@@ -28,14 +28,9 @@ logger = logging.getLogger(__name__)
 
 class CasesService:
     """
-    Manages cases in an in-memory dictionary.
-
-    Share one instance via app.state.cases_service; do NOT instantiate
-    per-request (you would lose all stored cases between requests).
+    Stateless service — all persistence is delegated to CaseRepository.
+    One instance is stored on app.state; no mutable state is held here.
     """
-
-    def __init__(self) -> None:
-        self._cases: Dict[str, CaseRecord] = {}
 
     async def create_case(
         self,
@@ -44,9 +39,10 @@ class CasesService:
         session_repo: SessionRepository,
         event_repo: EventRepository,
         results_svc: ResultsService,
+        case_repo: CaseRepository,
     ) -> Optional[CaseRecord]:
         """
-        Fetch session + results, build a CaseRecord, and store it.
+        Fetch session + results, build a CaseRecord, and persist to the DB.
 
         Returns:
             CaseRecord on success.
@@ -69,16 +65,21 @@ class CasesService:
             risk_score=results.risk.score,
             decision=results.decision,
         )
-        self._cases[case.case_id] = case
+
+        await case_repo.insert(case)
         logger.info(
             "case created case_id=%s session_id=%s decision=%s risk=%.2f",
             case.case_id, session_id, case.decision, case.risk_score,
         )
         return case
 
-    def list_cases(self) -> List[CaseRecord]:
-        """Return all cases sorted newest-first."""
-        return sorted(self._cases.values(), key=lambda c: c.created_at, reverse=True)
+    async def list_cases(
+        self,
+        case_repo: CaseRepository,
+        limit: int = 200,
+    ) -> List[CaseRecord]:
+        """Return all cases from the DB, newest-first."""
+        return await case_repo.list_all(limit=limit)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 """
 seed_demo.py
 ─────────────
-Inserts realistic demo sessions + events into the DB on first boot.
-Only runs when the agent_sessions table is empty — idempotent.
+Inserts realistic demo sessions + events + cases into the DB on first boot.
+Idempotent — checks row counts before inserting.
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from db.models import AgentSessionORM, SessionEventORM
+from db.models import AgentSessionORM, CaseORM, SessionEventORM
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,8 @@ _NOW = datetime.now(timezone.utc)
 def _ts(minutes_ago: float) -> datetime:
     return _NOW - timedelta(minutes=minutes_ago)
 
+
+# ── Demo sessions ─────────────────────────────────────────────────────────────
 
 DEMO_SESSIONS = [
     # ── Active sessions ───────────────────────────────────────────────────────
@@ -282,25 +284,246 @@ DEMO_SESSIONS = [
 ]
 
 
-async def seed_demo_data(session_factory: async_sessionmaker) -> None:
-    """Insert demo sessions if the DB is empty. Idempotent."""
-    async with session_factory() as db:
-        count = (await db.execute(select(func.count()).select_from(AgentSessionORM))).scalar()
-        if count and count > 0:
-            logger.info("seed_demo: DB already has %d sessions — skipping seed", count)
-            return
+# ── Demo cases (12 entries covering varied risk profiles and statuses) ─────────
 
-        logger.info("seed_demo: DB is empty — inserting %d demo sessions", len(DEMO_SESSIONS))
-        for s in DEMO_SESSIONS:
-            events = s.pop("events")
-            db.add(AgentSessionORM(**s))
-            for event_type, ts, payload in events:
-                db.add(SessionEventORM(
-                    id=str(uuid.uuid4()),
-                    session_id=s["id"],
-                    event_type=event_type,
-                    payload=json.dumps(payload),
-                    timestamp=ts,
+DEMO_CASES = [
+    {
+        "case_id": "CASE-1042",
+        "session_id": "sess_a1b2c3d4e5f6",
+        "reason": "manual_escalation",
+        "summary": (
+            "Session sess_a1b2c3d4e5f6 (agent: CustomerSupport-GPT) escalated. "
+            "Adversarial prompt injection detected — Base64-encoded payload designed to override "
+            "system prompt. Prompt-Guard v3 matched known jailbreak signature with confidence 0.97. "
+            "Session quarantined. Risk tier: unacceptable (score 0.94). Policy decision: block. Events observed: 4."
+        ),
+        "risk_score": 0.94,
+        "decision": "block",
+        "status": "investigating",
+        "created_at_offset": 480,
+    },
+    {
+        "case_id": "CASE-1049",
+        "session_id": "sess_f9g8h7i6",
+        "reason": "anomalous_rag_retrieval",
+        "summary": (
+            "Session sess_f9g8h7i6 (agent: FinanceAssistant-v2) escalated. "
+            "Anomalous RAG retrieval pattern — 847 customer financial records retrieved in one session "
+            "(70× baseline of 12). PII fields including SSN partials and account numbers exposed. "
+            "PII-Guard v2 threshold exceeded. Risk tier: high (score 0.78). Policy decision: allow. Events observed: 6."
+        ),
+        "risk_score": 0.78,
+        "decision": "allow",
+        "status": "escalated",
+        "created_at_offset": 720,
+    },
+    {
+        "case_id": "CASE-1051",
+        "session_id": "sess_z9y8x7w6v5u4",
+        "reason": "unauthorized_tool_invocation",
+        "summary": (
+            "Session sess_z9y8x7w6v5u4 (agent: DataPipeline-Orchestrator) escalated. "
+            "Agent attempted to invoke SQL-Query-Runner with a DROP TABLE statement — outside "
+            "approved SELECT-only scope. Tool-Scope v2 blocked the request (confidence 1.00) "
+            "and paused the session. Risk tier: unacceptable (score 0.97). Policy decision: block. Events observed: 3."
+        ),
+        "risk_score": 0.97,
+        "decision": "block",
+        "status": "open",
+        "created_at_offset": 840,
+    },
+    {
+        "case_id": "CASE-1057",
+        "session_id": "sess_sim038",
+        "reason": "policy_gap_detected",
+        "summary": (
+            "Simulation result sess_sim038 (agent: CodeReview-Assistant) escalated. "
+            "Base64-obfuscated payload scored 0.78 on Prompt-Guard v3 — below the 0.85 block threshold. "
+            "Flagged-but-allowed verdict reveals a gap in obfuscation coverage. "
+            "Risk tier: limited (score 0.78). Policy decision: allow. Events observed: 2."
+        ),
+        "risk_score": 0.78,
+        "decision": "allow",
+        "status": "open",
+        "created_at_offset": 2100,
+    },
+    {
+        "case_id": "CASE-1038",
+        "session_id": "sess_m3n4o5p6",
+        "reason": "impossible_travel_detected",
+        "summary": (
+            "Session sess_m3n4o5p6 (agent: FinanceAssistant-v2) escalated. "
+            "Session token used simultaneously from San Francisco and Lagos, Nigeria — 9,250 km apart "
+            "in 4 minutes. Impossible-Travel v1 triggered. Token revoked, user force-authenticated. "
+            "Forensics: token exfiltrated via misconfigured Zapier webhook. "
+            "Risk tier: high (score 0.73). Policy decision: block. Events observed: 3."
+        ),
+        "risk_score": 0.73,
+        "decision": "block",
+        "status": "resolved",
+        "created_at_offset": 2880,
+    },
+    {
+        "case_id": "CASE-1060",
+        "session_id": "sess_p1q2r3s4",
+        "reason": "memory_poisoning",
+        "summary": (
+            "Session sess_p1q2r3s4 (agent: HR-Assistant-Pro) escalated. "
+            "Adversarial instructions embedded into persistent memory store across 14 prior sessions. "
+            "On subsequent sessions the agent recalled poisoned entries and produced biased vendor "
+            "recommendations. Memory-Guard v1 detected the pattern (confidence 0.91). "
+            "Risk tier: high (score 0.81). Policy decision: block. Events observed: 6."
+        ),
+        "risk_score": 0.81,
+        "decision": "block",
+        "status": "investigating",
+        "created_at_offset": 540,
+    },
+    {
+        "case_id": "CASE-1063",
+        "session_id": "sess_cc3bb2aa1",
+        "reason": "supply_chain_malicious_plugin",
+        "summary": (
+            "Session sess_cc3bb2aa1 (agent: CodeReview-Assistant) escalated. "
+            "Third-party tool plugin 'code-formatter-pro v2.1.4' made outbound HTTP requests to an "
+            "external C2 domain on invocation. Outbound-Guard v1 intercepted and blocked the beacon. "
+            "Plugin quarantined; blast radius under assessment. "
+            "Risk tier: unacceptable (score 0.99). Policy decision: block. Events observed: 2."
+        ),
+        "risk_score": 0.99,
+        "decision": "block",
+        "status": "open",
+        "created_at_offset": 120,
+    },
+    {
+        "case_id": "CASE-1065",
+        "session_id": "sess_q1r2s3t4",
+        "reason": "hallucination_cascade",
+        "summary": (
+            "Sessions sess_q1r2s3t4 and 11 others (agent: LegalResearch-AI) escalated. "
+            "Fabricated case citations detected across 12 research summaries — real court names with "
+            "invented case numbers and rulings. Hallucination-Guard v2 flagged post-delivery "
+            "(confidence 0.94). RAG relevance threshold too permissive. "
+            "Risk tier: high (score 0.68). Policy decision: allow. Events observed: 4."
+        ),
+        "risk_score": 0.68,
+        "decision": "allow",
+        "status": "open",
+        "created_at_offset": 390,
+    },
+    {
+        "case_id": "CASE-1067",
+        "session_id": "sess_aa1bb2cc3",
+        "reason": "excessive_agency",
+        "summary": (
+            "Session sess_aa1bb2cc3 (agent: SalesIntelligence-Bot) escalated. "
+            "Agent invoked Code Interpreter and executed recursive file deletion on the shared analytics "
+            "directory — 12 files (2.3 GB) deleted without user authorization. Agency-Scope v1 "
+            "terminated the session. Rollback in progress. "
+            "Risk tier: unacceptable (score 0.96). Policy decision: block. Events observed: 4."
+        ),
+        "risk_score": 0.96,
+        "decision": "block",
+        "status": "escalated",
+        "created_at_offset": 75,
+    },
+    {
+        "case_id": "CASE-1070",
+        "session_id": "sess_dd4ee5ff6",
+        "reason": "ssrf_attempt",
+        "summary": (
+            "Session sess_dd4ee5ff6 (agent: ThreatHunter-AI) escalated. "
+            "Web-Browse tool followed a redirect chain to the EC2 instance metadata endpoint "
+            "(169.254.169.254). SSRF-Guard v1 blocked the request before any response was read — "
+            "no token exposure. 169.254.0.0/16 added to global denylist. "
+            "Risk tier: limited (score 0.55). Policy decision: block. Events observed: 3."
+        ),
+        "risk_score": 0.55,
+        "decision": "block",
+        "status": "resolved",
+        "created_at_offset": 3000,
+    },
+    {
+        "case_id": "CASE-1073",
+        "session_id": "sess_gg7hh8ii9",
+        "reason": "pii_exfiltration_email",
+        "summary": (
+            "Session sess_gg7hh8ii9 (agent: CustomerSupport-GPT) escalated. "
+            "Agent attempted to email the full customer contact list (11,400 records) to an external "
+            "analytics endpoint. PII-Guard v2 and Email-Guard v1 both triggered. Session blocked "
+            "before transmission. GDPR notification assessment initiated. "
+            "Risk tier: unacceptable (score 0.91). Policy decision: block. Events observed: 4."
+        ),
+        "risk_score": 0.91,
+        "decision": "block",
+        "status": "investigating",
+        "created_at_offset": 2100,
+    },
+    {
+        "case_id": "CASE-1076",
+        "session_id": "sess_jj0kk1ll2",
+        "reason": "unauthorized_scope_legal",
+        "summary": (
+            "Session sess_jj0kk1ll2 (agent: LegalResearch-AI) escalated. "
+            "Request to export all M&A contracts from the last 3 years including sealed settlements — "
+            "far exceeding the agent's approved read-only research scope. "
+            "Privilege-Escalation v1 blocked with confidence 0.89. "
+            "Risk tier: unacceptable (score 0.89). Policy decision: block. Events observed: 4."
+        ),
+        "risk_score": 0.89,
+        "decision": "block",
+        "status": "open",
+        "created_at_offset": 1320,
+    },
+]
+
+
+async def seed_demo_data(session_factory: async_sessionmaker) -> None:
+    """Insert demo sessions + cases if the DB is empty. Idempotent."""
+    async with session_factory() as db:
+        session_count = (await db.execute(select(func.count()).select_from(AgentSessionORM))).scalar()
+        if session_count and session_count > 0:
+            logger.info("seed_demo: DB already has %d sessions — skipping session seed", session_count)
+        else:
+            logger.info("seed_demo: DB is empty — inserting %d demo sessions", len(DEMO_SESSIONS))
+            for s in DEMO_SESSIONS:
+                events = s.pop("events")
+                db.add(AgentSessionORM(**s))
+                for event_type, ts, payload in events:
+                    db.add(SessionEventORM(
+                        id=str(uuid.uuid4()),
+                        session_id=s["id"],
+                        event_type=event_type,
+                        payload=json.dumps(payload),
+                        timestamp=ts,
+                    ))
+            await db.commit()
+            logger.info("seed_demo: committed %d demo sessions", len(DEMO_SESSIONS))
+
+        # Check which demo case IDs are already present and only insert the missing ones.
+        # This is idempotent even if a prior escalation added user-created cases.
+        existing_ids_result = await db.execute(
+            select(CaseORM.case_id).where(
+                CaseORM.case_id.in_([c["case_id"] for c in DEMO_CASES])
+            )
+        )
+        existing_demo_ids = {row[0] for row in existing_ids_result.fetchall()}
+        missing = [c for c in DEMO_CASES if c["case_id"] not in existing_demo_ids]
+
+        if not missing:
+            logger.info("seed_demo: all %d demo cases already present — skipping", len(DEMO_CASES))
+        else:
+            logger.info("seed_demo: inserting %d missing demo cases", len(missing))
+            for c in missing:
+                db.add(CaseORM(
+                    case_id=c["case_id"],
+                    session_id=c["session_id"],
+                    reason=c["reason"],
+                    summary=c["summary"],
+                    risk_score=c["risk_score"],
+                    decision=c["decision"],
+                    status=c["status"],
+                    created_at=_ts(c["created_at_offset"]),
                 ))
-        await db.commit()
-        logger.info("seed_demo: committed %d demo sessions", len(DEMO_SESSIONS))
+            await db.commit()
+            logger.info("seed_demo: committed %d demo cases", len(missing))
