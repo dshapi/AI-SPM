@@ -118,17 +118,11 @@ jobs:
           done
           echo "PostgreSQL is ready."
 
-      # ── 5. Schema bootstrap + migration ──────────────────────────────────
+      # ── 5. Schema migration ───────────────────────────────────────────────
       #
-      # 001_initial.sql creates the base tables (model_registry, audit_export,
-      # etc.) that Alembic revision 001 assumes already exist (it is a no-op
-      # baseline).  On a fresh CI database we must run the SQL first, then let
-      # Alembic apply all delta revisions on top.
-      - name: Bootstrap initial schema (001_initial.sql)
-        run: |
-          psql postgresql://test:test@localhost:5432/test_db \
-            -f spm/db/migrations/001_initial.sql
-
+      # Migration 001 creates the base schema (CREATE … IF NOT EXISTS, so it
+      # is safe on databases already bootstrapped with 001_initial.sql).
+      # Migration 002+ applies delta changes on top.
       - name: Run database migrations (alembic upgrade head)
         working-directory: spm
         run: alembic upgrade head
