@@ -1,39 +1,27 @@
-import { useState, useRef, useCallback } from 'react'
-import { Bell, TriangleAlert, FileCheck2, Info, CheckCircle2, CheckCheck } from 'lucide-react'
+import { useRef, useCallback } from 'react'
+import { Bell, TriangleAlert, Info, CheckCheck, BellOff } from 'lucide-react'
 import { cn } from '../../lib/utils.js'
 import { useClickOutside } from '../../hooks/useClickOutside.js'
+import { useCaseNotifications } from '../../hooks/useCaseNotifications.js'
+import { useState } from 'react'
 
-// ── Notification types ─────────────────────────────────────────────────────────
+// ── Notification type → visual style ─────────────────────────────────────────
 const TYPE = {
-  alert:   { icon: TriangleAlert,  color: 'text-red-500',    bg: 'bg-red-50'    },
-  policy:  { icon: FileCheck2,     color: 'text-orange-500', bg: 'bg-orange-50' },
-  info:    { icon: Info,           color: 'text-blue-500',   bg: 'bg-blue-50'   },
-  success: { icon: CheckCircle2,   color: 'text-emerald-500',bg: 'bg-emerald-50'},
+  alert:   { icon: TriangleAlert, color: 'text-red-500',     bg: 'bg-red-50'     },
+  info:    { icon: Info,          color: 'text-blue-500',    bg: 'bg-blue-50'    },
 }
 
-// ── Mock data ──────────────────────────────────────────────────────────────────
-const INITIAL = [
-  { id: 1, type: 'alert',   title: 'Prompt injection detected',  sub: 'gpt-4-turbo', time: '2m ago',  unread: true  },
-  { id: 2, type: 'policy',  title: 'Policy violation threshold',  sub: '27 violations today',    time: '14m ago', unread: true  },
-  { id: 3, type: 'info',    title: 'New model registered',        sub: 'llama-3-70b added',      time: '1h ago',  unread: true  },
-  { id: 4, type: 'success', title: 'Simulation run complete',     sub: 'Policy v3 passed',       time: '3h ago',  unread: false },
-  { id: 5, type: 'alert',   title: 'Jailbreak pattern matched',   sub: 'mixtral-8x7b','time': '5h ago', unread: false },
-]
-
-// ── Component ──────────────────────────────────────────────────────────────────
+// ── Component ─────────────────────────────────────────────────────────────────
 export function NotificationsMenu() {
-  const [notes, setNotes] = useState(INITIAL)
-  const [open, setOpen]   = useState(false)
-  const buttonRef         = useRef(null)
-  const menuRef           = useRef(null)
+  const { notifications, markRead, markAllRead, loading } = useCaseNotifications()
+  const [open, setOpen] = useState(false)
+  const buttonRef       = useRef(null)
+  const menuRef         = useRef(null)
 
-  const unreadCount = notes.filter(n => n.unread).length
+  const unreadCount = notifications.filter(n => n.unread).length
 
-  const toggle       = () => setOpen(v => !v)
-  const markAllRead  = () => setNotes(ns => ns.map(n => ({ ...n, unread: false })))
-  const markRead     = id => setNotes(ns => ns.map(n => n.id === id ? { ...n, unread: false } : n))
-
-  const close = useCallback(() => setOpen(false), [])
+  const toggle = () => setOpen(v => !v)
+  const close  = useCallback(() => setOpen(false), [])
   useClickOutside([buttonRef, menuRef], close)
 
   return (
@@ -68,10 +56,12 @@ export function NotificationsMenu() {
         >
           {/* Header */}
           <div className="px-4 py-3 border-b border-gray-100 flex items-center justify-between">
-            <div>
+            <div className="flex items-center gap-2">
               <p className="text-sm font-semibold text-gray-900">Notifications</p>
               {unreadCount > 0 && (
-                <p className="text-xs text-gray-400 mt-0.5">{unreadCount} unread</p>
+                <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 bg-red-500 text-white text-[10px] font-bold rounded-full leading-none">
+                  {unreadCount}
+                </span>
               )}
             </div>
             {unreadCount > 0 && (
@@ -87,48 +77,64 @@ export function NotificationsMenu() {
 
           {/* List */}
           <div className="max-h-[360px] overflow-y-auto">
-            {notes.map(n => {
-              const T = TYPE[n.type] ?? TYPE.info
-              const Icon = T.icon
-              return (
-                <button
-                  key={n.id}
-                  onClick={() => markRead(n.id)}
-                  className={cn(
-                    'w-full flex items-start gap-3 px-4 py-3.5 text-left',
-                    'border-b border-gray-50 last:border-0',
-                    'hover:bg-gray-50 transition-colors duration-100',
-                    n.unread && 'bg-blue-50/30',
-                  )}
-                >
-                  {/* Icon */}
-                  <span className={cn('w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5', T.bg)}>
-                    <Icon size={15} strokeWidth={1.75} className={T.color} />
-                  </span>
+            {loading ? (
+              <div className="flex items-center justify-center py-10 text-gray-400">
+                <span className="text-[13px]">Loading…</span>
+              </div>
+            ) : notifications.length === 0 ? (
+              <div className="flex flex-col items-center justify-center py-10 gap-2 text-gray-400">
+                <BellOff size={22} strokeWidth={1.5} />
+                <span className="text-[13px]">No notifications yet</span>
+                <span className="text-[11px] text-gray-300">Cases opened by you or the threat hunter will appear here</span>
+              </div>
+            ) : (
+              notifications.map(n => {
+                const T    = TYPE[n.type] ?? TYPE.info
+                const Icon = T.icon
+                return (
+                  <button
+                    key={n.id}
+                    onClick={() => markRead(n.id)}
+                    className={cn(
+                      'w-full flex items-start gap-3 px-4 py-3.5 text-left',
+                      'border-b border-gray-50 last:border-0',
+                      'hover:bg-gray-50 transition-colors duration-100',
+                      n.unread && 'bg-blue-50/30',
+                    )}
+                  >
+                    {/* Icon chip */}
+                    <span className={cn('w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5', T.bg)}>
+                      <Icon size={15} strokeWidth={1.75} className={T.color} />
+                    </span>
 
-                  {/* Text */}
-                  <div className="flex-1 min-w-0">
-                    <p className={cn('text-sm leading-snug truncate', n.unread ? 'font-semibold text-gray-900' : 'font-medium text-gray-700')}>
-                      {n.title}
-                    </p>
-                    <p className="text-xs text-gray-400 mt-0.5 truncate">{n.sub}</p>
-                    <p className="text-[11px] text-gray-300 mt-1">{n.time}</p>
-                  </div>
+                    {/* Text */}
+                    <div className="flex-1 min-w-0">
+                      <p className={cn('text-sm leading-snug truncate', n.unread ? 'font-semibold text-gray-900' : 'font-medium text-gray-700')}>
+                        {n.title}
+                      </p>
+                      <p className="text-xs text-gray-400 mt-0.5 truncate">{n.sub}</p>
+                      <p className="text-[11px] text-gray-300 mt-1">{n.time}</p>
+                    </div>
 
-                  {/* Unread dot */}
-                  {n.unread && (
-                    <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0 mt-2" />
-                  )}
-                </button>
-              )
-            })}
+                    {/* Unread dot */}
+                    {n.unread && (
+                      <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0 mt-2" />
+                    )}
+                  </button>
+                )
+              })
+            )}
           </div>
 
           {/* Footer */}
           <div className="px-4 py-2.5 border-t border-gray-100">
-            <button className="text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors">
-              View all notifications →
-            </button>
+            <a
+              href="/admin/cases"
+              className="text-xs font-medium text-blue-600 hover:text-blue-700 transition-colors"
+              onClick={() => setOpen(false)}
+            >
+              View all cases →
+            </a>
           </div>
         </div>
       )}
