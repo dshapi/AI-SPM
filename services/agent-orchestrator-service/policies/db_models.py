@@ -53,23 +53,23 @@ class PolicyORM(Base):
     linked_sims      = Column(Integer, nullable=False, default=0)
 
     # ── JSON payload columns ──────────────────────────────────────────────────
-    agents           = Column(JSON, nullable=False, default=list)
-    tools            = Column(JSON, nullable=False, default=list)
-    data_sources     = Column(JSON, nullable=False, default=list)
-    environments     = Column(JSON, nullable=False, default=list)
-    exceptions       = Column(JSON, nullable=False, default=list)
+    agents           = Column(JSON, nullable=False, default=lambda: [])
+    tools            = Column(JSON, nullable=False, default=lambda: [])
+    data_sources     = Column(JSON, nullable=False, default=lambda: [])
+    environments     = Column(JSON, nullable=False, default=lambda: [])
+    exceptions       = Column(JSON, nullable=False, default=lambda: [])
     impact           = Column(JSON, nullable=False,
                               default=lambda: {"blocked": 0, "flagged": 0,
                                                "unchanged": 0, "total": 100})
-    history          = Column(JSON, nullable=False, default=list)
-    logic            = Column(JSON, nullable=False, default=list)
+    history          = Column(JSON, nullable=False, default=lambda: [])
+    logic            = Column(JSON, nullable=False, default=lambda: [])
 
     # ── Raw logic code ────────────────────────────────────────────────────────
     logic_code       = Column(String, nullable=False, default="")
     logic_language   = Column(String, nullable=False, default="rego")
 
     # ── Snapshots for version restore ─────────────────────────────────────────
-    snapshots        = Column(JSON, nullable=False, default=dict)
+    snapshots        = Column(JSON, nullable=False, default=lambda: {})
 
     # ── Audit timestamps ──────────────────────────────────────────────────────
     created_at       = Column(DateTime(timezone=True), nullable=False,
