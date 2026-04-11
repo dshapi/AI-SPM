@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebResourcesPaths">
+    <contentEntries>
+      <entry url="file://$PROJECT_DIR$">
+        <entryData>
+          <resourceRoots>
+            <path value="file://$PROJECT_DIR$/grafana" />
+            <path value="file://$PROJECT_DIR$/opa" />
+            <path value="file://$PROJECT_DIR$/platform_shared" />
+            <path value="file://$PROJECT_DIR$/prometheus" />
+            <path value="file://$PROJECT_DIR$/scripts" />
+            <path value="file://$PROJECT_DIR$/services" />
+            <path value="file://$PROJECT_DIR$/spm" />
+            <path value="file://$PROJECT_DIR$/tests" />
+            <path value="file://$PROJECT_DIR$/ui" />
+            <path value="file://$PROJECT_DIR$/auth" />
+          </resourceRoots>
+        </entryData>
+      </entry>
+    </contentEntries>
+  </component>
+</project>
