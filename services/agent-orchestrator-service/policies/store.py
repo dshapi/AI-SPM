@@ -504,6 +504,65 @@ def _close(session: Session) -> None:
         session.close()
 
 
+
+def _sync_version_row(policy_dict: dict, actor: str = "system") -> None:
+    """
+    Create a PolicyVersionORM row to match the current PolicyORM state.
+    Called after every create_policy / update_policy write.
+    Failures are logged but never propagated.
+    """
+    try:
+        from policies.repository import VersionRepository
+        from policies.lifecycle import map_mode_to_state, derive_is_runtime_active, PolicyState
+        from policies.db_models import PolicyVersionORM as _PV
+
+        sess = _get_or_new_session()
+        repo = VersionRepository(sess)
+
+        pid = policy_dict["id"]
+        mode = policy_dict.get("mode", "Draft")
+        state = map_mode_to_state(mode)
+
+        try:
+            vnum = int(policy_dict.get("version", "v1").lstrip("v"))
+        except (ValueError, TypeError):
+            vnum = 1
+
+        # Skip if this version row already exists (idempotent)
+        existing = sess.query(_PV).filter_by(policy_id=pid, version_number=vnum).first()
+        if existing:
+            return
+
+        is_active = derive_is_runtime_active(
+            state,
+            legacy_status=policy_dict.get("status", "Active")
+        )
+        history = policy_dict.get("history") or []
+        change_summary = history[-1].get("change", "") if history else ""
+
+        v = repo.create_version(
+            pid,
+            logic_code=policy_dict.get("logic_code", ""),
+            logic_language=policy_dict.get("logic_language", "rego"),
+            actor=actor,
+            change_summary=change_summary,
+            commit=True,
+        )
+
+        # Promote + activate if policy is live
+        if is_active and state != PolicyState.DRAFT:
+            try:
+                if state != PolicyState.DRAFT:
+                    repo.promote_version(pid, v.version_number, state,
+                                        actor=actor, reason="sync from store", commit=True)
+                    repo.set_runtime_active(pid, v.version_number, actor=actor, commit=True)
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).warning("_sync_version_row promote failed: %s", e)
+    except Exception as exc:
+        import logging as _log
+        _log.getLogger(__name__).warning("_sync_version_row failed: %s", exc)
+
 # ── Converter ─────────────────────────────────────────────────────────────────
 
 def _to_dict(row: PolicyORM) -> dict:
@@ -635,7 +694,9 @@ def create_policy(data: PolicyCreate, actor: str = "api") -> dict:
         )
         session.add(orm)
         session.commit()
-        return record
+        result = record
+        _sync_version_row(result, actor=actor)
+        return result
     finally:
         _close(session)
 
@@ -708,7 +769,9 @@ def update_policy(policy_id: str, data: PolicyUpdate, actor: str = "api") -> Opt
         flag_modified(row, "snapshots")
 
         session.commit()
-        return _to_dict(row)
+        result = _to_dict(row)
+        _sync_version_row(result, actor=actor)
+        return result
     finally:
         _close(session)
 
