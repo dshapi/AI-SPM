@@ -348,6 +348,29 @@ function buildRecommendations(verdict, anomalyScore, signals, riskTier) {
 }
 
 /**
+ * Map a risk-engine signal name to the named policy that would have
+ * fired it in the Simulation Builder's policy catalogue. Signals that
+ * do not correspond to a known policy are ignored.
+ */
+const _SIGNAL_TO_POLICY = {
+  prompt_injection:    { name: 'Prompt-Guard v3',       type: 'Prompt Safety', severity: 'critical' },
+  injection_detected:  { name: 'Prompt-Guard v3',       type: 'Prompt Safety', severity: 'critical' },
+  jailbreak:           { name: 'Prompt-Guard v3',       type: 'Prompt Safety', severity: 'critical' },
+  jailbreak_attempt:   { name: 'Prompt-Guard v3',       type: 'Prompt Safety', severity: 'critical' },
+  tool_abuse:          { name: 'Tool Scope v2',         type: 'Tool Access',   severity: 'critical' },
+  destructive_sql:     { name: 'Tool Scope v2',         type: 'Tool Access',   severity: 'critical' },
+  pii_detected:        { name: 'PII Detect v2',         type: 'Privacy',       severity: 'high'     },
+  pii_exfiltration:    { name: 'PII Detect v2',         type: 'Privacy',       severity: 'critical' },
+  data_exfiltration:   { name: 'Data Access v1',        type: 'Data Access',   severity: 'high'     },
+  external_url_ref:    { name: 'Data Access v1',        type: 'Data Access',   severity: 'high'     },
+  role_escalation:     { name: 'Data Access v1',        type: 'Data Access',   severity: 'high'     },
+  privilege_escalation:{ name: 'Data Access v1',        type: 'Data Access',   severity: 'high'     },
+  token_budget_exceeded:{ name: 'Token Budget v1',      type: 'Budget Limits', severity: 'high'     },
+  output_flagged:      { name: 'Output Validation v1',  type: 'Output Safety', severity: 'high'     },
+  schema_violation:    { name: 'Output Validation v1',  type: 'Output Safety', severity: 'high'     },
+}
+
+/**
  * _adaptBackendResults(backendSr) → MOCK_RESULTS-compatible object
  *
  * Maps the backend SessionResults shape (from GET /api/v1/sessions/{id}/results)
@@ -369,7 +392,7 @@ function _adaptBackendResults(sr) {
   const riskScore   = Math.round(riskFloat * 100)            // 0-1 → 0-100
   const tierMap     = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical', unknown: 'Unknown' }
   const riskLevel   = tierMap[sr.risk?.tier ?? 'unknown'] ?? 'Unknown'
-  const signals     = sr.risk?.signals ?? []
+  const rawSignals  = (sr.risk?.signals ?? []).filter(s => s && s !== 'No elevated risk signals detected')
   const anomalyFlags = sr.risk?.anomaly_flags ?? []
 
   // ── Decision trace ─────────────────────────────────────────────────────────
@@ -382,27 +405,54 @@ function _adaptBackendResults(sr) {
     return { step: s.step, label, status: s.status, detail: s.summary || label, ts }
   })
 
-  // ── Policy impact ──────────────────────────────────────────────────────────
-  const policyImpact = []
+  // ── Derive triggered policies from risk signals ────────────────────────────
+  // Each named policy fires at most once even if multiple signals map to it.
+  const policyAction = sr.decision === 'block'
+    ? 'BLOCK'
+    : sr.decision === 'escalate'
+      ? 'ESCALATE'
+      : 'ALLOW'
+  const triggeredByName = new Map()
+  for (const sig of rawSignals) {
+    const meta = _SIGNAL_TO_POLICY[sig.toLowerCase()]
+    if (!meta || triggeredByName.has(meta.name)) continue
+    triggeredByName.set(meta.name, {
+      policy:   meta.name,
+      action:   policyAction,
+      trigger:  `${sig.replace(/_/g, ' ')} signal · risk ${riskFloat.toFixed(2)}`,
+      severity: sr.decision === 'block' ? 'critical' : meta.severity,
+    })
+  }
+  const policyImpact = Array.from(triggeredByName.values())
+
+  // Always add the overall policy-engine decision row so it's clear which
+  // engine version handled the request, even if no named policy fired.
   if (sr.policy?.decision && sr.policy.decision !== 'unknown') {
     policyImpact.push({
       policy:   `Policy Engine ${sr.policy.policy_version || 'v1'}`,
-      action:   sr.policy.decision.toUpperCase(),
-      trigger:  sr.policy.reason || `Risk score ${riskFloat.toFixed(2)}`,
-      severity: sr.decision === 'block' ? 'critical' : sr.decision === 'escalate' ? 'warning' : 'ok',
+      action:   policyAction,
+      trigger:  sr.policy.reason || `Risk score ${riskFloat.toFixed(2)} → ${sr.policy.decision}`,
+      severity: sr.decision === 'block' ? 'critical' : sr.decision === 'escalate' ? 'high' : 'ok',
     })
   }
+
+  // "Policies Triggered" chip list uses the named policies when present,
+  // otherwise falls back to the engine version so the UI never renders 0.
+  const namedPolicies = Array.from(triggeredByName.keys())
+  const policiesTriggered = namedPolicies.length > 0
+    ? namedPolicies
+    : (sr.policy?.policy_version ? [`Policy Engine ${sr.policy.policy_version}`] : [])
 
   // ── Risk object ────────────────────────────────────────────────────────────
   const risk = {
     injectionDetected: anomalyFlags.includes('injection'),
     anomalyScore:      riskFloat,
-    techniques: signals
+    techniques: rawSignals
       .map(s => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()))
       .filter(Boolean),
-    explanation: signals.length
-      ? `Risk signals detected: ${signals.join(', ')}. Score: ${riskFloat.toFixed(2)} (${riskLevel}).`
-      : `Risk score: ${riskFloat.toFixed(2)} (${riskLevel}).`,
+    explanation: rawSignals.length
+      ? `Risk signals detected: ${rawSignals.join(', ')}. Score: ${riskFloat.toFixed(2)} (${riskLevel}).`
+      : `Risk score: ${riskFloat.toFixed(2)} (${riskLevel}). No elevated risk signals detected.`,
   }
 
   // ── Recommendations ────────────────────────────────────────────────────────
@@ -419,14 +469,32 @@ function _adaptBackendResults(sr) {
     action: r.action || null,
   }))
 
+  // ── Output rendering ───────────────────────────────────────────────────────
+  // The dev orchestrator does not run a real LLM, so sr.output.verdict is
+  // usually null. Surface a clear explanatory message rather than an empty
+  // terminal block — otherwise users see "no response in the output" and
+  // assume nothing ran. Blocked sessions use blockedMessage; escalated and
+  // allowed sessions get a descriptive placeholder that reflects the
+  // pre-LLM policy-gate status.
+  let output = null
+  if (verdict === 'allowed') {
+    if (sr.output?.verdict === 'allow' && sr.output?.llm_model) {
+      output = `[LLM output generated — ${sr.output.llm_model}, ${sr.output.response_length ?? '?'} chars]`
+    } else {
+      output = `[Session allowed at the pre-LLM policy gate. No model was invoked in this simulation environment — policy evaluation passed with risk score ${riskFloat.toFixed(2)}.]`
+    }
+  } else if (verdict === 'escalated') {
+    output = `[Session ESCALATED for manual approval. The pipeline halted before the LLM was invoked because the policy engine requires human-in-the-loop review. ${sr.policy?.reason ?? ''}]`.trim()
+  }
+
   return {
     verdict,
     riskScore,
     riskLevel,
-    executionMs:       sr.output?.latency_ms ?? null,
-    policiesTriggered: sr.policy?.policy_version ? [sr.policy.policy_version] : [],
+    executionMs:       sr.output?.latency_ms ?? 0,
+    policiesTriggered,
     decisionTrace,
-    output:            sr.output?.verdict === 'allow' ? '[Output generated]' : null,
+    output,
     blockedMessage:    verdict === 'blocked'
       ? `Your request was terminated by the policy engine. ${sr.policy?.reason ?? ''} This event has been logged for security review.`.trim()
       : null,
@@ -521,9 +589,10 @@ function BuilderBlock({ label, subtitle, children }) {
 // ── Verdict display ────────────────────────────────────────────────────────────
 
 const VERDICT_CFG = {
-  blocked: { label: 'Blocked',  icon: XCircle,      bg: 'bg-red-50',     border: 'border-red-200',     txt: 'text-red-700',     dot: 'bg-red-500'     },
-  flagged: { label: 'Flagged',  icon: AlertTriangle, bg: 'bg-amber-50',   border: 'border-amber-200',  txt: 'text-amber-700',   dot: 'bg-amber-500'   },
-  allowed: { label: 'Allowed',  icon: CheckCircle2,  bg: 'bg-emerald-50', border: 'border-emerald-200', txt: 'text-emerald-700', dot: 'bg-emerald-500' },
+  blocked:   { label: 'Blocked',   icon: XCircle,       bg: 'bg-red-50',     border: 'border-red-200',    txt: 'text-red-700',    dot: 'bg-red-500'    },
+  escalated: { label: 'Escalated', icon: AlertTriangle, bg: 'bg-orange-50',  border: 'border-orange-200', txt: 'text-orange-700', dot: 'bg-orange-500' },
+  flagged:   { label: 'Flagged',   icon: AlertTriangle, bg: 'bg-amber-50',   border: 'border-amber-200',  txt: 'text-amber-700',  dot: 'bg-amber-500'  },
+  allowed:   { label: 'Allowed',   icon: CheckCircle2,  bg: 'bg-emerald-50', border: 'border-emerald-200',txt: 'text-emerald-700',dot: 'bg-emerald-500'},
 }
 
 const TRACE_CFG = {
@@ -535,9 +604,11 @@ const TRACE_CFG = {
 }
 
 const POLICY_ACTION_CFG = {
-  BLOCK: { badge: 'critical', icon: XCircle      },
-  FLAG:  { badge: 'high',     icon: AlertTriangle },
-  SKIP:  { badge: 'neutral',  icon: ArrowRight    },
+  BLOCK:    { badge: 'critical', icon: XCircle       },
+  ESCALATE: { badge: 'high',     icon: AlertTriangle },
+  FLAG:     { badge: 'high',     icon: AlertTriangle },
+  ALLOW:    { badge: 'success',  icon: CheckCircle2  },
+  SKIP:     { badge: 'neutral',  icon: ArrowRight    },
 }
 
 // ── SimulationBuilder ──────────────────────────────────────────────────────────
@@ -984,7 +1055,8 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
             <div className={cn('rounded-xl border-2 p-5', vcfg.bg, vcfg.border)}>
               <div className="flex items-center gap-4">
                 <div className={cn('w-12 h-12 rounded-xl flex items-center justify-center shrink-0 border-2', vcfg.border,
-                  result.verdict === 'blocked' ? 'bg-red-100'
+                  result.verdict === 'blocked'   ? 'bg-red-100'
+                  : result.verdict === 'escalated' ? 'bg-orange-100'
                   : result.verdict === 'flagged' ? 'bg-amber-100'
                   : 'bg-emerald-100',
                 )}>
@@ -995,9 +1067,10 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
                     {vcfg.label}
                   </p>
                   <p className="text-[11.5px] text-gray-600 mt-1.5 leading-snug">
-                    {result.verdict === 'blocked' && 'Request terminated before reaching the model. No AI output was generated.'}
-                    {result.verdict === 'flagged' && 'Request processed with restrictions. Security alert raised and audit log updated.'}
-                    {result.verdict === 'allowed' && 'All policy checks passed. Request processed and response returned normally.'}
+                    {result.verdict === 'blocked'   && 'Request terminated before reaching the model. No AI output was generated.'}
+                    {result.verdict === 'escalated' && 'Risk exceeded the escalation threshold. The pipeline halted at the policy gate — no model was invoked. Manual approval is required.'}
+                    {result.verdict === 'flagged'   && 'Request processed with restrictions. Security alert raised and audit log updated.'}
+                    {result.verdict === 'allowed'   && 'All policy checks passed. Request processed and response returned normally.'}
                   </p>
                 </div>
                 <div className="shrink-0 text-right">
@@ -1405,15 +1478,21 @@ export default function Simulation() {
 
     try {
       // ── Step 1: Submit prompt to agent-orchestrator ───────────────────────
+      // The user's selected policies / useCurrentPolicies toggle are included
+      // in the context so they're traceable in the session record, even though
+      // the default PolicyClient currently evaluates all policies it knows
+      // about rather than filtering by this selection.
       const sessionData = await createSession({
         agentId: config.agent,
         prompt:  config.prompt,
         tools:   [],
         context: {
-          model:       config.model,
-          environment: config.environment,
-          attack_type: config.attackType,
-          exec_mode:   config.execMode,
+          model:                config.model,
+          environment:          config.environment,
+          attack_type:          config.attackType,
+          exec_mode:            config.execMode,
+          use_current_policies: config.useCurrentPolicies,
+          selected_policies:    config.selectedPolicies,
         },
       })
 
@@ -1542,8 +1621,8 @@ export default function Simulation() {
             <>
               <div className="px-4 py-2 bg-gray-50 border-b border-gray-100 flex items-center gap-2 shrink-0">
                 <span className="text-[10px] font-bold uppercase tracking-wide text-gray-500">Before</span>
-                <Badge variant={VERDICT_CFG[resultA.verdict]?.label === 'Blocked' ? 'critical' : resultA.verdict === 'flagged' ? 'high' : 'success'}>
-                  {VERDICT_CFG[resultA.verdict]?.label}
+                <Badge variant={resultA.verdict === 'blocked' ? 'critical' : (resultA.verdict === 'escalated' || resultA.verdict === 'flagged') ? 'high' : 'success'}>
+                  {VERDICT_CFG[resultA.verdict]?.label ?? 'Unknown'}
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
@@ -1559,8 +1638,8 @@ export default function Simulation() {
           <div className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col">
             <div className="px-4 py-2 bg-blue-50 border-b border-blue-100 flex items-center gap-2 shrink-0">
               <span className="text-[10px] font-bold uppercase tracking-wide text-blue-600">After</span>
-              <Badge variant={resultB.verdict === 'blocked' ? 'critical' : resultB.verdict === 'flagged' ? 'high' : 'success'}>
-                {VERDICT_CFG[resultB.verdict]?.label}
+              <Badge variant={resultB.verdict === 'blocked' ? 'critical' : (resultB.verdict === 'escalated' || resultB.verdict === 'flagged') ? 'high' : 'success'}>
+                {VERDICT_CFG[resultB.verdict]?.label ?? 'Unknown'}
               </Badge>
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />

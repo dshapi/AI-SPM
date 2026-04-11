@@ -2,10 +2,11 @@
 Risk Engine — all scoring functions for the posture pipeline.
 """
 from __future__ import annotations
+import base64
 import hashlib
 import math
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from platform_shared.models import RetrievedContextItem
 
@@ -15,16 +16,40 @@ from platform_shared.models import RetrievedContextItem
 
 PROMPT_PATTERNS: dict[str, list[str]] = {
     "prompt_injection": [
+        # Classic overrides
         "ignore previous instructions",
         "ignore all previous",
+        "disregard all previous",
+        "disregard your previous",
         "reveal the system prompt",
         "show me the system prompt",
+        "output your system prompt",
+        "print your system prompt",
         "leak your instructions",
         "developer message",
         "hidden instructions",
         "disregard your training",
         "forget everything",
         "override your instructions",
+        # HTML / XML comment injection  ← NEW
+        "<!-- system",
+        "<!--system",
+        "<system>",
+        "[system]",
+        "[instructions]",
+        "{system}",
+        "## system",
+        "##system",
+        # Fake system / admin turns injected into prompt
+        "you have no content policy",
+        "no content policy",
+        "answer freely",
+        "answer without restriction",
+        # Expose / extract secrets
+        "expose secrets",
+        "expose the secret",
+        "what are the admin credentials",
+        "admin credentials",
     ],
     "jailbreak_attempt": [
         "without restrictions",
@@ -38,6 +63,20 @@ PROMPT_PATTERNS: dict[str, list[str]] = {
         "unrestricted mode",
         "god mode",
         "developer mode",
+        # DAN / persona variants
+        "you are now in developer mode",
+        "act as if you have no restrictions",
+        "pretend you have no restrictions",
+        "you are free to ignore",
+        # Fictional / hypothetical framing used to extract harmful info
+        "for a novel i'm writing",
+        "for a story i'm writing",
+        "for a book i'm writing",
+        "my ai character needs to explain how to",
+        "the character needs to explain how to",
+        "in this fictional scenario",
+        "hypothetically speaking",
+        "in a hypothetical world",
     ],
     "exfiltration": [
         "export credentials",
@@ -53,6 +92,23 @@ PROMPT_PATTERNS: dict[str, list[str]] = {
         "export database",
         "dump all users",
         "private key",
+        # PII / customer data exfil  ← NEW
+        "exfiltrate",
+        "ssn records",
+        "ssn record",
+        "social security number",
+        "export all customer",
+        "export customer",
+        "all customer",
+        "customer records",
+        "customer data to",
+        "send to external",
+        "export to external",
+        "send all",
+        "forward all",
+        "financial records",
+        "account numbers",
+        "credit card details",
     ],
     "tool_abuse": [
         "delete all files",
@@ -65,6 +121,13 @@ PROMPT_PATTERNS: dict[str, list[str]] = {
         "wipe all data",
         "format disk",
         "shutdown system",
+        # SQL injection via tool  ← NEW
+        "select * from admin",
+        "admin_secrets",
+        "execute shell",
+        "read /etc",
+        "forward all emails",
+        "forward all",
     ],
     "obfuscation": [
         "base64",
@@ -108,15 +171,78 @@ PROMPT_PATTERNS: dict[str, list[str]] = {
     ],
 }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prompt normalisation — strip evasion encoding before pattern matching
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Zero-width and invisible Unicode characters used for keyword splitting
+_ZERO_WIDTH = frozenset({
+    '\u200b',  # ZERO WIDTH SPACE
+    '\u200c',  # ZERO WIDTH NON-JOINER
+    '\u200d',  # ZERO WIDTH JOINER
+    '\u200e',  # LEFT-TO-RIGHT MARK
+    '\u200f',  # RIGHT-TO-LEFT MARK
+    '\u2060',  # WORD JOINER
+    '\u00ad',  # SOFT HYPHEN
+    '\ufeff',  # ZERO WIDTH NO-BREAK SPACE (BOM)
+})
+
+
+def _normalize_prompt(prompt: str) -> str:
+    """
+    Normalise prompt text to defeat common keyword-evasion techniques:
+
+    1. Strip zero-width / invisible Unicode characters
+       e.g. "I\u200bgnore" → "Ignore"
+    2. Remove hyphens inserted between letters to break keywords
+       e.g. "Ign-ore pre-vious in-struc-tions" → "Ignore previous instructions"
+    3. Collapse runs of whitespace
+    """
+    # Step 1 — invisible chars
+    p = ''.join(c for c in prompt if c not in _ZERO_WIDTH)
+    # Step 2 — intra-word hyphens (only between ASCII letters)
+    p = re.sub(r'(?<=[A-Za-z])-(?=[A-Za-z])', '', p)
+    # Step 3 — normalise whitespace
+    p = re.sub(r'\s+', ' ', p).strip()
+    return p
+
+
+def _try_decode_base64(text: str) -> Optional[str]:
+    """
+    If *text* looks like a base64-encoded payload, decode and return the
+    plaintext.  Returns None if the text is not valid base64 or decodes to
+    non-UTF-8 binary content.
+
+    Heuristic: strip whitespace, then check the result consists entirely of
+    base64 alphabet characters (A-Za-z0-9+/=) and is at least 20 chars long
+    before attempting to decode.
+    """
+    stripped = text.strip().replace('\n', '').replace('\r', '').replace(' ', '')
+    if len(stripped) < 20:
+        return None
+    if not re.fullmatch(r'[A-Za-z0-9+/=]+', stripped):
+        return None
+    # Pad to a multiple of 4 just in case
+    padding = (4 - len(stripped) % 4) % 4
+    try:
+        decoded = base64.b64decode(stripped + '=' * padding).decode('utf-8')
+        return decoded
+    except Exception:
+        return None
+
 SIGNAL_WEIGHTS: dict[str, float] = {
-    "prompt_injection": 0.40,
-    "jailbreak_attempt": 0.35,
-    "exfiltration": 0.45,
-    "tool_abuse": 0.40,
-    "obfuscation": 0.20,
-    "indirect_injection": 0.35,
-    "privilege_escalation": 0.45,
-    "social_engineering": 0.15,
+    # Weights chosen so that a single high-severity signal alone exceeds the
+    # 0.75 block threshold (base score 0.05 + weight + identity floor 0.02
+    # = 0.77+ for critical signals → always BLOCK, never just escalate).
+    "prompt_injection":    0.70,  # was 0.50 — always block
+    "jailbreak_attempt":   0.70,  # was 0.45 — always block
+    "exfiltration":        0.70,  # was 0.50 — always block
+    "tool_abuse":          0.70,  # was 0.50 — always block
+    "obfuscation":         0.20,  # unchanged — needs a combo to block
+    "indirect_injection":  0.35,  # escalate on its own
+    "privilege_escalation":0.45,  # escalate on its own
+    "social_engineering":  0.15,  # low risk on its own
 }
 
 # MITRE ATLAS TTP mappings
@@ -142,13 +268,44 @@ CRITICAL_COMBOS: list[set[str]] = [
 
 
 def extract_signals(prompt: str) -> List[str]:
-    """Detect attack signals in prompt text. Returns list of signal labels."""
-    p = prompt.lower()
-    return [
-        label
-        for label, patterns in PROMPT_PATTERNS.items()
-        if any(pattern in p for pattern in patterns)
-    ]
+    """
+    Detect attack signals in prompt text.  Returns list of signal labels.
+
+    Detection runs in three passes to defeat evasion techniques:
+
+    Pass 1 — raw prompt (catches explicit base64 / hex keywords and
+             HTML comment injections that appear verbatim).
+    Pass 2 — normalised prompt (strips zero-width chars and intra-word
+             hyphens, then re-runs pattern matching).
+    Pass 3 — if the whole prompt looks like a base64-encoded payload,
+             decode it and run pattern matching on the plaintext; always
+             adds the 'obfuscation' signal in this case.
+    """
+    found: set[str] = set()
+
+    # Pass 1: raw text
+    raw = prompt.lower()
+    for label, patterns in PROMPT_PATTERNS.items():
+        if any(p in raw for p in patterns):
+            found.add(label)
+
+    # Pass 2: normalised text (zero-width + hyphen stripping)
+    normalised = _normalize_prompt(prompt).lower()
+    if normalised != raw:
+        for label, patterns in PROMPT_PATTERNS.items():
+            if label not in found and any(p in normalised for p in patterns):
+                found.add(label)
+
+    # Pass 3: base64 decode
+    decoded = _try_decode_base64(prompt)
+    if decoded is not None:
+        found.add("obfuscation")
+        decoded_lower = decoded.lower()
+        for label, patterns in PROMPT_PATTERNS.items():
+            if label not in found and any(p in decoded_lower for p in patterns):
+                found.add(label)
+
+    return list(found)
 
 
 def is_critical_combination(signals: List[str]) -> bool:

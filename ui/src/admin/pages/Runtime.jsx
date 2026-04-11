@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import {
   Search, Pause, Play, Download,
   Cpu, Wrench,
@@ -675,6 +675,9 @@ function Sel({ value, onChange, options, className }) {
 // ── Runtime page ───────────────────────────────────────────────────────────────
 
 export default function Runtime() {
+  const location = useLocation()
+  const sessionIdFromUrl = new URLSearchParams(location.search).get('session_id')
+
   // ── UI state ───────────────────────────────────────────────────────────────
   const [paused,         setPaused]         = useState(false)
   const [newIds,         setNewIds]         = useState(new Set())
@@ -720,6 +723,13 @@ export default function Runtime() {
     const iv = setInterval(load, 10_000)
     return () => { cancelled = true; clearInterval(iv) }
   }, [])
+
+  // ── Auto-select session from URL ?session_id= param ──────────────────────
+  useEffect(() => {
+    if (!sessionIdFromUrl || sessions.length === 0) return
+    const match = sessions.find(s => s.id === sessionIdFromUrl)
+    if (match) setSelectedId(match.id)
+  }, [sessions, sessionIdFromUrl])
 
   // ── On session select: load history then open WS if active ────────────────
   useEffect(() => {

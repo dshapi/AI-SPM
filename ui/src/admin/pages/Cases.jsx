@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import {
   Search, Download, Plus, BookMarked,
   ChevronDown, X, Clock, User, Shield,
@@ -385,7 +385,14 @@ const EVIDENCE_ICON = {
   artifact: { icon: Paperclip,     color: 'text-gray-500',   bg: 'bg-gray-100'  },
 }
 
+function mapCategoryToPolicy(categories) {
+  if (!categories || categories.length === 0) return 'Prompt-Guard'
+  if (categories.some(c => c.startsWith('S'))) return 'Prompt-Guard'
+  return 'Prompt-Guard'
+}
+
 function CaseDetailPanel({ caseData, onClose }) {
+  const navigate    = useNavigate()
   const [activeTab, setActiveTab] = useState('Overview')
   const [noteText,  setNoteText]  = useState('')
   const [notes,     setNotes]     = useState(caseData.notes)
@@ -842,8 +849,17 @@ function CaseDetailPanel({ caseData, onClose }) {
             <div className="space-y-2">
               {caseData.recommendedActions.map((action, i) => {
                 const Icon = action.icon
+                const handleActionClick = () => {
+                  if (action.route === 'runtime') {
+                    const sessionId = caseData.linkedEntities.agents[0] ?? caseData.affectedAssets[0]?.name
+                    if (sessionId) navigate(`/admin/runtime?session_id=${sessionId}`)
+                  } else if (action.route === 'policies') {
+                    const policyName = mapCategoryToPolicy(caseData.categories)
+                    navigate(`/admin/policies?policy=${encodeURIComponent(policyName)}`)
+                  }
+                }
                 return (
-                  <div key={i} className="group bg-white rounded-xl border border-gray-200 p-3.5 flex items-center gap-3.5 hover:border-blue-200 hover:shadow-[0_0_0_3px_rgba(59,130,246,0.08)] transition-all cursor-pointer">
+                  <div key={i} onClick={handleActionClick} className="group bg-white rounded-xl border border-gray-200 p-3.5 flex items-center gap-3.5 hover:border-blue-200 hover:shadow-[0_0_0_3px_rgba(59,130,246,0.08)] transition-all cursor-pointer">
                     <div className="w-9 h-9 rounded-xl bg-gray-100 flex items-center justify-center shrink-0 group-hover:bg-blue-100 transition-colors">
                       <Icon size={15} className="text-gray-500 group-hover:text-blue-600 transition-colors" strokeWidth={1.75} />
                     </div>
