@@ -489,6 +489,15 @@ def _get_session() -> Session:
     return _SessionLocal()
 
 
+
+def _get_or_new_session() -> Session:
+    """Return current test session or create one from _SessionLocal. For internal use only."""
+    if _test_session is not None:
+        return _test_session
+    if _SessionLocal is None:
+        raise RuntimeError("Policy store not initialised — call init_db() first.")
+    return _SessionLocal()
+
 def _close(session: Session) -> None:
     """Close only if it is NOT the injected test session."""
     if session is not _test_session:

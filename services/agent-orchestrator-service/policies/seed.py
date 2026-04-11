@@ -293,11 +293,26 @@ _SEED_DATA = [
 ]
 
 
+
+
+def _run_backfill() -> None:
+    """Idempotent backfill of PolicyVersionORM from existing PolicyORM rows."""
+    try:
+        from policies.migration_util import backfill_policy_versions
+        from policies import store as _store
+        sess = _store._get_or_new_session()
+        backfill_policy_versions(sess)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("backfill_policy_versions failed: %s", e)
+
 def seed_policies() -> None:
     """Insert default policies if the table is empty. Idempotent."""
     if list_policies():
+        _run_backfill()
         return
     for raw in _SEED_DATA:
         raw = dict(raw)  # don't mutate the module-level constant
         raw["logic"] = _tokenise(raw["logic_code"], raw["logic_language"])
         create_policy_raw(raw)
+    _run_backfill()
