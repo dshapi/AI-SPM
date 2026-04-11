@@ -46,6 +46,8 @@ from events.store import EventStore
 from results.service import ResultsService
 from cases.router import router as cases_router
 from cases.service import CasesService
+from threat_findings.router import router as threat_findings_router
+from threat_findings.service import ThreatFindingsService
 from routers import sessions as sessions_router
 from policies.router import router as policies_router
 from services.risk_engine import RiskEngine
@@ -148,6 +150,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.results_service = ResultsService()
     logger.info("ResultsService initialised")
     app.state.cases_service = CasesService()
+    app.state.threat_findings_service = ThreatFindingsService()
     logger.info("CasesService initialised (DB-backed)")
 
     # ── LLM Client (optional — disabled gracefully if key not set) -────────
@@ -303,6 +306,7 @@ def create_app() -> FastAPI:
     from results.router import router as results_router
     app.include_router(results_router)
     app.include_router(cases_router)
+    app.include_router(threat_findings_router)
     app.include_router(policies_router)
 
     # ── Health endpoints ────────────────────────────────────────────────────
