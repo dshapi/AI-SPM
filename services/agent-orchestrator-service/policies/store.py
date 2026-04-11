@@ -25,6 +25,7 @@ from typing import Optional
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy.pool import StaticPool
 
 from .db_models import PolicyORM
 from .models import PolicyCreate, PolicyUpdate
@@ -451,10 +452,22 @@ allow if {
 
 def init_db(db_url: str, create_tables: bool = True) -> None:
     """Initialise the module-level session factory from a database URL."""
-    global _SessionLocal
+    global _SessionLocal, _test_session
+    # Always clear any injected test session so the live session factory wins.
+    _test_session = None
+
     from db.base import Base
     from policies.db_models import PolicyORM  # noqa: F401 — registers table on Base.metadata
-    engine = create_engine(db_url, echo=False, future=True)
+
+    # SQLite :memory: opens a brand-new empty DB for every connection by default.
+    # StaticPool forces all connections to reuse the same underlying connection so
+    # create_all() and subsequent queries see the same tables.
+    engine_kwargs: dict = {"echo": False, "future": True}
+    if ":memory:" in db_url:
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+        engine_kwargs["poolclass"] = StaticPool
+
+    engine = create_engine(db_url, **engine_kwargs)
     if create_tables:
         Base.metadata.create_all(engine, checkfirst=True)
     _SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
@@ -462,7 +475,8 @@ def init_db(db_url: str, create_tables: bool = True) -> None:
 
 def init_db_for_session(session: Session) -> None:
     """Test helper — bypass _SessionLocal entirely."""
-    global _test_session
+    global _test_session, _SessionLocal
+    _SessionLocal = None   # prevent accidental use of a live factory alongside an injected session
     _test_session = session
 
 
