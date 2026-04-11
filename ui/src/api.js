@@ -88,7 +88,9 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
     } else {
       msg = detail || `Request failed (${res.status})`
     }
-    onError(new Error(msg))
+    const blockErr = new Error(msg)
+    if (typeof detail === 'object' && detail !== null) blockErr.blockDetail = detail
+    onError(blockErr)
     return
   }
 

@@ -90,7 +90,9 @@ services:
     platform: linux/arm64/v8
     container_name: cpm-redis
     ports: ["6379:6379"]
-    command: ["redis-server", "--save", "", "--loglevel", "warning", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    command: ["redis-server", "--appendonly", "yes", "--loglevel", "warning", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis-data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -381,6 +383,7 @@ services:
       - agent-orchestrator
 
 volumes:
+  redis-data:
   spm-db-data:
   grafana-data:
   agent-orchestrator-data:

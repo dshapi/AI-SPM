@@ -15,9 +15,8 @@ from typing import List
 
 from models.block_response import (
     map_categories_to_explanation,
+    get_refusal_explanation,
     _UNAVAILABLE_EXPLANATION,
-    _LEXICAL_EXPLANATION,
-    _OPA_EXPLANATION,
     _POLICY_UNAVAILABLE_EXPLANATION,
 )
 from security.models import (
@@ -27,14 +26,14 @@ from security.models import (
     REASON_POLICY_UNAVAILABLE,
 )
 
-# Map reason code → pre-approved explanation constant
-_REASON_TO_EXPLANATION = {
+# Reason codes that use a fixed system message (not the random refusal)
+_FIXED_EXPLANATIONS = {
     REASON_GUARD_UNAVAILABLE:  _UNAVAILABLE_EXPLANATION,
-    REASON_LEXICAL_BLOCK:      _LEXICAL_EXPLANATION,
-    REASON_POLICY_BLOCK:       _OPA_EXPLANATION,
     REASON_POLICY_UNAVAILABLE: _POLICY_UNAVAILABLE_EXPLANATION,
-    "obfuscation_block":       _LEXICAL_EXPLANATION,   # obfuscation is a sub-type of lexical
 }
+
+# Reason codes that use a random refusal permutation
+_REFUSAL_REASONS = {REASON_LEXICAL_BLOCK, REASON_POLICY_BLOCK, "obfuscation_block"}
 
 
 class ExplanationMapper:
@@ -60,10 +59,14 @@ class ExplanationMapper:
         -------
         str — never empty, never contains raw model output.
         """
-        if reason in _REASON_TO_EXPLANATION:
-            return _REASON_TO_EXPLANATION[reason]
+        # Fixed system messages for availability/timeout reasons
+        if reason in _FIXED_EXPLANATIONS:
+            return _FIXED_EXPLANATIONS[reason]
+        # Lexical / OPA / obfuscation → random refusal permutation
+        if reason in _REFUSAL_REASONS:
+            return get_refusal_explanation()
         # Guard-identified unsafe categories → use the category mapping
         if categories:
             return map_categories_to_explanation(categories)
-        # Final fallback
-        return map_categories_to_explanation([])
+        # Final fallback → random refusal
+        return get_refusal_explanation()

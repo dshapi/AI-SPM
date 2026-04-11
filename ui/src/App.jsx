@@ -24,12 +24,12 @@ export default function App() {
     setMessages(prev => [...prev, { id: Date.now() + Math.random(), role, text, streaming }])
   }, [])
 
-  const updateLastAssistant = useCallback((text, streaming = false) => {
+  const updateLastAssistant = useCallback((text, streaming = false, blockDetail = null) => {
     setMessages(prev => {
       const copy = [...prev]
       for (let i = copy.length - 1; i >= 0; i--) {
         if (copy[i].role === 'assistant') {
-          copy[i] = { ...copy[i], text, streaming }
+          copy[i] = { ...copy[i], text, streaming, blockDetail }
           return copy
         }
       }
@@ -106,7 +106,7 @@ export default function App() {
       },
       onError: (e) => {
         if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
-        updateLastAssistant(`⚠️ ${e.message}`, false)
+        updateLastAssistant(`⚠️ ${e.message}`, false, e.blockDetail || null)
         setError(e.message)
         setLoading(false)
       },

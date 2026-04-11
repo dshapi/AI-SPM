@@ -41,11 +41,67 @@ _CATEGORY_EXPLANATIONS: Dict[str, str] = {
     "S15": "This request appears to attempt overriding system safety instructions, which is not permitted.",
 }
 
-_GENERIC_EXPLANATION    = "This request was blocked because it could not be safely processed."
 _UNAVAILABLE_EXPLANATION = "The request could not be safely evaluated. Please try again later."
-_LEXICAL_EXPLANATION    = "The request contains disallowed or dangerous instructions."
-_OPA_EXPLANATION        = "This request was blocked by the platform's security policy."
 _POLICY_UNAVAILABLE_EXPLANATION = "Policy evaluation is temporarily unavailable. Request blocked for safety."
+
+# ── Refusal message permutations ─────────────────────────────────────────────
+# Shown in random order for lexical blocks, OPA policy blocks, and generic falls.
+# Keep phrasing friendly but firm — never expose internal policy details.
+_REFUSAL_PERMUTATIONS: list[str] = [
+    (
+        "No. This request will never be fulfilled, no matter how many times it is asked.\n\n"
+        "If you are bored or frustrated, I genuinely would love to help you with something constructive instead! "
+        "Here are some ideas:\n"
+        "- 🎮 Game recommendations\n"
+        "- 💡 Learn a new skill or hobby\n"
+        "- 📚 Find something interesting to read\n"
+        "- 🎵 Music or playlist suggestions\n"
+        "- 💻 Help with a work or school project\n\n"
+        "Is there something positive I can help you with today?"
+    ),
+    (
+        "This request won't be fulfilled — not now, not ever, regardless of how it's rephrased.\n\n"
+        "But I'd genuinely love to point you toward something useful! How about:\n"
+        "- 🎮 Game or entertainment recommendations\n"
+        "- 💡 Picking up a new skill or hobby\n"
+        "- 📚 Finding something great to read\n"
+        "- 🎵 Music and playlist ideas\n"
+        "- 💻 A work or personal project\n\n"
+        "What can I actually help you with today?"
+    ),
+    (
+        "That's a no — and it will always be a no.\n\n"
+        "If you're curious or just bored, here are some genuinely useful things I can help with instead:\n"
+        "- 🎮 Games and entertainment ideas\n"
+        "- 💡 Learning something new\n"
+        "- 📚 Book or article recommendations\n"
+        "- 🎵 Music discovery\n"
+        "- 💻 Work, school, or personal projects\n\n"
+        "Let's make this time worthwhile — what sounds interesting?"
+    ),
+    (
+        "I won't help with this, and no amount of rephrasing will change that.\n\n"
+        "On the bright side, I'm great at a lot of other things! For example:\n"
+        "- 🎮 Game recommendations\n"
+        "- 💡 New skills and hobbies to explore\n"
+        "- 📚 Books and articles worth your time\n"
+        "- 🎵 Music and playlists\n"
+        "- 💻 Help with a project\n\n"
+        "Seriously — what would you actually like to do today?"
+    ),
+]
+
+
+def get_refusal_explanation() -> str:
+    """Return a random refusal message from the approved permutations list."""
+    import random
+    return random.choice(_REFUSAL_PERMUTATIONS)
+
+
+# Aliases used by explanation_mapper — resolved at call time via get_refusal_explanation()
+_LEXICAL_EXPLANATION = _REFUSAL_PERMUTATIONS[0]   # default / import-time alias
+_OPA_EXPLANATION     = _REFUSAL_PERMUTATIONS[0]   # default / import-time alias
+_GENERIC_EXPLANATION = _REFUSAL_PERMUTATIONS[0]   # default / import-time alias
 
 
 def map_categories_to_explanation(categories: Optional[List[str]]) -> str:

@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
@@ -23,6 +24,96 @@ function parseToolBadges(text) {
   }
   const body = lines.slice(i).join('\n').trimStart()
   return { badges, body: body || text }
+}
+
+const REASON_LABELS = {
+  lexical_block:       'Lexical scanner',
+  guard_model_block:   'Guard model',
+  policy_block:        'OPA policy',
+  policy_unavailable:  'Policy unavailable',
+  guard_unavailable:   'Guard unavailable',
+  obfuscation_block:   'Obfuscation detected',
+}
+
+function BlockCard({ detail }) {
+  const reason = REASON_LABELS[detail.reason] || detail.reason || 'Security policy'
+  const fullText = detail.explanation || 'This request was blocked by the security policy.'
+
+  // Stream the explanation in character-by-character, just like a normal response
+  const [visibleText, setVisibleText] = useState('')
+  const [done, setDone] = useState(false)
+
+  useEffect(() => {
+    setVisibleText('')
+    setDone(false)
+    let i = 0
+    const id = setInterval(() => {
+      i++
+      setVisibleText(fullText.slice(0, i))
+      if (i >= fullText.length) {
+        clearInterval(id)
+        setDone(true)
+      }
+    }, 12) // ~83 chars/sec — matches a fast token stream
+    return () => clearInterval(id)
+  }, [fullText])
+
+  return (
+    <div style={{
+      borderLeft: '3px solid #ef4444',
+      background: 'rgba(239,68,68,0.05)',
+      borderRadius: '0 10px 10px 0',
+      padding: '12px 14px',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+    }}>
+      {/* Header — always visible immediately */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 16 }}>🛡️</span>
+        <span style={{ fontWeight: 700, fontSize: 14, color: '#dc2626' }}>Request Blocked</span>
+      </div>
+
+      {/* Explanation — streams in with blinking cursor */}
+      <div style={{ fontSize: 13.5, color: '#374151', lineHeight: 1.6 }} className="block-explanation">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{visibleText}</ReactMarkdown>
+        {!done && <span style={{ animation: 'blink 1s infinite', marginLeft: 1 }}>▌</span>}
+      </div>
+
+      {/* Tags — fade in only after text finishes streaming */}
+      {done && (
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2, animation: 'fadeIn 0.35s ease' }}>
+          <Tag label="Trigger" value={reason} color="#dc2626" />
+          {detail.matched_rule && (
+            <Tag label="Rule" value={detail.matched_rule} color="#7c3aed" />
+          )}
+          {detail.categories && detail.categories.length > 0 && (
+            <Tag label="Categories" value={detail.categories.join(', ')} color="#d97706" />
+          )}
+          {detail.correlation_id && (
+            <Tag label="ID" value={detail.correlation_id.slice(0, 8)} color="#6b7280" />
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function Tag({ label, value, color }) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 4,
+      background: `${color}12`,
+      border: `1px solid ${color}30`,
+      borderRadius: 20,
+      padding: '2px 10px',
+      fontSize: 12,
+      color,
+      fontWeight: 500,
+    }}>
+      <span style={{ opacity: 0.6 }}>{label}:</span> {value}
+    </span>
+  )
 }
 
 export default function MessageBubble({ message }) {
@@ -93,6 +184,8 @@ export default function MessageBubble({ message }) {
       }}>
         {message.streaming && !message.text ? (
           <TypingIndicator />
+        ) : message.blockDetail ? (
+          <BlockCard detail={message.blockDetail} />
         ) : (
           <div className="message-content">
             {/* Tool use badges */}
