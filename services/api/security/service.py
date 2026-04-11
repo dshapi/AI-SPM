@@ -195,18 +195,18 @@ class PromptSecurityService:
 
         # ── Layer 4: OPA policy evaluation ───────────────────────────────
         try:
-            opa_blocked, opa_reason = await self._policy.evaluate(
+            opa_blocked, opa_reason, opa_rule = await self._policy.evaluate(
                 guard_score, guard_categories, context
             )
         except Exception as exc:
             log.warning("OPA evaluation raised unexpectedly — failing CLOSED: %s", exc)
-            opa_blocked, opa_reason = True, REASON_POLICY_UNAVAILABLE
+            opa_blocked, opa_reason, opa_rule = True, REASON_POLICY_UNAVAILABLE, ""
         signals["opa_reason"] = opa_reason
 
         if opa_blocked:
             log.warning(
-                "prompt blocked by OPA [reason=%s tenant=%s cid=%s]",
-                opa_reason, context.tenant_id, correlation_id,
+                "prompt blocked by OPA [reason=%s rule=%s tenant=%s cid=%s]",
+                opa_reason, opa_rule, context.tenant_id, correlation_id,
             )
             return PromptDecision.block(
                 reason=opa_reason,
@@ -216,6 +216,7 @@ class PromptSecurityService:
                 signals=signals,
                 correlation_id=correlation_id,
                 blocked_by=LAYER_POLICY,
+                matched_rule=opa_rule,
             )
 
         # ── All layers passed → allow ─────────────────────────────────────

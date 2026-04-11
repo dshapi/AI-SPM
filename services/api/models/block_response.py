@@ -82,5 +82,6 @@ class BlockedResponse(BaseModel):
     )
     categories: List[str] = Field(default_factory=list, description="Llama Guard S-codes that triggered block, e.g. ['S9']")
     explanation: str = Field(..., description="User-facing plain English explanation. Never exposes raw model output.")
+    matched_rule: Optional[str] = Field(None, description="The specific OPA rule or guard rule that triggered the block, e.g. 'posture score exceeds block threshold'.")
     session_id: Optional[str] = Field(None, description="Client-supplied session identifier")
     correlation_id: Optional[str] = Field(None, description="UUID for correlating this block across logs")

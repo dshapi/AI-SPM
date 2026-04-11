@@ -38,9 +38,13 @@ export async function sendMessage(prompt, sessionId) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     const detail = err.detail
-    const msg = typeof detail === 'object' && detail !== null
-      ? (detail.error || JSON.stringify(detail))
-      : (detail || `Request failed (${res.status})`)
+    let msg
+    if (typeof detail === 'object' && detail !== null) {
+      msg = detail.explanation || detail.error || JSON.stringify(detail)
+      if (detail.matched_rule) msg += ` — rule: ${detail.matched_rule}`
+    } else {
+      msg = detail || `Request failed (${res.status})`
+    }
     throw new Error(msg)
   }
 
@@ -77,9 +81,13 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
   if (!res.ok) {
     const err = await res.json().catch(() => ({}))
     const detail = err.detail
-    const msg = typeof detail === 'object' && detail !== null
-      ? (detail.error || JSON.stringify(detail))
-      : (detail || `Request failed (${res.status})`)
+    let msg
+    if (typeof detail === 'object' && detail !== null) {
+      msg = detail.explanation || detail.error || JSON.stringify(detail)
+      if (detail.matched_rule) msg += ` — rule: ${detail.matched_rule}`
+    } else {
+      msg = detail || `Request failed (${res.status})`
+    }
     onError(new Error(msg))
     return
   }

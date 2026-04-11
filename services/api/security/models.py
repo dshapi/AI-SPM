@@ -52,6 +52,7 @@ class PromptDecision:
     reason:         str = REASON_ALLOW
     correlation_id: str = ""
     blocked_by:     str = LAYER_NONE
+    matched_rule:   str = ""   # OPA rule description, e.g. "posture score exceeds block threshold"
 
     # ── Convenience helpers ───────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ class PromptDecision:
             reason=self.reason,
             categories=self.categories,
             explanation=self.explanation,
+            matched_rule=self.matched_rule or None,
             session_id=session_id,
             correlation_id=self.correlation_id,
         ).model_dump()
@@ -107,6 +109,7 @@ class PromptDecision:
         signals: Optional[Dict[str, Any]] = None,
         correlation_id: str = "",
         blocked_by: str = LAYER_NONE,
+        matched_rule: str = "",
     ) -> "PromptDecision":
         return cls(
             decision="block",
@@ -117,6 +120,7 @@ class PromptDecision:
             reason=reason,
             correlation_id=correlation_id,
             blocked_by=blocked_by,
+            matched_rule=matched_rule,
         )
 
 

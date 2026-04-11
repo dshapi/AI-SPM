@@ -50,9 +50,9 @@ class OPAAdapter:
         guard_score: float,
         guard_categories: list,
         context: ScreeningContext,
-    ) -> Tuple[bool, str]:
+    ) -> Tuple[bool, str, str]:
         """
-        Query OPA and return (blocked, reason).
+        Query OPA and return (blocked, reason, opa_rule).
 
         Parameters
         ----------
@@ -62,11 +62,13 @@ class OPAAdapter:
 
         Returns
         -------
-        (blocked: bool, reason: str)
-            reason is one of REASON_POLICY_BLOCK or REASON_POLICY_UNAVAILABLE.
+        (blocked: bool, reason: str, opa_rule: str)
+            reason    — one of REASON_POLICY_BLOCK or REASON_POLICY_UNAVAILABLE.
+            opa_rule  — the human-readable rule description from OPA (e.g.
+                        "posture score exceeds block threshold"), or "" if N/A.
         """
         if not self._enabled:
-            return False, ""
+            return False, "", ""
 
         payload = {
             "posture_score":      min(guard_score, 1.0),
@@ -96,10 +98,12 @@ class OPAAdapter:
 
                 result = resp.json().get("result", {})
                 if isinstance(result, dict) and result.get("decision") == "block":
-                    return True, REASON_POLICY_BLOCK
+                    # Extract the human-readable rule description OPA provides
+                    opa_rule = result.get("reason", "")
+                    return True, REASON_POLICY_BLOCK, opa_rule
 
-                return False, ""
+                return False, "", ""
 
         except Exception as exc:
             log.warning("OPA prompt policy unavailable: %s — failing CLOSED", exc)
-            return True, REASON_POLICY_UNAVAILABLE
+            return True, REASON_POLICY_UNAVAILABLE, ""

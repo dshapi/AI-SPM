@@ -61,14 +61,14 @@ def _guard_block(categories: list, score: float = 0.99) -> LlamaGuardAdapter:
 def _opa_allow() -> OPAAdapter:
     """OPAAdapter that always passes."""
     adapter = OPAAdapter(opa_url="http://opa-test:9999", enabled=True)
-    adapter.evaluate = AsyncMock(return_value=(False, ""))
+    adapter.evaluate = AsyncMock(return_value=(False, "", ""))
     return adapter
 
 
-def _opa_block(reason: str = "policy_block") -> OPAAdapter:
+def _opa_block(reason: str = "policy_block", rule: str = "") -> OPAAdapter:
     """OPAAdapter that always blocks."""
     adapter = OPAAdapter(opa_url="http://opa-test:9999", enabled=True)
-    adapter.evaluate = AsyncMock(return_value=(True, reason))
+    adapter.evaluate = AsyncMock(return_value=(True, reason, rule))
     return adapter
 
 
