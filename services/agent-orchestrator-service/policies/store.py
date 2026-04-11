@@ -453,6 +453,7 @@ def init_db(db_url: str, create_tables: bool = True) -> None:
     """Initialise the module-level session factory from a database URL."""
     global _SessionLocal
     from db.base import Base
+    from policies.db_models import PolicyORM  # noqa: F401 — registers table on Base.metadata
     engine = create_engine(db_url, echo=False, future=True)
     if create_tables:
         Base.metadata.create_all(engine, checkfirst=True)
