@@ -58,12 +58,16 @@ async def test_create_case_returns_case_record():
     mock_results_svc = AsyncMock()
     mock_results_svc.get_results.return_value = results
 
+    mock_case_repo = AsyncMock()
+    mock_case_repo.insert = AsyncMock()
+
     case = await svc.create_case(
         session_id="sess-abc",
         reason="Suspicious PII exposure",
         session_repo=mock_session_repo,
         event_repo=mock_event_repo,
         results_svc=mock_results_svc,
+        case_repo=mock_case_repo,
     )
 
     assert case is not None
@@ -87,12 +91,15 @@ async def test_create_case_returns_none_when_session_not_found():
     mock_event_repo = AsyncMock()
     mock_results_svc = AsyncMock()
 
+    mock_case_repo = AsyncMock()
+
     result = await svc.create_case(
         session_id="nonexistent",
         reason="test",
         session_repo=mock_session_repo,
         event_repo=mock_event_repo,
         results_svc=mock_results_svc,
+        case_repo=mock_case_repo,
     )
 
     assert result is None
@@ -102,7 +109,7 @@ async def test_create_case_returns_none_when_session_not_found():
 
 @pytest.mark.asyncio
 async def test_list_cases_returns_newest_first():
-    """list_cases() returns cases sorted descending by created_at."""
+    """list_cases() delegates to case_repo.list_all and returns what it gets."""
     from datetime import timedelta
     svc = CasesService()
 
@@ -110,18 +117,27 @@ async def test_list_cases_returns_newest_first():
     c1 = CaseRecord(case_id="c1", session_id="s1", reason="r1", summary="", risk_score=0.1, decision="allow", created_at=now - timedelta(hours=2))
     c2 = CaseRecord(case_id="c2", session_id="s2", reason="r2", summary="", risk_score=0.5, decision="block", created_at=now - timedelta(hours=1))
     c3 = CaseRecord(case_id="c3", session_id="s3", reason="r3", summary="", risk_score=0.9, decision="escalate", created_at=now)
-    svc._cases = {"c1": c1, "c2": c2, "c3": c3}
 
-    result = svc.list_cases()
+    # Repository returns records pre-sorted newest-first (DB responsibility)
+    mock_case_repo = AsyncMock()
+    mock_case_repo.list_all = AsyncMock(return_value=[c3, c2, c1])
+
+    result = await svc.list_cases(mock_case_repo)
 
     assert [c.case_id for c in result] == ["c3", "c2", "c1"]
+    mock_case_repo.list_all.assert_awaited_once_with(limit=200)
 
 
 @pytest.mark.asyncio
 async def test_list_cases_empty():
-    """list_cases() on empty service returns empty list."""
+    """list_cases() returns empty list when repository has no records."""
     svc = CasesService()
-    assert svc.list_cases() == []
+
+    mock_case_repo = AsyncMock()
+    mock_case_repo.list_all = AsyncMock(return_value=[])
+
+    result = await svc.list_cases(mock_case_repo)
+    assert result == []
 
 
 def test_build_summary_contains_key_fields():

@@ -14,7 +14,7 @@ from cases.router import router as cases_router
 from cases.schemas import CaseRecord, CaseResponse
 from cases.service import CasesService
 from dependencies.rbac import require_session_read, require_session_override
-from dependencies.db import get_session_repo, get_event_repo
+from dependencies.db import get_session_repo, get_event_repo, get_case_repo
 
 
 class TraceMiddleware(BaseHTTPMiddleware):
@@ -62,6 +62,7 @@ async def test_post_cases_201():
     app.dependency_overrides[require_session_override] = lambda: mock_identity
     app.dependency_overrides[get_session_repo] = lambda: AsyncMock()
     app.dependency_overrides[get_event_repo] = lambda: AsyncMock()
+    app.dependency_overrides[get_case_repo] = lambda: AsyncMock()
 
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -99,6 +100,7 @@ async def test_post_cases_404_session_not_found():
     app.dependency_overrides[require_session_override] = lambda: mock_identity
     app.dependency_overrides[get_session_repo] = lambda: AsyncMock()
     app.dependency_overrides[get_event_repo] = lambda: AsyncMock()
+    app.dependency_overrides[get_case_repo] = lambda: AsyncMock()
 
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -123,6 +125,7 @@ async def test_post_cases_422_missing_fields():
     app.dependency_overrides[require_session_override] = lambda: mock_identity
     app.dependency_overrides[get_session_repo] = lambda: AsyncMock()
     app.dependency_overrides[get_event_repo] = lambda: AsyncMock()
+    app.dependency_overrides[get_case_repo] = lambda: AsyncMock()
     app.state.cases_service = MagicMock()
     app.state.results_service = MagicMock()
 
@@ -144,10 +147,11 @@ async def test_get_cases_200_empty():
 
     mock_identity = MagicMock()
     mock_svc = MagicMock(spec=CasesService)
-    mock_svc.list_cases.return_value = []
+    mock_svc.list_cases = AsyncMock(return_value=[])
     app.state.cases_service = mock_svc
 
     app.dependency_overrides[require_session_read] = lambda: mock_identity
+    app.dependency_overrides[get_case_repo] = lambda: AsyncMock()
 
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -170,10 +174,11 @@ async def test_get_cases_200_with_cases():
     case1 = _make_case("s1")
     case2 = _make_case("s2")
     mock_svc = MagicMock(spec=CasesService)
-    mock_svc.list_cases.return_value = [case1, case2]
+    mock_svc.list_cases = AsyncMock(return_value=[case1, case2])
     app.state.cases_service = mock_svc
 
     app.dependency_overrides[require_session_read] = lambda: mock_identity
+    app.dependency_overrides[get_case_repo] = lambda: AsyncMock()
 
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
