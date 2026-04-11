@@ -47,6 +47,7 @@ from results.service import ResultsService
 from cases.router import router as cases_router
 from cases.service import CasesService
 from routers import sessions as sessions_router
+from policies.router import router as policies_router
 from services.risk_engine import RiskEngine
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,6 +117,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await seed_demo_data(session_factory)
     except Exception as _seed_err:
         logger.warning("seed_demo: skipped — %s", _seed_err)
+
+    # -- Policy store (sync SQLAlchemy) -------------------------------------
+    policy_db_url = os.getenv(
+        "POLICY_DB_URL",
+        f"sqlite:///{DB_PATH}"
+    )
+    try:
+        from policies import store as policy_store
+        from policies.seed import seed_policies
+        policy_store.init_db(policy_db_url, create_tables=True)
+        seed_policies()
+        logger.info("Policy store initialised: %s", policy_db_url)
+    except Exception as _policy_err:
+        logger.error("Policy store init FAILED: %s", _policy_err)
+        raise
 
     # -- In-memory event store -----------------------------------------------
     store = EventStore(max_events_per_session=500)
@@ -287,6 +303,7 @@ def create_app() -> FastAPI:
     from results.router import router as results_router
     app.include_router(results_router)
     app.include_router(cases_router)
+    app.include_router(policies_router)
 
     # ── Health endpoints ────────────────────────────────────────────────────
     @app.get("/health", tags=["Observability"], summary="Liveness probe")
