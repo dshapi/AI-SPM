@@ -39,7 +39,10 @@ POLICY_VERSION = "v1.4.2"
 
 # Hard-block thresholds
 _BLOCK_SCORE_THRESHOLD       = 0.75   # CRITICAL tier → always block
-_ESCALATE_SCORE_THRESHOLD    = 0.50   # HIGH tier → always escalate
+_ESCALATE_SCORE_THRESHOLD    = 0.50   # HIGH tier → escalate unless admin
+
+# Roles that can proceed despite HIGH risk
+_PRIVILEGED_ROLES            = {"spm:admin", "admin", "security-analyst"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,8 +71,9 @@ class PolicyClient:
     Evaluation order (first match wins):
       1. Suspended identities → BLOCK
       2. CRITICAL risk score  → BLOCK
-      3. HIGH risk            → ESCALATE (no role exemptions)
-      4. Everything else      → ALLOW
+      3. HIGH risk + no privilege → ESCALATE
+      4. HIGH risk + privileged role → ALLOW (with warning)
+      5. Everything else → ALLOW
     """
 
     async def evaluate(
@@ -105,17 +109,32 @@ class PolicyClient:
                 ),
             )
 
-        # Rule 3 — High risk → always escalate, no role exemptions
+        # Rule 3 — High risk, unprivileged identity → escalate
         if risk.score >= _ESCALATE_SCORE_THRESHOLD or risk.tier == RiskTier.HIGH:
+            caller_roles = set(identity.roles)
+            if not caller_roles.intersection(_PRIVILEGED_ROLES):
+                return PolicyResult(
+                    decision=PolicyDecision.ESCALATE,
+                    reason=(
+                        f"Risk score {risk.score:.2f} requires privileged role for approval. "
+                        f"Caller roles: {identity.roles or ['none']}."
+                    ),
+                )
+            # Rule 4 — High risk but privileged — allow with log
+            logger.warning(
+                "Allowing HIGH-risk session for privileged user=%s agent=%s score=%.4f",
+                identity.user_id, agent_id, risk.score,
+            )
             return PolicyResult(
-                decision=PolicyDecision.ESCALATE,
+                decision=PolicyDecision.ALLOW,
                 reason=(
-                    f"Risk score {risk.score:.2f} exceeds escalation threshold "
-                    f"({_ESCALATE_SCORE_THRESHOLD}). Manual approval required."
+                    f"High risk ({risk.score:.2f}) permitted for privileged role "
+                    f"'{next(iter(caller_roles.intersection(_PRIVILEGED_ROLES)))}'. "
+                    "Audit trail created."
                 ),
             )
 
-        # Rule 4 — Default allow
+        # Rule 5 — Default allow
         return PolicyResult(
             decision=PolicyDecision.ALLOW,
             reason=f"Risk score {risk.score:.2f} within acceptable range. Session approved.",
