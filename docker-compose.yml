@@ -358,6 +358,7 @@ services:
       DB_PATH: /data/agent_orchestrator.db
       LOG_LEVEL: INFO
       KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+      POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     volumes:
       - agent-orchestrator-data:/data
     healthcheck:
@@ -367,6 +368,8 @@ services:
       retries: 5
     depends_on:
       <<: *depends-platform
+      spm-db:
+        condition: service_healthy
 
   ui:
     build: {context: ./ui, dockerfile: Dockerfile}
