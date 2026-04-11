@@ -54,6 +54,11 @@
 |------|--------|
 | `docker-compose.yml` | Add `threat-hunting-agent` service |
 
+### Already completed (pre-plan)
+| File | Change |
+|------|--------|
+| `ui/src/admin/pages/Inventory.jsx` | `ag-005` entry already updated to `LangChain Agent` / `Internal` / `live` — no action needed |
+
 ---
 
 ## Task 1: ORM Model + Alembic Migration (agent-orchestrator-service)
@@ -89,7 +94,16 @@ class ThreatFindingORM(Base):
     )
 ```
 
-- [ ] **Step 1.2: Create alembic migration**
+- [ ] **Step 1.2: Verify current alembic head before creating migration**
+
+```bash
+cd services/agent-orchestrator-service
+python -m alembic heads
+# Expected: "003 (head)" — if the head is a different revision, update
+# down_revision in the migration below to match the actual head.
+```
+
+- [ ] **Step 1.3: Create alembic migration**
 
 Create `services/agent-orchestrator-service/alembic/versions/004_threat_findings.py`:
 
@@ -135,7 +149,7 @@ def downgrade() -> None:
     op.drop_table("threat_findings")
 ```
 
-- [ ] **Step 1.3: Verify migration runs**
+- [ ] **Step 1.4: Verify migration runs**
 
 ```bash
 cd services/agent-orchestrator-service
@@ -145,7 +159,7 @@ sqlite3 agent_orchestrator.db ".tables"
 # Expected output includes: threat_findings
 ```
 
-- [ ] **Step 1.4: Commit**
+- [ ] **Step 1.5: Commit**
 ```bash
 git add services/agent-orchestrator-service/db/models.py \
         services/agent-orchestrator-service/alembic/versions/004_threat_findings.py
@@ -404,42 +418,92 @@ Create `services/agent-orchestrator-service/tests/threat_findings/test_router.py
 
 ```python
 import pytest
+from dataclasses import dataclass, field
 from httpx import AsyncClient, ASGITransport
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 from main import create_app
+from threat_findings.router import get_finding_repo, get_findings_service
+from threat_findings.schemas import FindingRecord
+from dependencies.rbac import require_session_override
+
+
+# ── Minimal stub IdentityContext for tests ────────────────────────────────────
+@dataclass
+class _MockIdentity:
+    user_id: str = "threat-hunter-svc"
+    roles:   list = field(default_factory=lambda: ["admin"])
+    groups:  list = field(default_factory=list)
+
+
+def _make_record(deduplicated=False):
+    return FindingRecord(
+        id="test-id", batch_hash="h1", title="T", severity="high",
+        description="D", evidence={}, ttps=[], tenant_id="t1",
+        deduplicated=deduplicated,
+    )
 
 
 @pytest.fixture
 async def client():
     app = create_app()
+
+    mock_repo = AsyncMock()
+    mock_svc  = AsyncMock()
+
+    # Override all three injected dependencies
+    app.dependency_overrides[get_finding_repo]     = lambda: mock_repo
+    app.dependency_overrides[get_findings_service] = lambda: mock_svc
+    app.dependency_overrides[require_session_override] = lambda: _MockIdentity()
+
+    app._mock_svc  = mock_svc
+    app._mock_repo = mock_repo
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        c._app = app
         yield c
 
 
 @pytest.mark.asyncio
 async def test_create_finding_201(client):
-    with patch("threat_findings.router.get_finding_repo") as mock_repo_dep, \
-         patch("threat_findings.router.get_findings_service") as mock_svc_dep:
-        from threat_findings.schemas import FindingRecord
-        mock_rec = FindingRecord(
-            id="test-id", batch_hash="h1", title="T", severity="high",
-            description="D", evidence={}, ttps=[], tenant_id="t1",
-        )
-        mock_svc = AsyncMock()
-        mock_svc.create_finding.return_value = mock_rec
-        mock_svc_dep.return_value = mock_svc
-        mock_repo_dep.return_value = AsyncMock()
+    client._app._mock_svc.create_finding.return_value = _make_record(deduplicated=False)
 
-        resp = await client.post("/api/v1/threat-findings", json={
-            "title": "T", "severity": "high", "description": "D",
-            "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
-        })
-        assert resp.status_code == 201
-        assert resp.json()["id"] == "test-id"
+    resp = await client.post("/api/v1/threat-findings", json={
+        "title": "T", "severity": "high", "description": "D",
+        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["id"] == "test-id"
+    assert resp.json()["deduplicated"] is False
 
 
 @pytest.mark.asyncio
-async def test_create_finding_400_bad_severity(client):
+async def test_create_finding_200_deduplicated(client):
+    """Duplicate batch_hash returns HTTP 200 with the existing record."""
+    client._app._mock_svc.create_finding.return_value = _make_record(deduplicated=True)
+
+    resp = await client.post("/api/v1/threat-findings", json={
+        "title": "T", "severity": "high", "description": "D",
+        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+    })
+    assert resp.status_code == 200
+    assert resp.json()["deduplicated"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_finding_401_no_token(client):
+    """Without auth override, a missing token should return 401."""
+    # Remove the auth override to test real enforcement
+    del client._app.dependency_overrides[require_session_override]
+
+    resp = await client.post("/api/v1/threat-findings", json={
+        "title": "T", "severity": "high", "description": "D",
+        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+    })
+    assert resp.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_create_finding_422_bad_severity(client):
     resp = await client.post("/api/v1/threat-findings", json={
         "title": "T", "severity": "extreme", "description": "D",
         "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
@@ -448,15 +512,20 @@ async def test_create_finding_400_bad_severity(client):
 ```
 
 - [ ] **Step 3.2: Create `threat_findings/router.py`**
+
+Authentication follows the same pattern as `POST /api/v1/cases`: requires `session.override`
+permission (`security_analyst` or `admin` role). The threat-hunting-agent calls this endpoint
+using a dev-token (admin role) obtained from `http://api:8080/dev-token`.
+
 ```python
 from __future__ import annotations
 import logging
-from fastapi import APIRouter, Depends, Request, Response, status
-from sqlalchemy.ext.asyncio import AsyncSession
-from db.base import make_session_factory
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from threat_findings.schemas import CreateFindingRequest, FindingResponse
 from threat_findings.service import ThreatFindingsService
 from threat_findings.models import ThreatFindingRepository
+from dependencies.auth import IdentityContext
+from dependencies.rbac import require_session_override
 from schemas.session import ErrorDetail, ErrorResponse
 
 logger = logging.getLogger(__name__)
@@ -479,18 +548,30 @@ async def get_finding_repo(request: Request):
     responses={
         201: {"description": "Finding created"},
         200: {"description": "Deduplicated — finding already exists"},
-        400: {"model": ErrorResponse},
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse, "description": "PERMISSION_DENIED: requires session.override"},
         500: {"model": ErrorResponse},
     },
     summary="Create a threat finding (internal — threat-hunting-agent only)",
+    description=(
+        "**Required permission:** `session.override`\n\n"
+        "Called by the threat-hunting-agent with a dev-token (admin role). "
+        "Human analysts with `security_analyst` role can also POST findings manually."
+    ),
 )
 async def create_finding(
     body: CreateFindingRequest,
     request: Request,
     response: Response,
+    identity: IdentityContext = Depends(require_session_override),
     repo=Depends(get_finding_repo),
     svc: ThreatFindingsService = Depends(get_findings_service),
 ):
+    trace_id = getattr(request.state, "trace_id", "")
+    logger.info(
+        "POST /threat-findings tenant=%s user=%s trace=%s",
+        body.tenant_id, identity.user_id, trace_id,
+    )
     try:
         rec = await svc.create_finding(body, repo)
         if rec.deduplicated:
@@ -498,8 +579,11 @@ async def create_finding(
         return FindingResponse.from_record(rec)
     except Exception as exc:
         logger.error("create_finding error: %s", exc, exc_info=True)
-        return ErrorResponse(
-            detail=ErrorDetail(code="INTERNAL_ERROR", message=str(exc), trace_id="").model_dump()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ErrorDetail(
+                code="INTERNAL_ERROR", message=str(exc), trace_id=trace_id,
+            ).model_dump(),
         )
 ```
 
@@ -524,7 +608,7 @@ app.include_router(threat_findings_router)
 ```bash
 cd services/agent-orchestrator-service
 python -m pytest tests/threat_findings/ -v
-# Expected: 3 passed
+# Expected: 6 passed (service: 2, router: 4 — 201, 200-dedup, 401-no-token, 422)
 ```
 
 - [ ] **Step 3.5: Smoke test the endpoint**
@@ -580,17 +664,19 @@ pytest-asyncio>=0.23
 - [ ] **Step 4.2: Create `config.py`**
 ```python
 from __future__ import annotations
-import os
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # Kafka
+    # Kafka — TENANTS is comma-separated, e.g. "t1,t2,t3"
+    # The consumer subscribes to cpm.{tenant}.audit + cpm.{tenant}.decision
+    # + cpm.{tenant}.posture_enriched for each tenant in the list.
     kafka_bootstrap_servers: str = "kafka-broker:9092"
-    tenants: str = "t1"
+    tenants: str = "t1"   # override with TENANTS=t1,t2,t3 env var
 
-    # Groq / LLM
-    groq_api_key: str
+    # Groq / LLM — GROQ_API_KEY is REQUIRED; service will refuse to start if missing
+    groq_api_key: str = Field(..., min_length=1)
     groq_model: str = "llama-3.3-70b-versatile"
 
     # Hunt tuning
@@ -598,9 +684,10 @@ class Settings(BaseSettings):
     hunt_queue_max: int = 20
 
     # Downstream services
-    orchestrator_url: str = "http://agent-orchestrator:8094"
-    guard_model_url: str = "http://guard-model:8200"
-    opa_url: str = "http://opa:8181"
+    orchestrator_url:  str = "http://agent-orchestrator:8094"
+    platform_api_url:  str = "http://api:8080"   # for dev-token auth
+    guard_model_url:   str = "http://guard-model:8200"
+    opa_url:           str = "http://opa:8181"
 
     # Databases
     spm_db_url: str = "postgresql://spm_rw:spmpass@spm-db:5432/spm"
@@ -1123,10 +1210,22 @@ Append to `tests/test_tools.py`:
 ```python
 def test_create_finding_success():
     with patch("tools.case_tool.httpx") as mock_httpx:
-        resp = MagicMock()
-        resp.status_code = 201
-        resp.json.return_value = {"id": "f1", "title": "T", "severity": "high", "status": "open", "created_at": "..."}
-        mock_httpx.post.return_value = resp
+        # Mock token fetch
+        token_resp = MagicMock()
+        token_resp.status_code = 200
+        token_resp.json.return_value = {"token": "mock-jwt-token"}
+
+        # Mock finding POST
+        finding_resp = MagicMock()
+        finding_resp.status_code = 201
+        finding_resp.json.return_value = {
+            "id": "f1", "title": "T", "severity": "high",
+            "status": "open", "created_at": "2026-01-01T00:00:00Z", "deduplicated": False,
+        }
+
+        # httpx.get for token, httpx.post for finding
+        mock_httpx.get.return_value = token_resp
+        mock_httpx.post.return_value = finding_resp
 
         from tools.case_tool import create_finding
         result = create_finding(
@@ -1135,6 +1234,9 @@ def test_create_finding_success():
         )
         data = json.loads(result)
         assert data["id"] == "f1"
+        # Verify Authorization header was sent
+        call_kwargs = mock_httpx.post.call_args
+        assert "Authorization" in call_kwargs.kwargs.get("headers", {})
 
 
 def test_create_finding_computes_batch_hash():
@@ -1151,17 +1253,45 @@ def test_create_finding_computes_batch_hash():
 ```
 
 - [ ] **Step 7.2: Create `tools/case_tool.py`**
+
+The tool fetches a dev-token from `platform_api_url/dev-token` (the `api` service at
+`http://api:8080`) and passes it as `Authorization: Bearer <token>` to the orchestrator.
+Token is cached in a module-level variable and refreshed every 55 minutes.
+
 ```python
 from __future__ import annotations
 import hashlib
 import json
 import logging
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 import httpx
 from langchain_core.tools import tool
 from config import get_settings
 
 logger = logging.getLogger(__name__)
+
+# ── Token cache (module-level — one per process) ──────────────────────────────
+_cached_token:  Optional[str] = None
+_token_fetched: float         = 0.0
+_TOKEN_TTL_SEC: int           = 55 * 60   # refresh 5 min before 1h expiry
+
+
+def _get_bearer_token() -> str:
+    """Fetch a dev-token from the platform api service. Cached for 55 minutes."""
+    global _cached_token, _token_fetched
+    now = time.monotonic()
+    if _cached_token and (now - _token_fetched) < _TOKEN_TTL_SEC:
+        return _cached_token
+
+    settings  = get_settings()
+    url       = f"{settings.platform_api_url}/dev-token"
+    resp      = httpx.get(url, timeout=5.0)
+    resp.raise_for_status()
+    _cached_token  = resp.json()["token"]
+    _token_fetched = now
+    logger.debug("Refreshed orchestrator bearer token")
+    return _cached_token
 
 
 def _compute_batch_hash(event_ids: List[str], tenant_id: str, batch_start_iso: str) -> str:
@@ -1188,22 +1318,24 @@ def create_finding(
     Call this ONLY when you have confirmed a real threat — not on suspicion alone.
     """
     try:
-        settings = get_settings()
-        event_ids = evidence.get("event_ids", [])
+        settings   = get_settings()
+        token      = _get_bearer_token()
+        event_ids  = evidence.get("event_ids", [])
         batch_hash = _compute_batch_hash(event_ids, tenant_id, "")
 
         payload = {
-            "title": title,
-            "severity": severity,
+            "title":       title,
+            "severity":    severity,
             "description": description,
-            "evidence": evidence,
-            "ttps": ttps,
-            "tenant_id": tenant_id,
-            "batch_hash": batch_hash,
+            "evidence":    evidence,
+            "ttps":        ttps,
+            "tenant_id":   tenant_id,
+            "batch_hash":  batch_hash,
         }
         resp = httpx.post(
             f"{settings.orchestrator_url}/api/v1/threat-findings",
             json=payload,
+            headers={"Authorization": f"Bearer {token}"},
             timeout=5.0,
         )
         if resp.status_code not in (200, 201):
@@ -1766,13 +1898,17 @@ Open `docker-compose.yml` and add before the `ui:` service:
       HUNT_BATCH_WINDOW_SEC: ${HUNT_BATCH_WINDOW_SEC:-30}
       HUNT_QUEUE_MAX: ${HUNT_QUEUE_MAX:-20}
       ORCHESTRATOR_URL: http://agent-orchestrator:8094
+      PLATFORM_API_URL: http://api:8080
       GUARD_MODEL_URL: http://guard-model:8200
       OPA_URL: http://opa:8181
       SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     volumes: *key-vol
-    ports: ["8095:8095"]
+    # No external port mapping — service is Docker-internal only.
+    # The /health endpoint is accessible via `docker compose exec` or within the network.
     depends_on:
       <<: *depends-platform
+      api:
+        condition: service_healthy
       agent-orchestrator:
         condition: service_healthy
       guard-model:
@@ -1822,7 +1958,8 @@ python -m pytest tests/ -v
 cd /Users/danyshapiro/PycharmProjects/AISPM
 docker compose up -d
 sleep 30
-curl -s http://localhost:8095/health | python -m json.tool
+# Service has no external port — check health via exec
+docker compose exec threat-hunting-agent curl -s http://localhost:8095/health
 # Expected: {"status": "ok", "service": "threat-hunting-agent", "version": "1.0.0"}
 ```
 
