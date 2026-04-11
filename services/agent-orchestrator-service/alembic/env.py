@@ -27,7 +27,7 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from db.base import Base
-from db.models import AgentSessionORM, SessionEventORM  # noqa: F401
+from db.models import AgentSessionORM, SessionEventORM, CaseORM, ThreatFindingORM  # noqa: F401
 from policies.db_models import PolicyORM, PolicyVersionORM, PolicyLifecycleAuditORM  # noqa: F401
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -118,3 +118,25 @@ class CaseORM(Base):
         Index("ix_agent_cases_session_id", "session_id"),
         Index("ix_agent_cases_created_at", "created_at"),
     )
+
+
+class ThreatFindingORM(Base):
+    """Persisted finding from the threat-hunting-agent."""
+    __tablename__ = "threat_findings"
+
+    id          = Column(String, primary_key=True)
+    batch_hash  = Column(String, nullable=False, unique=True)
+    title       = Column(String, nullable=False)
+    severity    = Column(String, nullable=False)   # low|medium|high|critical
+    description = Column(Text,   nullable=False)
+    evidence    = Column(Text,   nullable=False)   # JSON string
+    ttps        = Column(Text,   nullable=False, default="[]")  # JSON array
+    tenant_id   = Column(String, nullable=False)
+    status      = Column(String, nullable=False, default="open")
+    created_at  = Column(String, nullable=False)  # ISO-8601 string
+    closed_at   = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index("ix_threat_findings_tenant",   "tenant_id", "created_at"),
+        Index("ix_threat_findings_severity", "severity",  "status"),
+    )
