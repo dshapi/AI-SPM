@@ -63,7 +63,10 @@ jobs:
 
       # External services are mocked in unit tests; these stubs satisfy
       # module-level os.getenv() calls during import without live connections.
-      GUARD_MODEL_ENABLED:     "false"
+      # Guard must be enabled so that patch("app._call_guard_model") mocks
+      # in test_chat_blocking.py are actually exercised.  No real HTTP call
+      # is made — the adapter calls the patched function via late binding.
+      GUARD_MODEL_ENABLED:     "true"
       GUARD_MODEL_URL:         "http://guard-model:8200"
       KAFKA_BOOTSTRAP_SERVERS: "localhost:9092"
       REDIS_HOST:              "localhost"
