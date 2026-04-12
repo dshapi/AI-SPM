@@ -127,4 +127,5 @@ class FindingResponse(BaseModel):
             occurrence_count=rec.occurrence_count,
             group_id=rec.group_id,
             group_size=rec.group_size,
+            case_id=rec.case_id,
         )

@@ -876,7 +876,7 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
       </div>
 
       {/* ── Action footer ── */}
-      <div className="px-4 pt-3 pb-4 border-t border-gray-100 bg-white shrink-0 space-y-2">
+      <div className="px-4 pt-2 pb-3 border-t border-gray-100 bg-white shrink-0 space-y-1.5">
 
         {/* Case link widget */}
         <LinkCaseWidget
@@ -884,32 +884,6 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
           currentCaseId={finding.case_id}
           onLink={onLinkCase}
         />
-
-        {/* Status actions */}
-        <div className="grid grid-cols-3 gap-1.5">
-          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-1 justify-center px-2">
-            <Bell size={10} />Acknowledge
-          </Button>
-          <Button variant="outline" size="sm" className="h-8 text-[11px] gap-1 justify-center px-2">
-            <UserPlus size={10} />Assign
-          </Button>
-          {finding.status === 'Open' && (
-            <Button
-              variant="outline" size="sm"
-              className="h-8 text-[11px] gap-1 justify-center px-2 border-blue-200 text-blue-600 hover:bg-blue-50"
-              onClick={() => handleMarkStatus('investigating')}
-              disabled={statusPending}
-            >
-              {statusPending ? <Loader2 size={10} className="animate-spin" /> : <Activity size={10} />}
-              Investigate
-            </Button>
-          )}
-          {finding.status !== 'Open' && (
-            <Button variant="outline" size="sm" className="h-8 text-[11px] gap-1 justify-center px-2">
-              <ArrowUpRight size={10} />Escalate
-            </Button>
-          )}
-        </div>
 
         {statusError && (
           <p className="text-[11px] text-red-500 text-center">{statusError}</p>
