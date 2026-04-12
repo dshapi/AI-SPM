@@ -8,7 +8,7 @@ as the LLM.  All 8 tool functions are wrapped with StructuredTool so
 the agent sees typed schemas.
 
 The agent is stateless and re-created per hunt batch; the Kafka consumer
-calls `run_hunt()` with a batch of events and gets back a summary string.
+calls `run_hunt()` with a batch of events and gets back a Finding dict.
 """
 from __future__ import annotations
 
@@ -240,35 +240,85 @@ def build_agent(groq_api_key: str, model: str = "llama-3.3-70b-versatile") -> An
 # High-level entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> str:
+def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> dict:
     """
     Run a threat hunt over a batch of events.
 
     Args:
-        agent: Compiled agent graph from build_agent().
+        agent:     Compiled LangChain agent graph from build_agent().
         tenant_id: Tenant the events belong to.
-        events: List of event dicts (PostureEnrichedEvent / DecisionEvent shapes).
+        events:    List of event dicts from Kafka (various shapes).
 
     Returns:
-        Human-readable hunt summary string.
+        Finding dict — always a dict, never raises, never returns a string.
+        On any failure the safe fallback Finding is returned with
+        should_open_case=False and risk_score=0.0.
     """
-    event_summary = json.dumps(events, default=str, indent=2)
-    prompt = (
-        f"Threat hunt requested for tenant '{tenant_id}'.\n\n"
-        f"Batch of {len(events)} events:\n{event_summary}\n\n"
-        "Analyse these events for threats. Use your tools to gather additional context. "
-        "Create a threat finding if you identify a credible threat. "
-        "Finish with a concise summary."
-    )
+    from agent.finding import Finding, PolicySignal, safe_fallback_finding
+    from agent.scorer  import compute_risk_score, compute_confidence
+    from agent.parser  import parse_llm_output
 
+    # ── 1. Deterministic scoring (no LLM involvement) ─────────────────────────
+    risk_score = compute_risk_score(events)
+    confidence = compute_confidence(events)
+
+    # ── 2. Correlation — collect event/session IDs from batch ─────────────────
+    correlated_events: List[str] = []
+    for e in events:
+        eid = str(e.get("event_id") or e.get("session_id") or "")
+        if eid:
+            correlated_events.append(eid)
+
+    # ── 3. LLM invocation ─────────────────────────────────────────────────────
+    llm_fragment = None
     try:
-        result = agent.invoke({"messages": [HumanMessage(content=prompt)]})
-        # The agent returns a dict with a 'messages' key; last message is the final answer
+        event_summary = json.dumps(events, default=str, indent=2)
+        prompt = (
+            f"Threat hunt requested for tenant '{tenant_id}'.\n\n"
+            f"Batch of {len(events)} events:\n{event_summary}\n\n"
+            "Analyse these events for threats. Use your tools to gather additional "
+            "context where useful. Then output your structured finding JSON as "
+            "instructed in the system prompt."
+        )
+        result   = agent.invoke({"messages": [HumanMessage(content=prompt)]})
         messages = result.get("messages", [])
         if messages:
-            last = messages[-1]
-            return getattr(last, "content", str(last))
-        return str(result)
+            raw_text     = getattr(messages[-1], "content", str(messages[-1]))
+            llm_fragment = parse_llm_output(raw_text)
     except Exception as exc:
-        logger.exception("run_hunt failed for tenant=%s: %s", tenant_id, exc)
-        return f"Hunt failed: {exc}"
+        logger.exception("run_hunt: agent invocation failed tenant=%s: %s", tenant_id, exc)
+        return safe_fallback_finding(tenant_id, len(events))
+
+    if llm_fragment is None:
+        return safe_fallback_finding(tenant_id, len(events))
+
+    # ── 4. Assemble Finding ────────────────────────────────────────────────────
+    try:
+        policy_signals = [
+            PolicySignal(**ps)
+            for ps in llm_fragment.policy_signals
+            if isinstance(ps, dict) and "type" in ps and "policy" in ps
+        ]
+    except Exception:
+        policy_signals = []
+
+    try:
+        finding = Finding(
+            severity             = llm_fragment.severity,
+            confidence           = confidence,
+            risk_score           = risk_score,
+            title                = llm_fragment.title,
+            hypothesis           = llm_fragment.hypothesis,
+            asset                = llm_fragment.asset,
+            environment          = llm_fragment.environment,
+            evidence             = llm_fragment.evidence,
+            correlated_events    = correlated_events,
+            triggered_policies   = llm_fragment.triggered_policies,
+            policy_signals       = policy_signals,
+            recommended_actions  = llm_fragment.recommended_actions,
+            should_open_case     = llm_fragment.should_open_case,
+        )
+        return finding.model_dump()
+    except Exception as exc:
+        logger.exception("run_hunt: Finding assembly failed tenant=%s: %s", tenant_id, exc)
+        return safe_fallback_finding(tenant_id, len(events))
