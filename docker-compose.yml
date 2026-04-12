@@ -373,6 +373,45 @@ services:
       spm-db:
         condition: service_healthy
 
+  threat-hunting-agent:
+    build:
+      context: .
+      dockerfile: services/threat-hunting-agent/Dockerfile
+    container_name: cpm-threat-hunting-agent
+    environment:
+      <<: *common-env
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      TENANTS: ${TENANTS:-t1}
+      ORCHESTRATOR_URL: http://agent-orchestrator:8094
+      PLATFORM_API_URL: http://api:8080
+      GUARD_MODEL_URL: http://guard-model:8200
+      OPA_URL: http://opa:8181
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      HUNT_BATCH_WINDOW_SEC: ${HUNT_BATCH_WINDOW_SEC:-30}
+      HUNT_QUEUE_MAX: ${HUNT_QUEUE_MAX:-20}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=4)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      kafka-broker:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opa:
+        condition: service_started
+      agent-orchestrator:
+        condition: service_healthy
+      spm-db:
+        condition: service_healthy
+    restart: unless-stopped
+
   ui:
     build: {context: ./ui, dockerfile: Dockerfile}
     container_name: cpm-ui
