@@ -37,6 +37,7 @@ from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from clients.policy_client import PolicyClient
@@ -108,6 +109,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         async with engine.begin() as conn:
             await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
         logger.info("create_all complete (dev mode)")
+
+        # ── Incremental column migration for threat_findings ────────────────
+        # create_all(checkfirst=True) creates missing *tables* but never adds
+        # columns to existing tables. If this DB was created before the
+        # AI-enrichment fields were introduced, ALTER TABLE adds them now.
+        _NEW_THREAT_FINDING_COLS = [
+            ("timestamp",           "TEXT"),
+            ("confidence",          "REAL"),
+            ("risk_score",          "REAL"),
+            ("hypothesis",          "TEXT"),
+            ("asset",               "TEXT"),
+            ("environment",         "TEXT"),
+            ("correlated_events",   "TEXT"),
+            ("correlated_findings", "TEXT"),
+            ("triggered_policies",  "TEXT"),
+            ("policy_signals",      "TEXT"),
+            ("recommended_actions", "TEXT"),
+            ("should_open_case",    "BOOLEAN"),
+            ("case_id",             "TEXT"),
+            ("source",              "TEXT"),
+            ("updated_at",          "TEXT"),
+        ]
+        async with engine.begin() as conn:
+            result = await conn.execute(text("PRAGMA table_info(threat_findings)"))
+            existing_cols = {row[1] for row in result.fetchall()}
+            for col_name, col_type in _NEW_THREAT_FINDING_COLS:
+                if col_name not in existing_cols:
+                    logger.info(
+                        "DB migration: adding missing column '%s %s' to threat_findings",
+                        col_name, col_type,
+                    )
+                    await conn.execute(
+                        text(f"ALTER TABLE threat_findings ADD COLUMN {col_name} {col_type}")
+                    )
 
     session_factory: async_sessionmaker = make_session_factory(engine)
     app.state.db_engine = engine
