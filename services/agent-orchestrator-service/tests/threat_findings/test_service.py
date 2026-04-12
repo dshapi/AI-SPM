@@ -2,6 +2,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, call
 from threat_findings.service import ThreatFindingsService
 from threat_findings.schemas import CreateFindingRequest, FindingRecord
+from threat_findings.models import ThreatFindingRepository
 
 
 @pytest.fixture
@@ -177,3 +178,42 @@ class TestPersistFindingFromDict:
         repo = _new_repo()
         await svc.mark_status("fid1", "investigating", repo)
         repo.update_status.assert_called_once_with("fid1", "investigating")
+
+
+@pytest.mark.asyncio
+async def test_get_finding_by_id_returns_record(db_session):
+    repo = ThreatFindingRepository(db_session)
+    await repo.insert(FindingRecord(
+        id="svc-1", batch_hash="sv-h1", title="SvcTest", severity="high",
+        description="d", evidence=[], ttps=[], tenant_id="t1",
+    ))
+    svc = ThreatFindingsService()
+    rec = await svc.get_finding_by_id("svc-1", repo)
+    assert rec is not None
+    assert rec.id == "svc-1"
+
+
+@pytest.mark.asyncio
+async def test_get_finding_by_id_missing_returns_none(db_session):
+    repo = ThreatFindingRepository(db_session)
+    svc = ThreatFindingsService()
+    rec = await svc.get_finding_by_id("does-not-exist", repo)
+    assert rec is None
+
+
+@pytest.mark.asyncio
+async def test_list_and_count_findings(db_session):
+    repo = ThreatFindingRepository(db_session)
+    for i in range(4):
+        await repo.insert(FindingRecord(
+            id=f"lc-{i}", batch_hash=f"lc-h{i}", title=f"LC{i}",
+            severity="low", description="d", evidence=[], ttps=[],
+            tenant_id="t-lc",
+        ))
+    svc = ThreatFindingsService()
+    from threat_findings.schemas import FindingFilter
+    f = FindingFilter(tenant_id="t-lc", limit=2)
+    items = await svc.list_findings(f, repo)
+    total = await svc.count_findings(f, repo)
+    assert total == 4
+    assert len(items) == 2

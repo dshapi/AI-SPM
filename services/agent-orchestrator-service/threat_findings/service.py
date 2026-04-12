@@ -4,10 +4,11 @@ import logging
 import hashlib
 from datetime import datetime, timezone
 from uuid import uuid4
+from typing import Optional, List
 
 from cases.schemas import CaseRecord
 from models.cases import CaseRepository
-from threat_findings.schemas import CreateFindingRequest, FindingRecord
+from threat_findings.schemas import CreateFindingRequest, FindingRecord, FindingFilter
 from threat_findings.models import ThreatFindingRepository
 
 logger = logging.getLogger(__name__)
@@ -154,3 +155,27 @@ class ThreatFindingsService:
             f"Invalid status: {new_status}"
         await repo.update_status(finding_id, new_status)
         logger.info("Finding %s -> status=%s", finding_id, new_status)
+
+    async def get_finding_by_id(
+        self,
+        finding_id: str,
+        repo: ThreatFindingRepository,
+    ) -> Optional[FindingRecord]:
+        """Return the FindingRecord for finding_id, or None if not found."""
+        return await repo.get_by_id(finding_id)
+
+    async def list_findings(
+        self,
+        filters: FindingFilter,
+        repo: ThreatFindingRepository,
+    ) -> List[FindingRecord]:
+        """Return paginated findings matching filters."""
+        return await repo.list_findings(filters)
+
+    async def count_findings(
+        self,
+        filters: FindingFilter,
+        repo: ThreatFindingRepository,
+    ) -> int:
+        """Return the total count matching filters (ignores limit/offset)."""
+        return await repo.count_findings(filters)
