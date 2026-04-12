@@ -2,6 +2,99 @@ from __future__ import annotations
 import pytest
 from agent.finding import Finding, PolicySignal, safe_fallback_finding
 
+# ── Contract: minimum required fields ─────────────────────────────────────────
+# These are the fields that downstream consumers (DB layer, API, UI) MUST
+# always receive.  Any schema change that removes one of these will fail here.
+
+REQUIRED_FIELDS = {
+    "finding_id",
+    "timestamp",
+    "severity",
+    "confidence",
+    "risk_score",
+    "title",
+    "hypothesis",
+    "evidence",
+    "correlated_events",
+    "triggered_policies",
+    "policy_signals",
+    "recommended_actions",
+    "should_open_case",
+}
+
+
+class TestFindingContract:
+    """Pins the minimum output contract for Finding.model_dump()."""
+
+    def _minimal_finding(self) -> Finding:
+        return Finding(
+            severity="high",
+            confidence=0.7,
+            risk_score=0.8,
+            title="Contract test",
+            hypothesis="Verifying required fields are present.",
+        )
+
+    def test_all_required_fields_present_in_model_dump(self):
+        d = self._minimal_finding().model_dump()
+        missing = REQUIRED_FIELDS - d.keys()
+        assert not missing, f"Missing required fields: {missing}"
+
+    def test_all_required_fields_present_in_fallback(self):
+        d = safe_fallback_finding("t1", 0)
+        missing = REQUIRED_FIELDS - d.keys()
+        assert not missing, f"Fallback missing required fields: {missing}"
+
+    def test_evidence_is_list(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["evidence"], list)
+
+    def test_correlated_events_is_list(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["correlated_events"], list)
+
+    def test_triggered_policies_is_list(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["triggered_policies"], list)
+
+    def test_policy_signals_is_list(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["policy_signals"], list)
+
+    def test_recommended_actions_is_list(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["recommended_actions"], list)
+
+    def test_should_open_case_is_bool(self):
+        d = self._minimal_finding().model_dump()
+        assert isinstance(d["should_open_case"], bool)
+
+    def test_finding_id_is_uuid_string(self):
+        import re
+        d = self._minimal_finding().model_dump()
+        assert re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            d["finding_id"],
+        ), f"finding_id is not a UUID: {d['finding_id']}"
+
+    def test_timestamp_is_iso8601(self):
+        from datetime import datetime
+        d = self._minimal_finding().model_dump()
+        # Should not raise
+        datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00"))
+
+    def test_severity_is_valid_literal(self):
+        d = self._minimal_finding().model_dump()
+        assert d["severity"] in ("low", "medium", "high", "critical")
+
+    def test_confidence_in_bounds(self):
+        d = self._minimal_finding().model_dump()
+        assert 0.0 <= d["confidence"] <= 1.0
+
+    def test_risk_score_in_bounds(self):
+        d = self._minimal_finding().model_dump()
+        assert 0.0 <= d["risk_score"] <= 1.0
+
 
 class TestPolicySignal:
     def test_valid(self):
