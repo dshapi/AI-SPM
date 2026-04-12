@@ -724,11 +724,16 @@ export default function Runtime() {
     return () => { cancelled = true; clearInterval(iv) }
   }, [])
 
-  // ── Auto-select session from URL ?session_id= param ──────────────────────
+  // ── Auto-select session from URL ?session_id= param (run once only) ────────
+  const urlSelectDoneRef = useRef(false)
   useEffect(() => {
     if (!sessionIdFromUrl || sessions.length === 0) return
+    if (urlSelectDoneRef.current) return          // already applied — don't override user clicks
     const match = sessions.find(s => s.id === sessionIdFromUrl)
-    if (match) setSelectedId(match.id)
+    if (match) {
+      setSelectedId(match.id)
+      urlSelectDoneRef.current = true
+    }
   }, [sessions, sessionIdFromUrl])
 
   // ── On session select: load history then open WS if active ────────────────
