@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   MessageSquare, Layers, FileText, Cpu, Wrench,
   Shield, CheckCircle2,
@@ -6,7 +7,7 @@ import {
   AlertTriangle, Clock, ChevronRight, Tag,
   Database, Globe, Terminal, Lock,
   AlertCircle, Info, Users, Zap,
-  ArrowRight, Code2, FileSearch,
+  ArrowRight, Code2, FileSearch, GitBranch,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
 import { PageContainer } from '../../components/layout/PageContainer.jsx'
@@ -928,6 +929,13 @@ export default function Lineage() {
   const [sessionOpen,   setSessionOpen]   = useState(false)
   const [activeSession, setActiveSession] = useState(SESSIONS[0])
 
+  // ── Context banner from query params (set by ActionPanel navigation) ──────
+  const location        = useLocation()
+  const _params         = new URLSearchParams(location.search)
+  const ctxAsset        = _params.get('asset')
+  const ctxFindingId    = _params.get('finding_id')
+  const [bannerVisible, setBannerVisible] = useState(!!(ctxAsset || ctxFindingId))
+
   const handleSelect = (id) => setSelectedId(id)
 
   const riskyCt    = NODES.filter(n => n.flagged).length
@@ -938,6 +946,29 @@ export default function Lineage() {
       {/* Close session dropdown on outside click */}
       {sessionOpen && (
         <div className="fixed inset-0 z-40" onClick={() => setSessionOpen(false)} />
+      )}
+
+      {/* ── Context banner (shown when navigated from ActionPanel) ── */}
+      {bannerVisible && (ctxAsset || ctxFindingId) && (
+        <div
+          data-testid="lineage-context-banner"
+          className="flex items-center gap-3 px-4 py-2.5 bg-blue-50 border border-blue-200
+                     rounded-xl text-[12px] text-blue-700 font-medium"
+        >
+          <GitBranch size={13} className="text-blue-400 shrink-0" />
+          <span className="flex-1">
+            Viewing lineage context
+            {ctxAsset     && <> for asset: <strong>{ctxAsset}</strong></>}
+            {ctxFindingId && <> · Finding: <strong>{ctxFindingId}</strong></>}
+          </span>
+          <button
+            data-testid="lineage-banner-dismiss"
+            onClick={() => setBannerVisible(false)}
+            className="text-blue-400 hover:text-blue-600 transition-colors"
+          >
+            ✕
+          </button>
+        </div>
       )}
 
       {/* ── Header ── */}
