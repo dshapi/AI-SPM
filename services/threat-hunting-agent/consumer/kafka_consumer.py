@@ -247,8 +247,18 @@ class ThreatHuntConsumer:
             for tenant_id, events in batches.items():
                 logger.info("Firing hunt: tenant=%s events=%d", tenant_id, len(events))
                 try:
-                    summary = self._hunt_agent(tenant_id, events)
-                    logger.info("Hunt complete: tenant=%s summary_len=%d", tenant_id, len(summary))
+                    finding = self._hunt_agent(tenant_id, events)
+                    if isinstance(finding, dict):
+                        logger.info(
+                            "Hunt complete: tenant=%s finding_id=%s severity=%s should_open_case=%s",
+                            tenant_id,
+                            finding.get("finding_id", "?"),
+                            finding.get("severity", "?"),
+                            finding.get("should_open_case", False),
+                        )
+                    else:
+                        # Backward-compat: old string return (should not happen post-refactor)
+                        logger.info("Hunt complete: tenant=%s summary_len=%d", tenant_id, len(str(finding)))
                 except Exception as exc:
                     logger.exception("Hunt failed: tenant=%s error=%s", tenant_id, exc)
         finally:

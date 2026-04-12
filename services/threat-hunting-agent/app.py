@@ -126,7 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("LangChain agent built: model=%s", settings.hunt_model)
 
     # -- Kafka consumer ----------------------------------------------------------
-    def _hunt(tenant_id: str, events: list) -> str:
+    def _hunt(tenant_id: str, events: list) -> dict:
         return run_hunt(app.state.agent, tenant_id, events)
 
     consumer = ThreatHuntConsumer(
@@ -204,9 +204,10 @@ def create_app() -> FastAPI:
         Run a synchronous threat hunt over a supplied event batch.
         Intended for integration tests and ops tooling — not exposed externally.
         """
-        from fastapi import Request
         app_ref = application  # use closure
-        summary = run_hunt(app_ref.state.agent, req.tenant_id, req.events)
+        finding = run_hunt(app_ref.state.agent, req.tenant_id, req.events)
+        # finding is now a dict; use title as summary for HuntResponse
+        summary = finding.get("title", str(finding)) if isinstance(finding, dict) else str(finding)
         return HuntResponse(
             tenant_id=req.tenant_id,
             summary=summary,
