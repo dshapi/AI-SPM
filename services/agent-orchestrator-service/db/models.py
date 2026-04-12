@@ -12,6 +12,7 @@ Both are imported in alembic/env.py so autogenerate picks them up.
 from __future__ import annotations
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Float,
@@ -129,12 +130,29 @@ class ThreatFindingORM(Base):
     title       = Column(String, nullable=False)
     severity    = Column(String, nullable=False)   # low|medium|high|critical
     description = Column(Text,   nullable=False)
-    evidence    = Column(Text,   nullable=False)   # JSON string
+    evidence    = Column(Text,   nullable=False)   # JSON list
     ttps        = Column(Text,   nullable=False, default="[]")  # JSON array
     tenant_id   = Column(String, nullable=False)
     status      = Column(String, nullable=False, default="open")
     created_at  = Column(String, nullable=False)  # ISO-8601 string
     closed_at   = Column(String, nullable=True)
+
+    # ── New fields (all nullable for backward compat) ─────────────────
+    timestamp           = Column(String,  nullable=True)   # Finding.timestamp (UTC ISO)
+    confidence          = Column(Float,   nullable=True)
+    risk_score          = Column(Float,   nullable=True)
+    hypothesis          = Column(Text,    nullable=True)
+    asset               = Column(String,  nullable=True)
+    environment         = Column(String,  nullable=True)
+    correlated_events   = Column(Text,    nullable=True)   # JSON list
+    correlated_findings = Column(Text,    nullable=True)   # JSON list
+    triggered_policies  = Column(Text,    nullable=True)   # JSON list
+    policy_signals      = Column(Text,    nullable=True)   # JSON list of dicts
+    recommended_actions = Column(Text,    nullable=True)   # JSON list
+    should_open_case    = Column(Boolean, nullable=True)
+    case_id             = Column(String,  nullable=True)
+    source              = Column(String,  nullable=True)
+    updated_at          = Column(String,  nullable=True)
 
     __table_args__ = (
         Index("ix_threat_findings_tenant",   "tenant_id", "created_at"),
