@@ -21,6 +21,20 @@ def _json_loads_safe(value: Optional[str], default):
         return default
 
 
+def _coerce_list(value) -> list:
+    """Ensure a value is always a list.
+
+    Handles legacy rows where `evidence` was stored as a bare dict or
+    non-list JSON value instead of an array.  Any non-list is wrapped in
+    a one-element list so Pydantic's List[Any] field never rejects it.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
 def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
     return FindingRecord(
         id=row.id,
@@ -28,8 +42,8 @@ def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
         title=row.title,
         severity=row.severity,
         description=row.description,
-        evidence=_json_loads_safe(row.evidence, []),
-        ttps=_json_loads_safe(row.ttps, []),
+        evidence=_coerce_list(_json_loads_safe(row.evidence, [])),
+        ttps=_coerce_list(_json_loads_safe(row.ttps, [])),
         tenant_id=row.tenant_id,
         status=row.status,
         created_at=row.created_at,
