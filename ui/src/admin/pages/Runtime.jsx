@@ -680,13 +680,15 @@ function Sel({ value, onChange, options, className }) {
 export default function Runtime() {
   const location = useLocation()
   const sessionIdFromUrl = new URLSearchParams(location.search).get('session_id')
+  const filterFromUrl = new URLSearchParams(location.search).get('filter') // e.g. 'network'
 
   // ── UI state ───────────────────────────────────────────────────────────────
   const [paused,         setPaused]         = useState(false)
   const [newIds,         setNewIds]         = useState(new Set())
   const [suspiciousOnly, setSuspiciousOnly] = useState(false)
   const [sessionFilter,  setSessionFilter]  = useState({ search: '', risk: 'All', status: 'All' })
-  const [streamType,     setStreamType]     = useState('All')
+  const [streamType,     setStreamType]     = useState(filterFromUrl === 'network' ? 'tool' : 'All')
+  const [networkBanner,  setNetworkBanner]  = useState(filterFromUrl === 'network')
 
   // ── Sessions list state ────────────────────────────────────────────────────
   const [sessions,        setSessions]        = useState([])
@@ -857,6 +859,26 @@ export default function Runtime() {
         <KpiCard label="Blocked Actions"    value={blockedCount}                              sub="In current view"                                                  accentClass="border-l-red-500"     />
         <KpiCard label="High Risk Sessions" value={highRiskSessions}                          sub="Critical + High"                                                  accentClass="border-l-orange-500"  />
       </div>
+
+      {/* ── Network filter banner ──────────────────────────────────────── */}
+      {networkBanner && (
+        <div
+          data-testid="network-filter-banner"
+          className="flex items-center gap-3 px-4 py-2 bg-orange-50 border border-orange-200
+                     rounded-xl text-[12px] text-orange-700 font-medium"
+        >
+          <Activity size={13} className="text-orange-400 shrink-0" />
+          <span className="flex-1">
+            Filtered to <strong>network activity</strong> — showing tool-call events only
+          </span>
+          <button
+            onClick={() => { setNetworkBanner(false); setStreamType('All') }}
+            className="text-orange-400 hover:text-orange-600 transition-colors"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* ── Filter bar ─────────────────────────────────────────────────────── */}
       <div className="bg-white rounded-xl border border-gray-200 px-3 h-11 flex items-center gap-2.5">
