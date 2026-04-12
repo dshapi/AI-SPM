@@ -1,4 +1,5 @@
-import { useNavigate, useParams } from 'react-router-dom'
+import { useEffect } from 'react'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import {
   Search, SlidersHorizontal, LayoutGrid, List,
   ChevronRight, X, ExternalLink, AlertTriangle,
@@ -61,6 +62,8 @@ const ASSETS = {
     { id: 'ss-004', name: 'sess_m3n4o5p6',             type: 'User Session',       risk: 'Medium',   owner: 'alice@orbyx.io',               provider: 'Azure', policyStatus: 'full',    lastSeen: '5m ago',   description: 'Active user session. Elevated privilege query detected — under review.', linkedPolicies: ['Access-Scope v3'],                                                   linkedAlerts: 1 },
   ],
 }
+
+const allAssets = Object.values(ASSETS).flat()
 
 const TABS = [
   { key: 'agents',   label: 'Agents',       icon: Bot,      count: ASSETS.agents.length   },
@@ -515,7 +518,7 @@ function PreviewPanel({ asset, onClose }) {
   }[asset.risk] ?? 'bg-gray-50'
 
   return (
-    <div className="w-[300px] shrink-0 flex flex-col h-full">
+    <div className="w-[300px] shrink-0 flex flex-col h-full" data-testid="asset-preview-panel">
 
       {/* Header — risk-tinted */}
       <div className={cn('px-4 py-3.5 border-b border-gray-100 flex items-start justify-between gap-2', riskBg)}>
@@ -622,8 +625,19 @@ export default function Inventory() {
   const { setTab, setView, setSearch, setProvider, setRisk, setPolicy } = setters
 
   // Selection derived from URL param, not local state
-  const allAssets = Object.values(ASSETS).flat()
   const selected  = allAssets.find(a => a.id === assetId) ?? null
+
+  // ── Redirect ?asset=<name> → /:assetId (runs once on mount) ──────────────
+  const location  = useLocation()
+  const assetNameParam = new URLSearchParams(location.search).get('asset')
+
+  useEffect(() => {
+    if (!assetNameParam || assetId) return            // already a path param, or no query param
+    const match = allAssets.find(
+      a => a.name.toLowerCase() === assetNameParam.toLowerCase()
+    )
+    if (match) navigate(`/admin/inventory/${match.id}`, { replace: true })
+  }, [assetNameParam, assetId, navigate])
 
   const handleTabChange = (tab) => {
     setTab(tab)
