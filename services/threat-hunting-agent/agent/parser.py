@@ -35,7 +35,7 @@ class LLMFragment(BaseModel):
     title:               str        = "Threat detected"
     hypothesis:          str        = "Suspicious activity observed requiring investigation."
     severity:            str        = _DEFAULT_SEVERITY
-    asset:               str        = "unknown"
+    asset:               str        = "Threat Hunting AI Agent"
     environment:         str        = "production"
     evidence:            List[str]  = Field(default_factory=list)
     triggered_policies:  List[str]  = Field(default_factory=list)

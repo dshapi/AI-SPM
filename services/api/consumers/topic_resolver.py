@@ -61,9 +61,8 @@ _FLAT_TOPICS = [
     "audit_export",
 ]
 
-# agent-orchestrator-service topics — tenant-scoped (cpm.{tenant}.sessions.*).
-# _TENANT matches the publisher's logic: first entry from TENANTS env var.
-_TENANT = os.getenv("TENANTS", "t1").split(",")[0].strip()
+# agent-orchestrator-service topics — single-tenant system, always t1.
+_TENANT = "t1"
 
 _ORCHESTRATOR_TOPICS = [
     os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   f"cpm.{_TENANT}.sessions.prompt_received"),
@@ -78,8 +77,8 @@ _ORCHESTRATOR_TOPICS = [
 
 
 def configured_tenants() -> List[str]:
-    """Parse KAFKA_WS_TENANTS into a list of tenant IDs."""
-    return [t.strip() for t in WS_TENANTS_ENV.split(",") if t.strip()]
+    """Return the single configured tenant."""
+    return ["t1"]
 
 
 def resolve_topics(tenant_ids: List[str] | None = None) -> List[str]:

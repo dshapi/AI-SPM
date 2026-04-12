@@ -46,8 +46,9 @@ class Finding(BaseModel):
     hypothesis: str
 
     # Context
-    asset: str = "unknown"
+    asset: str = "Threat Hunting AI Agent"
     environment: str = "production"
+    source: str = "threat_hunt"
 
     # Evidence lists
     evidence: List[str] = Field(default_factory=list)

@@ -92,7 +92,7 @@ risk_score or confidence (those are computed externally).
   "title": "<short threat summary, max 80 chars>",
   "hypothesis": "<1-2 sentences: what you observed and why it matters>",
   "severity": "low | medium | high | critical",
-  "asset": "<agent/model/system name, or 'unknown'>",
+  "asset": "<specific agent/model/system name if identifiable, otherwise 'Threat Hunting AI Agent'>",
   "environment": "<production | staging | dev, or 'unknown'>",
   "evidence": [
     "<string describing each piece of supporting evidence>"

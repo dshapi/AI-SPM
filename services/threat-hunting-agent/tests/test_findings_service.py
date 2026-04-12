@@ -99,3 +99,54 @@ class TestFindingsService:
         mock_patch.assert_called_once()
         url = mock_patch.call_args[0][0]
         assert "fid1" in url
+
+    def test_persist_finding_passes_source_through(self):
+        """source in finding_dict must reach the POST payload unchanged."""
+        svc = self._svc()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, **kwargs):
+            captured["payload"] = json
+            resp = MagicMock()
+            resp.raise_for_status = lambda: None
+            resp.json.return_value = {"id": "x", "deduplicated": False}
+            return resp
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = lambda: None
+            resp.json.return_value = {"token": "tok", "expires_in": 3600}
+            return resp
+
+        with patch.object(svc._client, "post", side_effect=fake_post), \
+             patch.object(svc._client, "get", side_effect=fake_get):
+            svc.persist_finding(
+                {"title": "T", "severity": "low", "source": "threathunting_ai"},
+                "t1",
+            )
+
+        assert captured["payload"]["source"] == "threathunting_ai"
+
+    def test_persist_finding_defaults_source_when_missing(self):
+        """When source is absent from finding_dict, default to 'threat-hunting-agent'."""
+        svc = self._svc()
+        captured = {}
+
+        def fake_post(url, json=None, headers=None, **kwargs):
+            captured["payload"] = json
+            resp = MagicMock()
+            resp.raise_for_status = lambda: None
+            resp.json.return_value = {"id": "x", "deduplicated": False}
+            return resp
+
+        def fake_get(url, **kwargs):
+            resp = MagicMock()
+            resp.raise_for_status = lambda: None
+            resp.json.return_value = {"token": "tok", "expires_in": 3600}
+            return resp
+
+        with patch.object(svc._client, "post", side_effect=fake_post), \
+             patch.object(svc._client, "get", side_effect=fake_get):
+            svc.persist_finding({"title": "T", "severity": "low"}, "t1")
+
+        assert captured["payload"]["source"] == "threat-hunting-agent"

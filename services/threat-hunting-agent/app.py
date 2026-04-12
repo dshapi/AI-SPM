@@ -34,7 +34,9 @@ from pydantic import BaseModel
 from config import get_settings
 from agent.agent import build_agent, run_hunt
 from consumer.kafka_consumer import ThreatHuntConsumer
+from consumer.session_poller import SessionPoller
 from service.findings_service import FindingsService
+from threathunting_ai.scheduler import ThreatHuntingAIScheduler
 from tools.postgres_tool import set_connection_factory
 from tools.redis_tool import set_redis_client
 from tools.opa_tool import set_opa_client
@@ -134,16 +136,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.findings_svc = findings_svc
     logger.info("FindingsService configured: orchestrator=%s", settings.orchestrator_url)
 
-    # -- Kafka consumer ----------------------------------------------------------
+    # -- Hunt callbacks ----------------------------------------------------------
     def _hunt(tenant_id: str, events: list) -> dict:
         return run_hunt(app.state.agent, tenant_id, events)
 
     def _persist(tenant_id: str, finding: dict) -> None:
         findings_svc.persist_finding(finding, tenant_id)
 
+    # -- Session poller (proactive) ----------------------------------------------
+    # Polls /api/v1/sessions every 30 s so the agent fires even when sessions
+    # are created directly via the AISPM admin UI (not via Kafka).
+    poller = SessionPoller(
+        orchestrator_url=settings.orchestrator_url,
+        dev_token_url=f"{settings.platform_api_url}/dev-token",
+        hunt_agent=_hunt,
+        persist_fn=_persist,
+        poll_interval_sec=settings.hunt_batch_window_sec,
+    )
+    poller.start()
+    app.state.poller = poller
+    logger.info(
+        "SessionPoller started: tenant=t1 interval=%ds",
+        settings.hunt_batch_window_sec,
+    )
+
+    # -- Kafka consumer (reactive, kept as secondary feed) -----------------------
     consumer = ThreatHuntConsumer(
         kafka_bootstrap=settings.kafka_bootstrap_servers,
-        tenant_list=settings.tenant_list,
         hunt_agent=_hunt,
         batch_window_sec=settings.hunt_batch_window_sec,
         queue_max=settings.hunt_queue_max,
@@ -152,8 +171,21 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     consumer.start()
     app.state.consumer = consumer
     logger.info(
-        "Kafka consumer started: tenants=%s window=%ds",
-        settings.tenant_list, settings.hunt_batch_window_sec,
+        "Kafka consumer started: tenant=t1 window=%ds",
+        settings.hunt_batch_window_sec,
+    )
+
+    # -- ThreatHunting AI scheduler (continuous proactive scans) ----------------
+    threathunting_ai_scheduler = ThreatHuntingAIScheduler(
+        hunt_agent=_hunt,
+        persist_fn=_persist,
+        scan_interval_sec=settings.threathunting_ai_interval_sec,
+    )
+    threathunting_ai_scheduler.start()
+    app.state.threathunting_ai_scheduler = threathunting_ai_scheduler
+    logger.info(
+        "ThreatHuntingAI scheduler started: interval=%ds",
+        settings.threathunting_ai_interval_sec,
     )
 
     logger.info("=== %s ready ===", SERVICE_NAME)
@@ -161,7 +193,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # -- Teardown ----------------------------------------------------------------
     logger.info("=== %s shutting down ===", SERVICE_NAME)
+    poller.stop()
     consumer.stop()
+    threathunting_ai_scheduler.stop()
     logger.info("=== %s stopped ===", SERVICE_NAME)
 
 

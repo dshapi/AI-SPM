@@ -757,6 +757,40 @@ function CaseDetailPanel({ caseData, onClose }) {
         {/* ── Notes ── */}
         {activeTab === 'Notes' && (
           <div className="flex flex-col h-full">
+            {/* Compose bar */}
+            <div className="border-b border-gray-100 bg-gray-50/60 px-5 py-3 shrink-0">
+              <div className="flex items-end gap-2.5">
+                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-[9px] font-bold shrink-0 shadow-sm ring-2 ring-white">
+                  YO
+                </div>
+                <div className="flex-1 min-w-0 bg-white border border-gray-200 rounded-2xl px-3.5 py-2.5 focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-300 transition shadow-sm">
+                  <textarea
+                    value={noteText}
+                    onChange={e => setNoteText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitNote() }}
+                    placeholder="Add an analyst note…"
+                    rows={2}
+                    className="w-full bg-transparent text-[12px] text-gray-700 resize-none focus:outline-none placeholder:text-gray-400 leading-relaxed"
+                  />
+                  <div className="flex items-center justify-between mt-1.5">
+                    <span className="text-[9.5px] text-gray-400">⌘↵ to send</span>
+                    <button
+                      onClick={submitNote}
+                      disabled={!noteText.trim()}
+                      className={cn(
+                        'flex items-center gap-1.5 h-6 px-2.5 rounded-lg text-[10.5px] font-bold transition-colors',
+                        noteText.trim()
+                          ? 'bg-blue-600 text-white hover:bg-blue-700'
+                          : 'bg-gray-100 text-gray-400 cursor-not-allowed',
+                      )}
+                    >
+                      <Send size={10} strokeWidth={2.5} /> Send
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* Notes list */}
             <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5">
               {notes.length === 0 && (
@@ -765,7 +799,7 @@ function CaseDetailPanel({ caseData, onClose }) {
                     <MessageSquare size={16} className="text-gray-400" strokeWidth={1.75} />
                   </div>
                   <p className="text-[12.5px] font-semibold text-gray-500">No notes yet</p>
-                  <p className="text-[11px] text-gray-400 mt-1">Add the first analyst comment below.</p>
+                  <p className="text-[11px] text-gray-400 mt-1">Add the first analyst comment above.</p>
                 </div>
               )}
               {notes.map((note, idx) => {
@@ -811,40 +845,6 @@ function CaseDetailPanel({ caseData, onClose }) {
                   </div>
                 )
               })}
-            </div>
-
-            {/* Compose bar */}
-            <div className="border-t border-gray-100 bg-gray-50/60 px-5 py-3 shrink-0">
-              <div className="flex items-end gap-2.5">
-                <div className="w-8 h-8 rounded-full bg-blue-600 flex items-center justify-center text-white text-[9px] font-bold shrink-0 shadow-sm ring-2 ring-white">
-                  YO
-                </div>
-                <div className="flex-1 min-w-0 bg-white border border-gray-200 rounded-2xl px-3.5 py-2.5 focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-blue-300 transition shadow-sm">
-                  <textarea
-                    value={noteText}
-                    onChange={e => setNoteText(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submitNote() }}
-                    placeholder="Add an analyst note…"
-                    rows={2}
-                    className="w-full bg-transparent text-[12px] text-gray-700 resize-none focus:outline-none placeholder:text-gray-400 leading-relaxed"
-                  />
-                  <div className="flex items-center justify-between mt-1.5">
-                    <span className="text-[9.5px] text-gray-400">⌘↵ to send</span>
-                    <button
-                      onClick={submitNote}
-                      disabled={!noteText.trim()}
-                      className={cn(
-                        'flex items-center gap-1.5 h-6 px-2.5 rounded-lg text-[10.5px] font-bold transition-colors',
-                        noteText.trim()
-                          ? 'bg-blue-600 text-white hover:bg-blue-700'
-                          : 'bg-gray-100 text-gray-400 cursor-not-allowed',
-                      )}
-                    >
-                      <Send size={10} strokeWidth={2.5} /> Send
-                    </button>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
         )}

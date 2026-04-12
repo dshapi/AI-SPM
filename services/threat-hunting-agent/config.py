@@ -3,12 +3,13 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
+# This is a single-tenant system.  The tenant ID is always "t1".
+TENANT_ID = "t1"
+
+
 class Settings(BaseSettings):
-    # Kafka — TENANTS is comma-separated, e.g. "t1,t2,t3"
-    # The consumer subscribes to cpm.{tenant}.audit + cpm.{tenant}.decision
-    # + cpm.{tenant}.posture_enriched for each tenant in the list.
+    # Kafka
     kafka_bootstrap_servers: str = "kafka-broker:9092"
-    tenants: str = "t1"  # override with TENANTS=t1,t2,t3
 
     # Groq / LLM — GROQ_API_KEY is REQUIRED; service will refuse to start if missing
     # Use HUNT_MODEL (not GROQ_MODEL) to avoid colliding with the guard-model service
@@ -18,6 +19,7 @@ class Settings(BaseSettings):
     # Hunt tuning
     hunt_batch_window_sec: int = 30
     hunt_queue_max:        int = 20
+    threathunting_ai_interval_sec: int = 300
 
     # Downstream services
     orchestrator_url:  str = "http://agent-orchestrator:8094"
@@ -29,10 +31,6 @@ class Settings(BaseSettings):
     spm_db_url:  str = "postgresql://spm_rw:spmpass@spm-db:5432/spm"
     redis_host:  str = "redis"
     redis_port:  int = 6379
-
-    @property
-    def tenant_list(self) -> list[str]:
-        return [t.strip() for t in self.tenants.split(",") if t.strip()]
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

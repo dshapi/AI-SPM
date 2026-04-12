@@ -82,7 +82,7 @@ class FindingsService:
             "policy_signals": finding_dict.get("policy_signals"),
             "recommended_actions": finding_dict.get("recommended_actions"),
             "should_open_case": bool(finding_dict.get("should_open_case", False)),
-            "source": "threat-hunting-agent",
+            "source": finding_dict.get("source", "threat-hunting-agent"),
         }
         # Remove None values
         payload = {k: v for k, v in payload.items() if v is not None}

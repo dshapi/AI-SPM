@@ -34,7 +34,7 @@ _last_snapshot_ts = None
 # ── Config ────────────────────────────────────────────────────────────────────
 
 KAFKA_BOOTSTRAP      = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092")
-TENANTS              = [t.strip() for t in os.getenv("TENANTS", "t1").split(",") if t.strip()]
+TENANTS              = ["t1"]  # single-tenant system
 SPM_DB_URL           = os.getenv("SPM_DB_URL", "postgresql://spm_rw:spmpass@spm-db:5432/spm")
 SPM_API_URL          = os.getenv("SPM_API_URL", "http://spm-api:8092")
 BLOCK_THRESHOLD      = float(os.getenv("SPM_MODEL_BLOCK_THRESHOLD", "0.85"))
