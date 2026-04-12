@@ -20,7 +20,7 @@ class _MockIdentity:
 def _make_record(deduplicated: bool = False) -> FindingRecord:
     return FindingRecord(
         id="test-id", batch_hash="h1", title="T", severity="high",
-        description="D", evidence={}, ttps=[], tenant_id="t1",
+        description="D", evidence=[], ttps=[], tenant_id="t1",
         deduplicated=deduplicated,
     )
 
@@ -54,7 +54,7 @@ async def test_create_finding_201(client):
 
     resp = await client.post("/api/v1/threat-findings", json={
         "title": "T", "severity": "high", "description": "D",
-        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+        "evidence": [], "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
     })
     assert resp.status_code == 201
     data = resp.json()
@@ -69,7 +69,7 @@ async def test_create_finding_200_deduplicated(client):
 
     resp = await client.post("/api/v1/threat-findings", json={
         "title": "T", "severity": "high", "description": "D",
-        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+        "evidence": [], "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
     })
     assert resp.status_code == 200
     assert resp.json()["deduplicated"] is True
@@ -103,7 +103,7 @@ async def test_create_finding_passes_case_repo_to_service(client):
 
     await client.post("/api/v1/threat-findings", json={
         "title": "T", "severity": "high", "description": "D",
-        "evidence": {}, "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
+        "evidence": [], "ttps": [], "tenant_id": "t1", "batch_hash": "h1",
     })
     # Service was called with (body, repo, case_repo)
     call_args = client._app._mock_svc.create_finding.call_args

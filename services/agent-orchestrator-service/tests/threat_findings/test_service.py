@@ -27,7 +27,7 @@ async def test_create_finding_returns_record(svc):
         title="Test finding",
         severity="high",
         description="desc",
-        evidence={"event_ids": ["e1"]},
+        evidence=["e1"],
         ttps=["AML.T0051"],
         tenant_id="t1",
         batch_hash="abc123",
@@ -48,7 +48,7 @@ async def test_create_finding_opens_a_case(svc):
         title="Prompt injection detected",
         severity="critical",
         description="desc",
-        evidence={},
+        evidence=[],
         ttps=["AML.T0051"],
         tenant_id="t1",
         batch_hash="hash-critical",
@@ -73,7 +73,7 @@ async def test_severity_maps_to_correct_risk_score(svc):
         finding_repo, case_repo = _make_repos()
         req = CreateFindingRequest(
             title="T", severity=severity, description="D",
-            evidence={}, ttps=[], tenant_id="t1",
+            evidence=[], ttps=[], tenant_id="t1",
             batch_hash=f"hash-{severity}",
         )
         await svc.create_finding(req, finding_repo, case_repo)
@@ -88,7 +88,7 @@ async def test_create_finding_deduplicates(svc):
     from datetime import datetime, timezone
     existing = FindingRecord(
         id="existing-id", batch_hash="abc123", title="old",
-        severity="low", description="d", evidence={}, ttps=[],
+        severity="low", description="d", evidence=[], ttps=[],
         tenant_id="t1", status="open",
         created_at=datetime.now(timezone.utc).isoformat(),
     )
@@ -98,7 +98,7 @@ async def test_create_finding_deduplicates(svc):
 
     req = CreateFindingRequest(
         title="New title", severity="high", description="desc",
-        evidence={"event_ids": []}, ttps=[], tenant_id="t1", batch_hash="abc123",
+        evidence=[], ttps=[], tenant_id="t1", batch_hash="abc123",
     )
     result = await svc.create_finding(req, finding_repo, case_repo)
     assert result.id == "existing-id"
