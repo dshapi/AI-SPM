@@ -32,6 +32,8 @@ from tools.guard_tool import (
 from tools.case_tool import (
     configure as configure_case_tool,
     create_case,
+    create_threat_finding,
+    _compute_batch_hash,
     set_http_client as set_case_http_client,
 )
 
@@ -56,6 +58,7 @@ __all__ = [
     "set_guard_url",
     # Case creation
     "create_case",
+    "create_threat_finding",
     "configure_case_tool",
     "set_case_http_client",
 ]

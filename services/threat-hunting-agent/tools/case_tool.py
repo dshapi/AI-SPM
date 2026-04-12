@@ -127,3 +127,92 @@ def create_case(
     except Exception as exc:
         logger.exception("create_case failed: %s", exc)
         return json.dumps({"error": str(exc)})
+
+
+# ---------------------------------------------------------------------------
+# Deduplication helper
+# ---------------------------------------------------------------------------
+
+def _compute_batch_hash(tenant_id: str, title: str, evidence: dict) -> str:
+    """
+    Deterministic SHA-256 hash used for server-side deduplication.
+
+    Inputs are sorted before serialisation so key order doesn't affect output.
+    """
+    import hashlib
+    canonical = json.dumps(
+        {"tenant_id": tenant_id, "title": title, "evidence": evidence},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# Tool: create_threat_finding  (structured, deduplicated)
+# ---------------------------------------------------------------------------
+
+def create_threat_finding(
+    tenant_id: str,
+    title: str,
+    severity: str,
+    description: str,
+    evidence: dict,
+    ttps: Optional[List[str]] = None,
+) -> str:
+    """
+    Submit a structured threat finding to the orchestrator.
+
+    POSTs to /api/v1/threat-findings.  The server handles deduplication via
+    batch_hash: a 200 response means the finding already exists (deduplicated=True);
+    a 201 means it was newly created (deduplicated=False).
+
+    Args:
+        tenant_id:   Tenant scope.
+        title:       Short descriptive title.
+        severity:    One of 'low', 'medium', 'high', 'critical'.
+        description: Narrative explanation from the agent.
+        evidence:    Dict of supporting evidence facts.
+        ttps:        Optional MITRE ATT&CK / ATLAS technique IDs.
+
+    Returns:
+        JSON string with keys: id, title, severity, status, created_at, deduplicated.
+    """
+    if severity not in ("low", "medium", "high", "critical"):
+        return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
+
+    try:
+        token = _fetch_dev_token()
+    except Exception as exc:
+        logger.exception("create_threat_finding: dev-token fetch failed: %s", exc)
+        return json.dumps({"error": f"auth failure: {exc}"})
+
+    batch_hash = _compute_batch_hash(tenant_id, title, evidence)
+    payload = {
+        "title":       title,
+        "severity":    severity,
+        "description": description,
+        "evidence":    evidence,
+        "tenant_id":   tenant_id,
+        "ttps":        ttps or [],
+        "batch_hash":  batch_hash,
+    }
+
+    try:
+        client = _get_client()
+        resp = client.post(
+            f"{_orchestrator_url}/api/v1/threat-findings",
+            json=payload,
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        resp.raise_for_status()
+        return json.dumps(resp.json())
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "create_threat_finding HTTP %d: %s",
+            exc.response.status_code, exc.response.text,
+        )
+        return json.dumps({"error": f"HTTP {exc.response.status_code}: {exc.response.text}"})
+    except Exception as exc:
+        logger.exception("create_threat_finding failed: %s", exc)
+        return json.dumps({"error": str(exc)})
