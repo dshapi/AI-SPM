@@ -99,8 +99,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("=== %s v%s starting up ===", SERVICE_NAME, SERVICE_VERSION)
 
     # -- Database ------------------------------------------------------------
-    db_url = f"sqlite+aiosqlite:///{DB_PATH}"
+    # Re-read DB_PATH from the live environment so tests that set
+    # os.environ["DB_PATH"] = ":memory:" after module import still work.
+    db_url = f"sqlite+aiosqlite:///{os.getenv('DB_PATH', DB_PATH)}"
     engine: AsyncEngine = make_engine(db_url)
+
+    # Enable WAL mode for file-based SQLite — allows concurrent readers during
+    # writes and dramatically reduces "database is locked" errors.
+    # Skipped for :memory: databases (WAL is unsupported there).
+    # busy_timeout is set in a separate statement so it still takes effect
+    # even when WAL mode is unavailable (e.g. on overlay filesystems).
+    if db_url.startswith("sqlite") and ":memory:" not in db_url:
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("PRAGMA journal_mode=WAL"))
+            logger.info("SQLite WAL mode enabled")
+        except Exception as _wal_err:
+            logger.warning("Could not enable WAL mode: %s — falling back to default journal", _wal_err)
+            # Dispose the pool so any connection tainted by the failed PRAGMA
+            # is discarded; subsequent engine.begin() calls get fresh connections.
+            await engine.dispose()
+
+        try:
+            async with engine.begin() as conn:
+                await conn.execute(text("PRAGMA busy_timeout=30000"))
+            logger.debug("SQLite busy_timeout=30000 set")
+        except Exception as _bt_err:
+            logger.warning("Could not set busy_timeout: %s", _bt_err)
 
     # Dev path: create tables automatically via create_all.
     # Production path: set DB_AUTO_CREATE_TABLES=false and run
@@ -130,19 +155,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ("case_id",             "TEXT"),
             ("source",              "TEXT"),
             ("updated_at",          "TEXT"),
+            ("is_proactive",        "BOOLEAN"),
         ]
-        async with engine.begin() as conn:
-            result = await conn.execute(text("PRAGMA table_info(threat_findings)"))
-            existing_cols = {row[1] for row in result.fetchall()}
-            for col_name, col_type in _NEW_THREAT_FINDING_COLS:
-                if col_name not in existing_cols:
-                    logger.info(
-                        "DB migration: adding missing column '%s %s' to threat_findings",
-                        col_name, col_type,
-                    )
-                    await conn.execute(
-                        text(f"ALTER TABLE threat_findings ADD COLUMN {col_name} {col_type}")
-                    )
+        try:
+            async with engine.begin() as conn:
+                result = await conn.execute(text("PRAGMA table_info(threat_findings)"))
+                existing_cols = {row[1] for row in result.fetchall()}
+                for col_name, col_type in _NEW_THREAT_FINDING_COLS:
+                    if col_name not in existing_cols:
+                        logger.info(
+                            "DB migration: adding missing column '%s %s' to threat_findings",
+                            col_name, col_type,
+                        )
+                        await conn.execute(
+                            text(f"ALTER TABLE threat_findings ADD COLUMN {col_name} {col_type}")
+                        )
+        except Exception as _mig_err:
+            # Non-fatal: log and continue. The missing columns will cause
+            # runtime errors only if the application actually tries to use them,
+            # but a startup crash is worse than a deferred schema warning.
+            logger.warning(
+                "Incremental column migration failed (non-fatal): %s", _mig_err
+            )
 
     session_factory: async_sessionmaker = make_session_factory(engine)
     app.state.db_engine = engine

@@ -50,6 +50,7 @@ def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
         case_id=row.case_id,
         source=row.source,
         updated_at=row.updated_at,
+        is_proactive=bool(row.is_proactive) if row.is_proactive is not None else False,
     )
 
 
@@ -98,6 +99,7 @@ class ThreatFindingRepository:
             case_id=rec.case_id,
             source=rec.source,
             updated_at=rec.updated_at,
+            is_proactive=rec.is_proactive,
         )
         self._session.add(orm)
         await self._session.commit()

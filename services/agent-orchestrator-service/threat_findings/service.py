@@ -56,29 +56,35 @@ class ThreatFindingsService:
             evidence=req.evidence,
             ttps=req.ttps,
             tenant_id=req.tenant_id,
+            source=req.source,
+            is_proactive=req.is_proactive,
         )
         await repo.insert(rec)
         logger.info(
-            "Created finding id=%s tenant=%s severity=%s",
-            rec.id, rec.tenant_id, rec.severity,
+            "Created finding id=%s tenant=%s severity=%s should_open_case=%s",
+            rec.id, rec.tenant_id, rec.severity, req.should_open_case,
         )
 
-        # Open a case so the notification bell rings
-        risk_score, decision = _SEVERITY_MAP.get(req.severity, (0.5, "escalate"))
-        ttps_str = ", ".join(req.ttps) if req.ttps else "none"
-        case = CaseRecord(
-            case_id=str(uuid4()),
-            session_id=f"threat-hunt:{rec.id}",   # synthetic; agent hunts have no real session
-            reason=f"threat-hunt · {req.severity.upper()} · {req.title} · TTPs: {ttps_str}",
-            summary=f"Threat finding raised by the Threat-hunter agent — {req.description}",
-            risk_score=risk_score,
-            decision=decision,
-        )
-        await case_repo.insert(case)
-        logger.info(
-            "Opened case case_id=%s for finding id=%s",
-            case.case_id, rec.id,
-        )
+        # Open a Case only when the agent flagged this as case-worthy
+        if req.should_open_case:
+            risk_score, decision = _SEVERITY_MAP.get(req.severity, (0.5, "escalate"))
+            ttps_str = ", ".join(req.ttps) if req.ttps else "none"
+            case = CaseRecord(
+                case_id=str(uuid4()),
+                session_id=f"threat-hunt:{rec.id}",   # synthetic; agent hunts have no real session
+                reason=f"threat-hunt · {req.severity.upper()} · {req.title} · TTPs: {ttps_str}",
+                summary=f"Threat finding raised by the Threat-hunter agent — {req.description}",
+                risk_score=risk_score,
+                decision=decision,
+            )
+            await case_repo.insert(case)
+            # Link the case back to the finding record
+            rec.case_id = case.case_id
+            await repo.attach_case(rec.id, case.case_id)
+            logger.info(
+                "Opened and linked case case_id=%s for finding id=%s",
+                case.case_id, rec.id,
+            )
 
         return rec
 
@@ -87,9 +93,11 @@ class ThreatFindingsService:
         finding_dict: dict,
         tenant_id: str,
         repo: ThreatFindingRepository,
+        case_repo: Optional[CaseRepository] = None,
     ) -> FindingRecord:
         """
-        Persist a Finding dict (from run_hunt) without auto-opening a Case.
+        Persist a Finding dict (from run_hunt).
+        Opens and links a Case when should_open_case=True (requires case_repo).
         Deduplicates by batch_hash. Returns the FindingRecord (new or existing).
         """
         title = finding_dict.get("title", "")
@@ -102,11 +110,14 @@ class ThreatFindingsService:
             existing.deduplicated = True
             return existing
 
+        should_open = bool(finding_dict.get("should_open_case", False))
+        severity = finding_dict.get("severity", "low")
+
         rec = FindingRecord(
             id=finding_dict.get("finding_id", str(uuid4())),
             batch_hash=batch_hash,
             title=title,
-            severity=finding_dict.get("severity", "low"),
+            severity=severity,
             description=finding_dict.get("hypothesis", ""),
             evidence=evidence,
             ttps=finding_dict.get("triggered_policies", []),
@@ -123,7 +134,7 @@ class ThreatFindingsService:
             triggered_policies=finding_dict.get("triggered_policies"),
             policy_signals=finding_dict.get("policy_signals"),
             recommended_actions=finding_dict.get("recommended_actions"),
-            should_open_case=bool(finding_dict.get("should_open_case", False)),
+            should_open_case=should_open,
             source="threat-hunting-agent",
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -132,6 +143,33 @@ class ThreatFindingsService:
             "Persisted finding id=%s tenant=%s severity=%s should_open_case=%s",
             rec.id, rec.tenant_id, rec.severity, rec.should_open_case,
         )
+
+        # Open a Case and link it when the agent flagged this as case-worthy
+        if should_open and case_repo is not None:
+            risk_score, decision = _SEVERITY_MAP.get(severity, (0.5, "escalate"))
+            ttps = finding_dict.get("triggered_policies") or []
+            ttps_str = ", ".join(ttps) if ttps else "none"
+            case = CaseRecord(
+                case_id=str(uuid4()),
+                session_id=f"threat-hunt:{rec.id}",
+                reason=(
+                    f"threat-hunt · {severity.upper()} · {title} · TTPs: {ttps_str}"
+                ),
+                summary=(
+                    f"Threat finding raised by the Threat-hunter agent — "
+                    f"{finding_dict.get('hypothesis', '')}"
+                ),
+                risk_score=risk_score,
+                decision=decision,
+            )
+            await case_repo.insert(case)
+            rec.case_id = case.case_id
+            await repo.attach_case(rec.id, case.case_id)
+            logger.info(
+                "Opened and linked case case_id=%s for finding id=%s",
+                case.case_id, rec.id,
+            )
+
         return rec
 
     async def link_case(

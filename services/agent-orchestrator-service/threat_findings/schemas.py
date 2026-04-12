@@ -40,6 +40,7 @@ class FindingRecord:
     case_id:             Optional[str]        = None
     source:              Optional[str]        = None
     updated_at:          Optional[str]        = None
+    is_proactive:        bool                 = False
 
 
 class CreateFindingRequest(BaseModel):
@@ -66,6 +67,7 @@ class CreateFindingRequest(BaseModel):
     should_open_case:    bool                = False
     case_id:             Optional[str]       = None
     source:              Optional[str]       = None
+    is_proactive:        bool                = False
 
 
 @dataclass

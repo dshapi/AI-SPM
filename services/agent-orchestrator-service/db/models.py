@@ -153,6 +153,7 @@ class ThreatFindingORM(Base):
     case_id             = Column(String,  nullable=True)
     source              = Column(String,  nullable=True)
     updated_at          = Column(String,  nullable=True)
+    is_proactive        = Column(Boolean, nullable=True, default=False)
 
     __table_args__ = (
         Index("ix_threat_findings_tenant",   "tenant_id", "created_at"),

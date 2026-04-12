@@ -41,8 +41,8 @@ async def test_create_finding_returns_record(svc):
 
 
 @pytest.mark.asyncio
-async def test_create_finding_opens_a_case(svc):
-    """A new finding must also insert a CaseRecord so the notification bell fires."""
+async def test_create_finding_opens_a_case_when_flagged(svc):
+    """A finding with should_open_case=True must insert a CaseRecord."""
     finding_repo, case_repo = _make_repos()
 
     req = CreateFindingRequest(
@@ -53,10 +53,11 @@ async def test_create_finding_opens_a_case(svc):
         ttps=["AML.T0051"],
         tenant_id="t1",
         batch_hash="hash-critical",
+        should_open_case=True,
     )
-    await svc.create_finding(req, finding_repo, case_repo)
+    result = await svc.create_finding(req, finding_repo, case_repo)
 
-    # Case must be inserted
+    # Case must be inserted and linked
     case_repo.insert.assert_called_once()
     inserted_case = case_repo.insert.call_args[0][0]
     assert inserted_case.session_id.startswith("threat-hunt:")
@@ -64,11 +65,32 @@ async def test_create_finding_opens_a_case(svc):
     assert "Prompt injection detected" in inserted_case.reason
     assert inserted_case.risk_score == 0.95
     assert inserted_case.decision == "block"
+    # case_id must be linked back
+    assert result.case_id == inserted_case.case_id
+
+
+@pytest.mark.asyncio
+async def test_create_finding_no_case_when_not_flagged(svc):
+    """A finding with should_open_case=False must NOT insert a CaseRecord."""
+    finding_repo, case_repo = _make_repos()
+
+    req = CreateFindingRequest(
+        title="Low signal event",
+        severity="low",
+        description="desc",
+        evidence=[],
+        ttps=[],
+        tenant_id="t1",
+        batch_hash="hash-low",
+        should_open_case=False,
+    )
+    await svc.create_finding(req, finding_repo, case_repo)
+    case_repo.insert.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_severity_maps_to_correct_risk_score(svc):
-    """Each severity maps to the expected risk score."""
+    """Each severity maps to the expected risk score (with should_open_case=True)."""
     expected = {"low": 0.25, "medium": 0.55, "high": 0.80, "critical": 0.95}
     for severity, score in expected.items():
         finding_repo, case_repo = _make_repos()
@@ -76,6 +98,7 @@ async def test_severity_maps_to_correct_risk_score(svc):
             title="T", severity=severity, description="D",
             evidence=[], ttps=[], tenant_id="t1",
             batch_hash=f"hash-{severity}",
+            should_open_case=True,
         )
         await svc.create_finding(req, finding_repo, case_repo)
         case = case_repo.insert.call_args[0][0]
@@ -217,3 +240,24 @@ async def test_list_and_count_findings(db_session):
     total = await svc.count_findings(f, repo)
     assert total == 4
     assert len(items) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_finding_stores_source_and_is_proactive(svc):
+    """source and is_proactive from request must reach the inserted FindingRecord."""
+    finding_repo, case_repo = _make_repos()
+    req = CreateFindingRequest(
+        title="ThreatHunting AI proactive finding",
+        severity="medium",
+        description="desc",
+        evidence=[],
+        ttps=[],
+        tenant_id="t1",
+        batch_hash="hash-threathunting-ai",
+        source="threathunting_ai",
+        is_proactive=True,
+    )
+    await svc.create_finding(req, finding_repo, case_repo)
+    inserted = finding_repo.insert.call_args[0][0]
+    assert inserted.source == "threathunting_ai"
+    assert inserted.is_proactive is True
