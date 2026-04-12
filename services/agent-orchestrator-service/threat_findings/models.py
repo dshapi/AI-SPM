@@ -215,3 +215,21 @@ class ThreatFindingRepository:
         )
         await self._session.execute(stmt)
         await self._session.commit()
+
+    async def update_priority_fields(self, rec: FindingRecord) -> None:
+        """Persist prioritization fields after a post-insert engine run."""
+        await self._session.execute(
+            update(ThreatFindingORM)
+            .where(ThreatFindingORM.id == rec.id)
+            .values(
+                dedup_key=rec.dedup_key,
+                priority_score=rec.priority_score,
+                suppressed=rec.suppressed,
+                first_seen=rec.first_seen,
+                last_seen=rec.last_seen,
+                occurrence_count=rec.occurrence_count,
+                group_id=rec.group_id,
+                group_size=rec.group_size,
+            )
+        )
+        await self._session.commit()

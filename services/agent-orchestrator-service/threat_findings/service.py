@@ -14,6 +14,9 @@ from threat_findings.prioritization.engine import PrioritizationEngine
 
 logger = logging.getLogger(__name__)
 
+# Minimum priority_score required to auto-open a case.
+CASE_OPEN_PRIORITY_THRESHOLD: float = 0.40
+
 
 def _finding_batch_hash(tenant_id: str, title: str, evidence: list) -> str:
     """Compute batch hash from tenant_id, title, and evidence."""
@@ -66,8 +69,20 @@ class ThreatFindingsService:
             rec.id, rec.tenant_id, rec.severity, req.should_open_case,
         )
 
-        # Open a Case only when the agent flagged this as case-worthy
-        if req.should_open_case:
+        # ── Prioritization ────────────────────────────────────────────────────────
+        async def _lookup_prior(dedup_key: str):
+            prior = await repo.get_by_dedup_key(dedup_key)
+            if prior is None:
+                return None
+            return {"first_seen": prior.first_seen, "occurrence_count": prior.occurrence_count}
+
+        rec = await PrioritizationEngine.run(rec, _lookup_prior)
+        if rec.priority_score is not None:
+            await repo.update_priority_fields(rec)
+
+        # Open a Case only when the agent flagged this as case-worthy AND priority meets threshold
+        priority_ok = (rec.priority_score or 0.0) >= CASE_OPEN_PRIORITY_THRESHOLD
+        if req.should_open_case and priority_ok:
             risk_score, decision = _SEVERITY_MAP.get(req.severity, (0.5, "escalate"))
             ttps_str = ", ".join(req.ttps) if req.ttps else "none"
             case = CaseRecord(
