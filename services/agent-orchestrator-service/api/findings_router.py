@@ -226,10 +226,16 @@ async def update_status(
         "PATCH /findings/%s/status user=%s new_status=%s trace=%s",
         finding_id, identity.user_id, body.status, trace_id,
     )
-    # Verify finding exists first
-    await _get_or_404(finding_id, svc, repo, trace_id)
     try:
+        # Verify finding exists first
+        await _get_or_404(finding_id, svc, repo, trace_id)
         await svc.mark_status(finding_id, body.status, repo)
+        # Re-fetch updated record
+        detail = await _get_or_404(finding_id, svc, repo, trace_id)
+        response.headers["X-Trace-ID"] = trace_id
+        return detail
+    except HTTPException:
+        raise
     except AssertionError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -237,10 +243,14 @@ async def update_status(
                 code="INVALID_STATUS", message=str(exc), trace_id=trace_id,
             ).model_dump(),
         )
-    # Re-fetch updated record
-    detail = await _get_or_404(finding_id, svc, repo, trace_id)
-    response.headers["X-Trace-ID"] = trace_id
-    return detail
+    except Exception as exc:
+        logger.error("update_status error finding_id=%s: %s", finding_id, exc, exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ErrorDetail(
+                code="INTERNAL_ERROR", message=str(exc), trace_id=trace_id,
+            ).model_dump(),
+        )
 
 
 @router.post(
