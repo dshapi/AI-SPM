@@ -42,14 +42,16 @@ logger = logging.getLogger(__name__)
 # Kafka topic constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-TOPIC_PROMPT_RECEIVED    = os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   "cpm.sessions.prompt_received")
-TOPIC_RISK_CALCULATED    = os.getenv("KAFKA_TOPIC_RISK_CALCULATED",   "cpm.sessions.risk_calculated")
-TOPIC_POLICY_DECISION    = os.getenv("KAFKA_TOPIC_POLICY_DECISION",   "cpm.sessions.policy_decision")
-TOPIC_SESSION_CREATED    = os.getenv("KAFKA_TOPIC_SESSION_CREATED",   "cpm.sessions.created")
-TOPIC_SESSION_BLOCKED    = os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   "cpm.sessions.blocked")
-TOPIC_SESSION_COMPLETED  = os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", "cpm.sessions.completed")
-TOPIC_LLM_RESPONSE       = os.getenv("KAFKA_TOPIC_LLM_RESPONSE",       "cpm.sessions.llm_response")
-TOPIC_OUTPUT_SCANNED     = os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",     "cpm.sessions.output_scanned")
+_TENANT = os.getenv("TENANTS", "t1").split(",")[0].strip()  # single-tenant: always t1
+
+TOPIC_PROMPT_RECEIVED    = os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   f"cpm.{_TENANT}.sessions.prompt_received")
+TOPIC_RISK_CALCULATED    = os.getenv("KAFKA_TOPIC_RISK_CALCULATED",   f"cpm.{_TENANT}.sessions.risk_calculated")
+TOPIC_POLICY_DECISION    = os.getenv("KAFKA_TOPIC_POLICY_DECISION",   f"cpm.{_TENANT}.sessions.policy_decision")
+TOPIC_SESSION_CREATED    = os.getenv("KAFKA_TOPIC_SESSION_CREATED",   f"cpm.{_TENANT}.sessions.created")
+TOPIC_SESSION_BLOCKED    = os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   f"cpm.{_TENANT}.sessions.blocked")
+TOPIC_SESSION_COMPLETED  = os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", f"cpm.{_TENANT}.sessions.completed")
+TOPIC_LLM_RESPONSE       = os.getenv("KAFKA_TOPIC_LLM_RESPONSE",      f"cpm.{_TENANT}.sessions.llm_response")
+TOPIC_OUTPUT_SCANNED     = os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",    f"cpm.{_TENANT}.sessions.output_scanned")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

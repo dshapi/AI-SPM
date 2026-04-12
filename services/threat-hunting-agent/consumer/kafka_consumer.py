@@ -75,6 +75,9 @@ class ThreatHuntConsumer:
             topics.append(f"cpm.{tid}.audit")
             topics.append(f"cpm.{tid}.decision")
             topics.append(f"cpm.{tid}.posture_enriched")
+            # Orchestrator session lifecycle events (blocked/policy decisions)
+            topics.append(f"cpm.{tid}.sessions.blocked")
+            topics.append(f"cpm.{tid}.sessions.policy_decision")
         return topics
 
     # ── Consumer factory ──────────────────────────────────────────────────
@@ -167,8 +170,8 @@ class ThreatHuntConsumer:
         """
         topic = payload.get("_topic", "")
 
-        # Always pass posture and audit events — the agent uses them for context
-        if ".posture_enriched" in topic or ".audit" in topic:
+        # Always pass posture, audit, and blocked-session events
+        if ".posture_enriched" in topic or ".audit" in topic or ".sessions.blocked" in topic:
             return True
 
         # Decision events: apply score + category filter

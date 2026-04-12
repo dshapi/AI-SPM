@@ -78,7 +78,8 @@ const STATUS_MAP = {
 
 function _relativeTime(isoString) {
   if (!isoString) return '—'
-  const diffMs = Date.now() - new Date(isoString).getTime()
+  const normalized = (typeof isoString === 'string' && !isoString.endsWith('Z') && !isoString.includes('+')) ? isoString + 'Z' : isoString
+  const diffMs = Date.now() - new Date(normalized).getTime()
   const s = Math.floor(diffMs / 1000)
   if (s < 60)  return `${s}s ago`
   const m = Math.floor(s / 60)
@@ -160,9 +161,11 @@ function _eventDescription(event) {
 function _formatTs(isoOrTs) {
   if (!isoOrTs) return '—'
   if (/^\d{2}:\d{2}:\d{2}$/.test(isoOrTs)) return isoOrTs
-  const d = new Date(isoOrTs)
+  // Server returns naive UTC datetimes without 'Z'; append it so JS parses as UTC
+  const normalized = (typeof isoOrTs === 'string' && !isoOrTs.endsWith('Z') && !isoOrTs.includes('+')) ? isoOrTs + 'Z' : isoOrTs
+  const d = new Date(normalized)
   if (isNaN(d)) return isoOrTs
-  return `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}:${String(d.getSeconds()).padStart(2,'0')}`
+  return d.toLocaleTimeString('en-US', { timeZone: 'Asia/Jerusalem', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
 let _uid = 0

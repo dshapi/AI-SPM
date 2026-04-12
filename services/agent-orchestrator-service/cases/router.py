@@ -136,7 +136,7 @@ async def create_hunt_case(
                       "high": (0.80, "escalate"), "critical": (0.95, "block")}
     risk_score, decision = _SEVERITY_RISK.get(body.severity.lower(), (0.5, "escalate"))
     ttps_str = ", ".join(body.ttps) if body.ttps else "none"
-    summary = f"[{body.severity.upper()}] {body.title}"
+    summary = "Threat finding raised by the Threat-hunter agent"
     if body.description:
         summary += f" — {body.description}"
 

@@ -1100,7 +1100,7 @@ async def dev_token():
             "iss": issuer,
             "iat": now,
             "exp": now + 86400,
-            "tenant_id": "default",
+            "tenant_id": "t1",
             "email": "dany.shapiro@gmail.com",
             "name": "Dany Shapiro",
             "roles": ["admin"],

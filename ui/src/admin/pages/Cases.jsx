@@ -68,18 +68,28 @@ function adaptApiCase(c) {
   const statusMap = { open: 'Open', investigating: 'Investigating', escalated: 'Escalated', resolved: 'Resolved' }
   const status    = statusMap[(c.status ?? '').toLowerCase()] ?? 'Open'
   const pct       = (score * 100).toFixed(0)
-  let createdAt   = 'Just now'
-  try {
-    const d = new Date(c.created_at)
-    createdAt = d.toLocaleString('en-US', {
-      month: 'short', day: 'numeric', year: 'numeric',
-      hour: '2-digit', minute: '2-digit', timeZone: 'UTC', hour12: false,
-    }) + ' UTC'
-  } catch (_) { /* keep 'Just now' */ }
+  const _fmt = (iso) => {
+    try {
+      // Server returns naive UTC datetimes without 'Z'; append it so JS parses as UTC
+      const normalized = (typeof iso === 'string' && !iso.endsWith('Z') && !iso.includes('+')) ? iso + 'Z' : iso
+      const d = new Date(normalized)
+      return d.toLocaleString('en-US', {
+        month: 'short', day: 'numeric', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Jerusalem', hour12: false,
+      })
+    } catch (_) { return 'Unknown' }
+  }
+  const createdAt = c.created_at ? _fmt(c.created_at) : 'Just now'
+  const updatedAt = c.updated_at ? _fmt(c.updated_at) : createdAt
+
+  const rawSummary = c.summary || ''
+  const title = rawSummary.startsWith('Threat finding raised by the Threat-hunter agent')
+    ? 'Threat finding raised by the Threat-hunter agent'
+    : rawSummary || `Escalated session ${c.session_id}`
 
   return {
     id: c.case_id,
-    title: c.summary || `Escalated session ${c.session_id}`,
+    title,
     severity: sev,
     status,
     priority: score >= 0.85 ? 'P1' : score >= 0.55 ? 'P2' : 'P3',
@@ -87,7 +97,7 @@ function adaptApiCase(c) {
     ownerDisplay: null,
     environment: 'Production',
     createdAt,
-    updatedAt: 'Just now',
+    updatedAt,
     linkedAlerts: 0,
     linkedSessions: 1,
     tags: [c.reason ?? 'escalation'].filter(Boolean),
@@ -260,7 +270,7 @@ function CasesTable({ cases, selectedId, onSelect, rowRefs }) {
       <table className="w-full border-collapse min-w-[720px]">
         <thead>
           <tr className="bg-gray-50/70 border-b border-gray-100">
-            {['Case ID', 'Title', 'Pri', 'Severity', 'Status', 'Owner', 'Alerts', 'Updated'].map(h => (
+            {['Case ID', 'Title', 'Pri', 'Severity', 'Status', 'Owner', 'Alerts', 'Created'].map(h => (
               <th key={h} className="text-left text-[10px] font-bold text-gray-400 uppercase tracking-[0.08em] px-4 py-2 whitespace-nowrap first:pl-5">
                 {h}
               </th>
@@ -456,7 +466,7 @@ function CaseDetailPanel({ caseData, onClose }) {
           <span className="text-gray-300">·</span>
           <div className="flex items-center gap-1 text-gray-400">
             <Clock size={10} strokeWidth={2} />
-            <span>Updated {caseData.updatedAt}</span>
+            <span>Created {caseData.createdAt}</span>
           </div>
           <span className="text-gray-300">·</span>
           <span className="text-gray-400">{caseData.environment}</span>
@@ -916,19 +926,33 @@ export default function Cases() {
     async function fetchCases() {
       try {
         const tokenRes = await fetch(`${apiBase}/dev-token`)
-        if (!tokenRes.ok) return false
-        const { token } = await tokenRes.json()
+        if (!tokenRes.ok) {
+          console.warn('[Cases] dev-token fetch failed:', tokenRes.status)
+          return false
+        }
+        const tokenData = await tokenRes.json()
+        const token = tokenData.token || tokenData.access_token
+        if (!token) {
+          console.warn('[Cases] dev-token response missing token field:', Object.keys(tokenData))
+          return false
+        }
 
         const res = await fetch(`${orchBase}/cases`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-        if (!res.ok) return false
-        const { cases: apiCases } = await res.json()
+        if (!res.ok) {
+          console.warn('[Cases] GET /cases failed:', res.status, await res.text().catch(() => ''))
+          return false
+        }
+        const data = await res.json()
+        const apiCases = data.cases
+        console.log('[Cases] fetched', apiCases?.length, 'cases')
         if (Array.isArray(apiCases) && !cancelled) {
           setCases(apiCases.map(adaptApiCase))
         }
         return true
-      } catch (_) {
+      } catch (err) {
+        console.warn('[Cases] fetchCases error:', err)
         return false
       }
     }

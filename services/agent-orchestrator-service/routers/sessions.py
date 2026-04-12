@@ -155,9 +155,9 @@ async def create_session(
         trace_id=trace_id,
     )
 
-    # Auto-escalate blocked/escalated sessions to a case so they appear
-    # in the Cases tab without requiring manual triage from the Runtime page.
-    if result.policy.decision.value in ("block", "escalate"):
+    # Auto-escalate blocked/escalated sessions to a case.
+    # The case-creation policy (threshold, counter) lives in PolicyClient.
+    if result.policy.should_create_case:
         try:
             cases_svc   = request.app.state.cases_service
             results_svc = request.app.state.results_service

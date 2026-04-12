@@ -9,11 +9,11 @@ Two service families produce events that the WS bridge needs to forward:
      Topics follow the platform convention: cpm.{tenant_id}.{name}
      Example: cpm.t1.raw, cpm.t1.posture_enriched, cpm.t1.decision, cpm.t1.audit
 
-  2. agent-orchestrator-service (newer service, full EventEnvelope)
-     Topics: cpm.sessions.prompt_received, cpm.sessions.risk_calculated,
-             cpm.sessions.policy_decision, cpm.sessions.created,
-             cpm.sessions.blocked, cpm.sessions.completed,
-             cpm.sessions.llm_response, cpm.sessions.output_scanned
+  2. agent-orchestrator-service (session lifecycle events)
+     Topics: cpm.{tenant}.sessions.prompt_received, cpm.{tenant}.sessions.risk_calculated,
+             cpm.{tenant}.sessions.policy_decision, cpm.{tenant}.sessions.created,
+             cpm.{tenant}.sessions.blocked, cpm.{tenant}.sessions.completed,
+             cpm.{tenant}.sessions.llm_response, cpm.{tenant}.sessions.output_scanned
 
      These already carry event_type, correlation_id, session_id (as UUID),
      source_service, and an ISO-8601 timestamp in the envelope.data field.
@@ -22,8 +22,7 @@ Format modes (KAFKA_TOPIC_FORMAT):
 
   prefixed  (default)
     Legacy-pipeline topics: cpm.{tenant}.{name}
-    Orchestrator topics are ALWAYS included regardless of this setting
-    (they use a fixed cpm.sessions.* namespace, not tenant-scoped).
+    Orchestrator topics follow the same cpm.{tenant}.sessions.* pattern.
 
   flat
     Legacy topics have no tenant prefix: raw_events, posture_events, …
@@ -31,12 +30,6 @@ Format modes (KAFKA_TOPIC_FORMAT):
 
 Tenant list: KAFKA_WS_TENANTS (comma-separated, default "t1")
 Extra topics: KAFKA_WS_EXTRA_TOPICS (comma-separated, appended)
-
-Single-tenant evolution note:
-  As deployments move to per-tenant clusters the legacy topic names will
-  simplify (e.g. "raw" instead of "cpm.t1.raw").  Set KAFKA_TOPIC_FORMAT=flat
-  to track that change without a code change.  The orchestrator topics are
-  already single-tenant-ready and need no change.
 """
 from __future__ import annotations
 
@@ -68,17 +61,19 @@ _FLAT_TOPICS = [
     "audit_export",
 ]
 
-# agent-orchestrator-service topics — fixed namespace, not tenant-scoped.
-# Override individual topics via env vars matching the publisher's conventions.
+# agent-orchestrator-service topics — tenant-scoped (cpm.{tenant}.sessions.*).
+# _TENANT matches the publisher's logic: first entry from TENANTS env var.
+_TENANT = os.getenv("TENANTS", "t1").split(",")[0].strip()
+
 _ORCHESTRATOR_TOPICS = [
-    os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   "cpm.sessions.prompt_received"),
-    os.getenv("KAFKA_TOPIC_RISK_CALCULATED",   "cpm.sessions.risk_calculated"),
-    os.getenv("KAFKA_TOPIC_POLICY_DECISION",   "cpm.sessions.policy_decision"),
-    os.getenv("KAFKA_TOPIC_SESSION_CREATED",   "cpm.sessions.created"),
-    os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   "cpm.sessions.blocked"),
-    os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", "cpm.sessions.completed"),
-    os.getenv("KAFKA_TOPIC_LLM_RESPONSE",       "cpm.sessions.llm_response"),
-    os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",     "cpm.sessions.output_scanned"),
+    os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   f"cpm.{_TENANT}.sessions.prompt_received"),
+    os.getenv("KAFKA_TOPIC_RISK_CALCULATED",   f"cpm.{_TENANT}.sessions.risk_calculated"),
+    os.getenv("KAFKA_TOPIC_POLICY_DECISION",   f"cpm.{_TENANT}.sessions.policy_decision"),
+    os.getenv("KAFKA_TOPIC_SESSION_CREATED",   f"cpm.{_TENANT}.sessions.created"),
+    os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   f"cpm.{_TENANT}.sessions.blocked"),
+    os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", f"cpm.{_TENANT}.sessions.completed"),
+    os.getenv("KAFKA_TOPIC_LLM_RESPONSE",      f"cpm.{_TENANT}.sessions.llm_response"),
+    os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",    f"cpm.{_TENANT}.sessions.output_scanned"),
 ]
 
 
@@ -135,14 +130,12 @@ def infer_source_service(topic: str) -> str:
     needed as a final fallback for topics that were not yet migrated.
     """
     t = topic.lower()
-    # Orchestrator topics
-    if "prompt_received" in t:
+    # Orchestrator topics (cpm.t1.sessions.*)
+    if "sessions." in t or "prompt_received" in t or "risk_calculated" in t:
         return "agent-orchestrator"
-    if "risk_calculated" in t:
+    if "policy_decision" in t or "sessions.blocked" in t or "sessions.created" in t:
         return "agent-orchestrator"
-    if "policy_decision" in t or "session.blocked" in t or "session.created" in t:
-        return "agent-orchestrator"
-    if "llm_response" in t or "output_scanned" in t or "session.completed" in t:
+    if "llm_response" in t or "output_scanned" in t or "sessions.completed" in t:
         return "agent-orchestrator"
     # Legacy pipeline topics
     if "raw" in t:

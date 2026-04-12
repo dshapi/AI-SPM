@@ -140,11 +140,11 @@ def query_posture_history(
     hours = min(hours, 168)
     limit = min(limit, 500)
 
-    conditions = ["tenant_id = %s", "snapshot_at >= NOW() - INTERVAL '%s hours'"]
+    conditions = ["ps.tenant_id = %s", "ps.snapshot_at >= NOW() - INTERVAL '%s hours'"]
     params: list = [tenant_id, hours]
 
     if model_id:
-        conditions.append("model_id = %s")
+        conditions.append("ps.model_id = %s")
         params.append(model_id)
 
     where = " AND ".join(conditions)
