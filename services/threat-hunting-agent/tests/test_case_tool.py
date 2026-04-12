@@ -178,3 +178,34 @@ class TestCreateThreatFinding:
         expected_hash = _compute_batch_hash("t1", "Title", evidence)
         call_kwargs = fake_client.post.call_args[1]
         assert call_kwargs["json"]["batch_hash"] == expected_hash
+
+    def test_create_threat_finding_sends_new_fields(self):
+        """Test that new optional Finding fields are forwarded in the payload."""
+        finding = {"id": "fid1", "deduplicated": False, "severity": "high",
+                   "title": "Test", "status": "open", "created_at": "2024-01-01"}
+        fake_client = _make_client({"token": "tok"}, finding, 201)
+        set_http_client(fake_client)
+
+        result = create_threat_finding(
+            tenant_id="t1",
+            title="Test",
+            severity="high",
+            description="desc",
+            evidence={"key": "value"},
+            ttps=["T1234"],
+            confidence=0.8,
+            risk_score=0.9,
+            hypothesis="H",
+            recommended_actions=["block"],
+            should_open_case=True,
+        )
+        # Extract the payload that was POSTed
+        call_kwargs = fake_client.post.call_args[1]
+        payload = call_kwargs["json"]
+
+        assert payload["confidence"] == 0.8
+        assert payload["risk_score"] == 0.9
+        assert payload["should_open_case"] is True
+        assert payload["recommended_actions"] == ["block"]
+        assert payload["hypothesis"] == "H"
+        assert json.loads(result)["deduplicated"] is False

@@ -159,6 +159,20 @@ def create_threat_finding(
     description: str,
     evidence: dict,
     ttps: Optional[List[str]] = None,
+    # ── New optional fields (all from Finding) ────────────────────────
+    timestamp: Optional[str] = None,
+    confidence: Optional[float] = None,
+    risk_score: Optional[float] = None,
+    hypothesis: Optional[str] = None,
+    asset: Optional[str] = None,
+    environment: Optional[str] = None,
+    correlated_events: Optional[List[str]] = None,
+    correlated_findings: Optional[List[str]] = None,
+    triggered_policies: Optional[List[str]] = None,
+    policy_signals: Optional[List[dict]] = None,
+    recommended_actions: Optional[List[str]] = None,
+    should_open_case: bool = False,
+    source: Optional[str] = None,
 ) -> str:
     """
     Submit a structured threat finding to the orchestrator.
@@ -174,6 +188,19 @@ def create_threat_finding(
         description: Narrative explanation from the agent.
         evidence:    Dict of supporting evidence facts.
         ttps:        Optional MITRE ATT&CK / ATLAS technique IDs.
+        timestamp:   Optional timestamp of the finding.
+        confidence:  Optional confidence score (0.0-1.0).
+        risk_score:  Optional risk score (0.0-1.0).
+        hypothesis:  Optional threat hypothesis.
+        asset:       Optional affected asset identifier.
+        environment: Optional environment (e.g., 'prod', 'staging').
+        correlated_events: Optional list of correlated event IDs.
+        correlated_findings: Optional list of correlated finding IDs.
+        triggered_policies: Optional list of triggered policy IDs.
+        policy_signals: Optional list of policy signal details.
+        recommended_actions: Optional list of recommended remediation actions.
+        should_open_case: Whether to automatically open a case for this finding.
+        source: Optional source identifier (defaults to 'threat-hunting-agent').
 
     Returns:
         JSON string with keys: id, title, severity, status, created_at, deduplicated.
@@ -196,7 +223,23 @@ def create_threat_finding(
         "tenant_id":   tenant_id,
         "ttps":        ttps or [],
         "batch_hash":  batch_hash,
+        # New fields
+        "timestamp":   timestamp,
+        "confidence":  confidence,
+        "risk_score":  risk_score,
+        "hypothesis":  hypothesis,
+        "asset":       asset,
+        "environment": environment,
+        "correlated_events":    correlated_events,
+        "correlated_findings":  correlated_findings,
+        "triggered_policies":   triggered_policies,
+        "policy_signals":       policy_signals,
+        "recommended_actions":  recommended_actions,
+        "should_open_case":     should_open_case,
+        "source":               source or "threat-hunting-agent",
     }
+    # Remove None values to keep payload clean
+    payload = {k: v for k, v in payload.items() if v is not None}
 
     try:
         client = _get_client()
