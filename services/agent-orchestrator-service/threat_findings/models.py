@@ -51,12 +51,27 @@ def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
         source=row.source,
         updated_at=row.updated_at,
         is_proactive=bool(row.is_proactive) if row.is_proactive is not None else False,
+        # ── Prioritization fields ─────────────────────────────────────────
+        dedup_key=row.dedup_key,
+        occurrence_count=int(row.occurrence_count) if row.occurrence_count is not None else 1,
+        first_seen=row.first_seen,
+        last_seen=row.last_seen,
+        group_id=row.group_id,
+        group_size=int(row.group_size) if row.group_size is not None else 1,
+        priority_score=row.priority_score,
+        suppressed=bool(row.suppressed) if row.suppressed is not None else False,
     )
 
 
 class ThreatFindingRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def get_by_dedup_key(self, dedup_key: str) -> Optional[FindingRecord]:
+        stmt = select(ThreatFindingORM).where(ThreatFindingORM.dedup_key == dedup_key)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return _orm_to_record(row) if row else None
 
     async def get_by_batch_hash(self, batch_hash: str) -> Optional[FindingRecord]:
         stmt = select(ThreatFindingORM).where(ThreatFindingORM.batch_hash == batch_hash)
@@ -100,6 +115,15 @@ class ThreatFindingRepository:
             source=rec.source,
             updated_at=rec.updated_at,
             is_proactive=rec.is_proactive,
+            # ── Prioritization fields ────────────────────────────────────
+            dedup_key=rec.dedup_key,
+            occurrence_count=rec.occurrence_count,
+            first_seen=rec.first_seen,
+            last_seen=rec.last_seen,
+            group_id=rec.group_id,
+            group_size=rec.group_size,
+            priority_score=rec.priority_score,
+            suppressed=rec.suppressed,
         )
         self._session.add(orm)
         await self._session.commit()
@@ -128,13 +152,24 @@ class ThreatFindingRepository:
 
     async def list_findings(self, filters: FindingFilter) -> List[FindingRecord]:
         stmt = self._apply_filters(select(ThreatFindingORM), filters)
-        # Sorting
+        # Suppress filter — exclude suppressed findings unless caller opts in
+        if not filters.include_suppressed:
+            stmt = stmt.where(
+                (ThreatFindingORM.suppressed == False) | (ThreatFindingORM.suppressed.is_(None))  # noqa: E712
+            )
+        # Sorting — default to priority_score DESC, then created_at DESC as tiebreaker
         if filters.sort_by == "risk_score":
             stmt = stmt.order_by(ThreatFindingORM.risk_score.desc().nullslast())
         elif filters.sort_by == "timestamp":
             stmt = stmt.order_by(ThreatFindingORM.timestamp.desc().nullslast())
-        else:
+        elif filters.sort_by == "created_at":
             stmt = stmt.order_by(ThreatFindingORM.created_at.desc())
+        else:
+            # Default: priority_score DESC (NULLs last), then created_at DESC
+            stmt = stmt.order_by(
+                ThreatFindingORM.priority_score.desc().nullslast(),
+                ThreatFindingORM.created_at.desc(),
+            )
         stmt = stmt.limit(filters.limit).offset(filters.offset)
         result = await self._session.execute(stmt)
         return [_orm_to_record(row) for row in result.scalars()]

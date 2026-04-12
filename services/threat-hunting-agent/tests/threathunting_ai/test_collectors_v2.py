@@ -407,3 +407,68 @@ class TestRuntimeCollectorV2:
         result = collector.collect()
 
         assert result == []
+
+
+# ─── ProcNetworkCollector ────────────────────────────────────────────────────
+
+class TestProcNetworkCollector:
+    """Tests for proc_network_collector.ProcNetworkCollector."""
+
+    def test_no_proc_file_returns_empty(self):
+        """On macOS or containers without /proc, returns []."""
+        from threathunting_ai.collectors.proc_network_collector import ProcNetworkCollector
+        with patch("builtins.open", side_effect=FileNotFoundError):
+            result = ProcNetworkCollector().collect()
+        assert result == []
+
+    def test_all_allowed_ports_returns_empty(self):
+        """When every LISTEN port is in the allowlist, no findings produced."""
+        from threathunting_ai.collectors.proc_network_collector import ProcNetworkCollector, _ALLOWED_LISTEN_PORTS
+        # Port 8000 is in the allowlist; its hex is 0x1F40
+        proc_content = (
+            "  sl  local_address rem_address   st\n"
+            "   0: 00000000:1F40 00000000:0000 0A 00000000:00000000\n"   # 8000 LISTEN
+        )
+        with patch("builtins.open", mock_open(read_data=proc_content)):
+            result = ProcNetworkCollector().collect()
+        assert result == []
+
+    def test_unexpected_port_detected(self):
+        """A LISTEN port not in the allowlist produces a finding."""
+        from threathunting_ai.collectors.proc_network_collector import ProcNetworkCollector
+        # Port 9999 (0x270F) — not in allowlist
+        proc_content = (
+            "  sl  local_address rem_address   st\n"
+            "   0: 00000000:270F 00000000:0000 0A 00000000:00000000\n"
+        )
+        with patch("builtins.open", mock_open(read_data=proc_content)):
+            result = ProcNetworkCollector().collect()
+        assert len(result) == 1
+        assert result[0]["scan_type"] == "proc_network_scan"
+        assert result[0]["anomalous"] is True
+        assert 9999 == result[0]["evidence"][0]["port"]
+
+    def test_non_listen_state_ignored(self):
+        """Connections in ESTABLISHED (0x01) state are not reported."""
+        from threathunting_ai.collectors.proc_network_collector import ProcNetworkCollector
+        # Port 9999 in ESTABLISHED state (01) — should be ignored
+        proc_content = (
+            "  sl  local_address rem_address   st\n"
+            "   0: 00000000:270F 00000000:0000 01 00000000:00000000\n"
+        )
+        with patch("builtins.open", mock_open(read_data=proc_content)):
+            result = ProcNetworkCollector().collect()
+        assert result == []
+
+    def test_severity_well_known_port_is_high(self):
+        """Ports < 1024 get severity=high."""
+        from threathunting_ai.collectors.proc_network_collector import _severity_for_port
+        assert _severity_for_port(23) == "high"    # telnet — unexpected privileged bind
+
+    def test_severity_registered_port_is_medium(self):
+        from threathunting_ai.collectors.proc_network_collector import _severity_for_port
+        assert _severity_for_port(9999) == "medium"
+
+    def test_severity_ephemeral_port_is_low(self):
+        from threathunting_ai.collectors.proc_network_collector import _severity_for_port
+        assert _severity_for_port(60000) == "low"

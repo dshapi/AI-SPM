@@ -10,6 +10,7 @@ from cases.schemas import CaseRecord
 from models.cases import CaseRepository
 from threat_findings.schemas import CreateFindingRequest, FindingRecord, FindingFilter
 from threat_findings.models import ThreatFindingRepository
+from threat_findings.prioritization.engine import PrioritizationEngine
 
 logger = logging.getLogger(__name__)
 
@@ -138,10 +139,26 @@ class ThreatFindingsService:
             source="threat-hunting-agent",
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
+        # ── Prioritization pipeline ───────────────────────────────────────
+        async def _lookup_prior(dedup_key: str) -> Optional[dict]:
+            """Return minimal prior-occurrence metadata dict, or None."""
+            prior = await repo.get_by_dedup_key(dedup_key)
+            if prior is None:
+                return None
+            return {
+                "first_seen": prior.first_seen,
+                "occurrence_count": prior.occurrence_count,
+            }
+
+        rec = await PrioritizationEngine.run(rec, _lookup_prior)
+        # ─────────────────────────────────────────────────────────────────
+
         await repo.insert(rec)
         logger.info(
-            "Persisted finding id=%s tenant=%s severity=%s should_open_case=%s",
-            rec.id, rec.tenant_id, rec.severity, rec.should_open_case,
+            "Persisted finding id=%s tenant=%s severity=%s "
+            "priority_score=%.3f suppressed=%s should_open_case=%s",
+            rec.id, rec.tenant_id, rec.severity,
+            rec.priority_score or 0.0, rec.suppressed, rec.should_open_case,
         )
 
         # Open a Case and link it when the agent flagged this as case-worthy
