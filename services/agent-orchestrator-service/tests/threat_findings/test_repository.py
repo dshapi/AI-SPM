@@ -118,3 +118,58 @@ class TestAttachCase:
         await repo.attach_case("id1", "case-abc")
         updated = await repo.get_by_id("id1")
         assert updated.case_id == "case-abc"
+
+
+@pytest.mark.asyncio
+async def test_list_findings_min_risk_score_filter(db_session):
+    """Only findings with risk_score >= threshold are returned."""
+    repo = ThreatFindingRepository(db_session)
+    low = FindingRecord(
+        id="f-low", batch_hash="h-low", title="Low", severity="low",
+        description="d", evidence=[], ttps=[], tenant_id="t1",
+        risk_score=0.2,
+    )
+    high = FindingRecord(
+        id="f-high", batch_hash="h-high", title="High", severity="high",
+        description="d", evidence=[], ttps=[], tenant_id="t1",
+        risk_score=0.9,
+    )
+    await repo.insert(low)
+    await repo.insert(high)
+    results = await repo.list_findings(FindingFilter(min_risk_score=0.5))
+    assert len(results) == 1
+    assert results[0].id == "f-high"
+
+
+@pytest.mark.asyncio
+async def test_count_findings_matches_list_findings(db_session):
+    """count_findings returns the same total as len(list_findings(...))."""
+    repo = ThreatFindingRepository(db_session)
+    for i in range(3):
+        rec = FindingRecord(
+            id=f"fc-{i}", batch_hash=f"hc-{i}", title=f"T{i}",
+            severity="medium", description="d", evidence=[], ttps=[],
+            tenant_id="tenant-count",
+        )
+        await repo.insert(rec)
+    f = FindingFilter(tenant_id="tenant-count")
+    count = await repo.count_findings(f)
+    items = await repo.list_findings(f)
+    assert count == len(items) == 3
+
+
+@pytest.mark.asyncio
+async def test_list_findings_sort_by_risk_score_desc(db_session):
+    """sort_by='risk_score' returns highest risk_score first."""
+    repo = ThreatFindingRepository(db_session)
+    for score, fid in [(0.1, "s-low"), (0.8, "s-high"), (0.5, "s-mid")]:
+        await repo.insert(FindingRecord(
+            id=fid, batch_hash=f"hs-{fid}", title=fid, severity="low",
+            description="d", evidence=[], ttps=[], tenant_id="t-sort",
+            risk_score=score,
+        ))
+    results = await repo.list_findings(
+        FindingFilter(tenant_id="t-sort", sort_by="risk_score")
+    )
+    scores = [r.risk_score for r in results]
+    assert scores == sorted(scores, reverse=True)

@@ -79,6 +79,8 @@ class FindingFilter:
     to_ts:      Optional[str]  = None
     limit:      int            = 50
     offset:     int            = 0
+    min_risk_score: Optional[float] = None
+    sort_by:        Optional[str]   = None
 
 
 class FindingResponse(BaseModel):

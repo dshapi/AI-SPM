@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import ThreatFindingORM
 from threat_findings.schemas import FindingFilter, FindingRecord
@@ -102,8 +102,8 @@ class ThreatFindingRepository:
         self._session.add(orm)
         await self._session.commit()
 
-    async def list_findings(self, filters: FindingFilter) -> List[FindingRecord]:
-        stmt = select(ThreatFindingORM)
+    def _apply_filters(self, stmt, filters: FindingFilter):
+        """Apply all filter conditions to a statement."""
         if filters.severity:
             stmt = stmt.where(ThreatFindingORM.severity == filters.severity)
         if filters.status:
@@ -120,9 +120,29 @@ class ThreatFindingRepository:
             stmt = stmt.where(ThreatFindingORM.created_at >= filters.from_ts)
         if filters.to_ts:
             stmt = stmt.where(ThreatFindingORM.created_at <= filters.to_ts)
+        if filters.min_risk_score is not None:
+            stmt = stmt.where(ThreatFindingORM.risk_score >= filters.min_risk_score)
+        return stmt
+
+    async def list_findings(self, filters: FindingFilter) -> List[FindingRecord]:
+        stmt = self._apply_filters(select(ThreatFindingORM), filters)
+        # Sorting
+        if filters.sort_by == "risk_score":
+            stmt = stmt.order_by(ThreatFindingORM.risk_score.desc().nullslast())
+        elif filters.sort_by == "timestamp":
+            stmt = stmt.order_by(ThreatFindingORM.timestamp.desc().nullslast())
+        else:
+            stmt = stmt.order_by(ThreatFindingORM.created_at.desc())
         stmt = stmt.limit(filters.limit).offset(filters.offset)
         result = await self._session.execute(stmt)
         return [_orm_to_record(row) for row in result.scalars()]
+
+    async def count_findings(self, filters: FindingFilter) -> int:
+        stmt = self._apply_filters(
+            select(func.count()).select_from(ThreatFindingORM), filters
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one()
 
     async def update_status(self, finding_id: str, new_status: str) -> None:
         stmt = (
