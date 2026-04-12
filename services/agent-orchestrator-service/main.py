@@ -48,6 +48,7 @@ from cases.router import router as cases_router
 from cases.service import CasesService
 from threat_findings.router import router as threat_findings_router
 from threat_findings.service import ThreatFindingsService
+from api.findings_router import router as findings_api_router
 from routers import sessions as sessions_router
 from policies.router import router as policies_router
 from services.risk_engine import RiskEngine
@@ -307,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(results_router)
     app.include_router(cases_router)
     app.include_router(threat_findings_router)
+    app.include_router(findings_api_router)
     app.include_router(policies_router)
 
     # ── Health endpoints ────────────────────────────────────────────────────
