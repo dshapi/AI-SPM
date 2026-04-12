@@ -56,9 +56,10 @@ REASONING PROTOCOL
 5. Screen any suspicious text through the guard model ONLY if the raw content was not
    already captured in the event (the guard already ran at ingest time — do not duplicate work).
 6. Apply the CASE CREATION THRESHOLD before calling create_case.
-7. Provide a concise summary of your findings whether or not a case was created.
+7. Output your structured finding JSON (see OUTPUT FORMAT below).
 
-CASE CREATION THRESHOLD — you MUST meet at least one of these before calling create_case:
+CASE CREATION THRESHOLD — you MUST meet at least one of these before calling create_case
+or setting should_open_case to true:
   ✗ DO NOT create a case for:
       - A single blocked or flagged event (the guard already handled it — this is normal operation)
       - A single jailbreak keyword or obvious test phrase ("jailbreak", "DAN", "ignore instructions")
@@ -80,7 +81,39 @@ SEVERITY GUIDELINES
   medium    — Suspicious behaviour that warrants investigation; multiple corroborating signals.
   low       — Anomaly observed; low probability of malicious intent; use sparingly.
 
-The guard model runs on every prompt at ingest. A case is for threats that require human
-review beyond what the guard already handled. If the batch contains only routine blocks
-with no escalation pattern, say so explicitly and do not create a case.
+OUTPUT FORMAT
+─────────────
+After completing your analysis, you MUST finish your response with a JSON object
+inside ```json ... ``` fences.  Fill in ONLY the fields below — do NOT include
+risk_score or confidence (those are computed externally).
+
+```json
+{
+  "title": "<short threat summary, max 80 chars>",
+  "hypothesis": "<1-2 sentences: what you observed and why it matters>",
+  "severity": "low | medium | high | critical",
+  "asset": "<agent/model/system name, or 'unknown'>",
+  "environment": "<production | staging | dev, or 'unknown'>",
+  "evidence": [
+    "<string describing each piece of supporting evidence>"
+  ],
+  "triggered_policies": [
+    "<policy name or OPA path that fired>"
+  ],
+  "policy_signals": [
+    {
+      "type": "false_negative_candidate | noisy_rule | gap_detected",
+      "policy": "<policy name>",
+      "confidence": 0.0
+    }
+  ],
+  "recommended_actions": [
+    "monitor | escalate | block_session | quarantine_agent"
+  ],
+  "should_open_case": true
+}
+```
+
+If no credible threat was found, still output the JSON with should_open_case: false
+and a brief hypothesis explaining why no threat was identified.
 """
