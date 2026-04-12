@@ -311,3 +311,99 @@ class TestToolMisuseCollector:
         result = collector.collect()
 
         assert result == []
+
+
+class TestRuntimeCollectorV2:
+    """Tests for upgraded RuntimeCollector with enforcement block clusters and session storm."""
+
+    def test_enforcement_block_cluster_returns_finding(self):
+        """Enforcement block cluster (3+ blocks in 1 hour) should return finding."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        # Mock result: session "s1" had 4 enforcement blocks in the last hour
+        rows = [{
+            "session_id": "s1",
+            "block_count": 4,
+            "first_block": "2026-01-01T00:00:00"
+        }]
+        pt.set_connection_factory(_make_pg_factory(rows))
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        assert len(result) >= 1
+        findings = [r for r in result if r["type"] == "enforcement_block_cluster"]
+        assert len(findings) >= 1
+        assert findings[0]["severity"] == "high"
+        assert findings[0]["asset"] == "s1"
+        assert findings[0]["anomalous"] is True
+
+    def test_enforcement_block_cluster_empty_returns_nothing(self):
+        """Empty query result for enforcement_block_cluster should return empty."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        pt.set_connection_factory(_make_pg_factory([]))
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        # All patterns return empty, so overall result is []
+        assert result == []
+
+    def test_session_storm_returns_finding(self):
+        """Session storm (5+ distinct sessions by actor in 10 min) should return critical finding."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        # Mock result: actor "bot" created 6 distinct sessions in the last 10 minutes
+        rows = [{
+            "actor": "bot",
+            "session_count": 6
+        }]
+        pt.set_connection_factory(_make_pg_factory(rows))
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        assert len(result) >= 1
+        findings = [r for r in result if r["type"] == "session_storm"]
+        assert len(findings) >= 1
+        assert findings[0]["severity"] == "critical"
+        assert findings[0]["asset"] == "bot"
+        assert findings[0]["anomalous"] is True
+
+    def test_session_storm_below_threshold_returns_nothing(self):
+        """Session storm below threshold (< 5 sessions) should return empty."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        pt.set_connection_factory(_make_pg_factory([]))
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        assert result == []
+
+    def test_runtime_no_postgres_returns_empty(self):
+        """When Postgres connection factory is None, should return []."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        pt.set_connection_factory(None)
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        assert result == []
+
+    def test_runtime_db_exception_returns_empty(self):
+        """When DB raises exception, all patterns should return [] gracefully."""
+        from threathunting_ai.collectors.runtime_collector import RuntimeCollector
+        import tools.postgres_tool as pt
+
+        # Create a factory that raises an exception
+        def failing_factory():
+            raise RuntimeError("Database connection failed")
+
+        pt.set_connection_factory(failing_factory)
+        collector = RuntimeCollector()
+        result = collector.collect()
+
+        assert result == []
