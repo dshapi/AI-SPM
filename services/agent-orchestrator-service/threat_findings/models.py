@@ -1,13 +1,24 @@
 from __future__ import annotations
 import json
 import logging
-from typing import Optional
-from sqlalchemy import select
+from datetime import datetime, timezone
+from typing import List, Optional
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from db.models import ThreatFindingORM
-from threat_findings.schemas import FindingRecord
+from threat_findings.schemas import FindingFilter, FindingRecord
 
 logger = logging.getLogger(__name__)
+
+
+def _json_loads_safe(value: Optional[str], default):
+    """Safely decode a JSON string; return `default` on None or error."""
+    if value is None:
+        return default
+    try:
+        return json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return default
 
 
 def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
@@ -17,12 +28,28 @@ def _orm_to_record(row: ThreatFindingORM) -> FindingRecord:
         title=row.title,
         severity=row.severity,
         description=row.description,
-        evidence=json.loads(row.evidence),
-        ttps=json.loads(row.ttps),
+        evidence=_json_loads_safe(row.evidence, []),
+        ttps=_json_loads_safe(row.ttps, []),
         tenant_id=row.tenant_id,
         status=row.status,
         created_at=row.created_at,
         closed_at=row.closed_at,
+        # New fields
+        timestamp=row.timestamp,
+        confidence=row.confidence,
+        risk_score=row.risk_score,
+        hypothesis=row.hypothesis,
+        asset=row.asset,
+        environment=row.environment,
+        correlated_events=_json_loads_safe(row.correlated_events, None),
+        correlated_findings=_json_loads_safe(row.correlated_findings, None),
+        triggered_policies=_json_loads_safe(row.triggered_policies, None),
+        policy_signals=_json_loads_safe(row.policy_signals, None),
+        recommended_actions=_json_loads_safe(row.recommended_actions, None),
+        should_open_case=bool(row.should_open_case) if row.should_open_case is not None else False,
+        case_id=row.case_id,
+        source=row.source,
+        updated_at=row.updated_at,
     )
 
 
@@ -36,6 +63,12 @@ class ThreatFindingRepository:
         row = result.scalar_one_or_none()
         return _orm_to_record(row) if row else None
 
+    async def get_by_id(self, finding_id: str) -> Optional[FindingRecord]:
+        stmt = select(ThreatFindingORM).where(ThreatFindingORM.id == finding_id)
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return _orm_to_record(row) if row else None
+
     async def insert(self, rec: FindingRecord) -> None:
         orm = ThreatFindingORM(
             id=rec.id,
@@ -43,12 +76,71 @@ class ThreatFindingRepository:
             title=rec.title,
             severity=rec.severity,
             description=rec.description,
-            evidence=json.dumps(rec.evidence),
-            ttps=json.dumps(rec.ttps),
+            evidence=json.dumps(rec.evidence if rec.evidence is not None else []),
+            ttps=json.dumps(rec.ttps if rec.ttps is not None else []),
             tenant_id=rec.tenant_id,
             status=rec.status,
             created_at=rec.created_at,
             closed_at=rec.closed_at,
+            # New fields
+            timestamp=rec.timestamp,
+            confidence=rec.confidence,
+            risk_score=rec.risk_score,
+            hypothesis=rec.hypothesis,
+            asset=rec.asset,
+            environment=rec.environment,
+            correlated_events=json.dumps(rec.correlated_events) if rec.correlated_events is not None else None,
+            correlated_findings=json.dumps(rec.correlated_findings) if rec.correlated_findings is not None else None,
+            triggered_policies=json.dumps(rec.triggered_policies) if rec.triggered_policies is not None else None,
+            policy_signals=json.dumps(rec.policy_signals) if rec.policy_signals is not None else None,
+            recommended_actions=json.dumps(rec.recommended_actions) if rec.recommended_actions is not None else None,
+            should_open_case=rec.should_open_case,
+            case_id=rec.case_id,
+            source=rec.source,
+            updated_at=rec.updated_at,
         )
         self._session.add(orm)
+        await self._session.commit()
+
+    async def list_findings(self, filters: FindingFilter) -> List[FindingRecord]:
+        stmt = select(ThreatFindingORM)
+        if filters.severity:
+            stmt = stmt.where(ThreatFindingORM.severity == filters.severity)
+        if filters.status:
+            stmt = stmt.where(ThreatFindingORM.status == filters.status)
+        if filters.asset:
+            stmt = stmt.where(ThreatFindingORM.asset == filters.asset)
+        if filters.tenant_id:
+            stmt = stmt.where(ThreatFindingORM.tenant_id == filters.tenant_id)
+        if filters.has_case is True:
+            stmt = stmt.where(ThreatFindingORM.case_id.isnot(None))
+        if filters.has_case is False:
+            stmt = stmt.where(ThreatFindingORM.case_id.is_(None))
+        if filters.from_ts:
+            stmt = stmt.where(ThreatFindingORM.created_at >= filters.from_ts)
+        if filters.to_ts:
+            stmt = stmt.where(ThreatFindingORM.created_at <= filters.to_ts)
+        stmt = stmt.limit(filters.limit).offset(filters.offset)
+        result = await self._session.execute(stmt)
+        return [_orm_to_record(row) for row in result.scalars()]
+
+    async def update_status(self, finding_id: str, new_status: str) -> None:
+        stmt = (
+            update(ThreatFindingORM)
+            .where(ThreatFindingORM.id == finding_id)
+            .values(
+                status=new_status,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+            )
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
+
+    async def attach_case(self, finding_id: str, case_id: str) -> None:
+        stmt = (
+            update(ThreatFindingORM)
+            .where(ThreatFindingORM.id == finding_id)
+            .values(case_id=case_id)
+        )
+        await self._session.execute(stmt)
         await self._session.commit()
