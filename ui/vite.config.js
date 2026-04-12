@@ -19,6 +19,11 @@ function devTokenPlugin() {
 
 export default defineConfig({
   plugins: [react(), devTokenPlugin()],
+  test: {
+    globals:     true,
+    environment: 'jsdom',
+    setupFiles:  './src/setupTests.js',
+  },
   server: {
     port: 3001,
     proxy: {
