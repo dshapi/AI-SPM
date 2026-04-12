@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from policies.db_models import PolicyVersionORM
+from policies.db_models import PolicyORM, PolicyVersionORM
 from policies.lifecycle import PolicyState
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,50 @@ def get_all_enforced() -> list[PolicyVersionORM]:
                 pass
     except Exception as exc:
         logger.warning("get_all_enforced failed: %s", exc)
+        return []
+
+
+def get_applicable_enforced_policies(agent_id: str) -> list[tuple[PolicyVersionORM, PolicyORM]]:
+    """
+    Return (version, policy_meta) pairs for every enforced+active policy
+    that applies to agent_id.
+
+    Scope rules (mirrors the seed data contract):
+      • policy.agents is empty  → applies to ALL agents
+      • policy.agents non-empty → applies only if agent_id is in the list
+      • policy.exceptions       → agent is excluded even if in agents list
+    """
+    try:
+        from policies import store as _store
+        sess = _store._get_or_new_session()
+        try:
+            versions = (
+                sess.query(PolicyVersionORM)
+                .filter_by(is_runtime_active=1, state=PolicyState.ENFORCED.value)
+                .all()
+            )
+            result: list[tuple[PolicyVersionORM, PolicyORM]] = []
+            for ver in versions:
+                meta = sess.query(PolicyORM).filter_by(policy_id=ver.policy_id).first()
+                if meta is None:
+                    continue
+                agents     = meta.agents     or []
+                exceptions = meta.exceptions or []
+                # Excluded agents are never matched
+                if agent_id in exceptions:
+                    continue
+                # Empty agents list = applies to all
+                if agents and agent_id not in agents:
+                    continue
+                result.append((ver, meta))
+            return result
+        finally:
+            try:
+                sess.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.warning("get_applicable_enforced_policies failed agent_id=%s: %s", agent_id, exc)
         return []
 
 

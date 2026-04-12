@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dependencies.auth import IdentityContext
+from policies.evaluator import EvalContext, evaluate_policy, merge_results
+from policies.runtime import get_applicable_enforced_policies
 from schemas.session import PolicyDecision
 from services.risk_engine import RiskResult, RiskTier
 
@@ -139,8 +141,59 @@ class PolicyClient:
             result.should_create_case = _check_case_threshold(identity.user_id)
             return result
 
-        # Rule 4 — Default allow
+        # Rule 4 — Enforce active Policy Library rules (tool-scope, write-approval)
+        policy_result = self._run_policy_library(identity, risk, agent_id, tools)
+        if policy_result is not None:
+            return policy_result
+
+        # Rule 5 — Default allow
         return PolicyResult(
             decision=PolicyDecision.ALLOW,
             reason=f"Risk score {risk.score:.2f} within acceptable range. Session approved.",
+        )
+
+    def _run_policy_library(
+        self,
+        identity: IdentityContext,
+        risk: RiskResult,
+        agent_id: str,
+        tools: list[str],
+    ) -> Optional[PolicyResult]:
+        """
+        Load all active enforced policies that apply to agent_id, evaluate the
+        ones we can resolve at session-creation time, and return the most
+        restrictive result — or None if everything passes.
+        """
+        applicable = get_applicable_enforced_policies(agent_id)
+        if not applicable:
+            logger.debug("No applicable enforced policies for agent_id=%s", agent_id)
+            return None
+
+        scopes  = list(getattr(identity, "permissions", None) or [])
+        signals = list(risk.signals or [])
+
+        results = []
+        for ver, meta in applicable:
+            ctx = EvalContext(
+                agent_id=agent_id,
+                tools=tools,
+                posture=risk.score,
+                signals=signals,
+                scopes=scopes,
+                policy=meta,
+                version=ver,
+            )
+            eval_result = evaluate_policy(ctx)
+            if eval_result is not None:
+                results.append(eval_result)
+
+        worst = merge_results(results)
+        if worst is None or worst.decision == PolicyDecision.ALLOW:
+            return None
+
+        should_case = _check_case_threshold(identity.user_id)
+        return PolicyResult(
+            decision=worst.decision,
+            reason=f"[Policy: {worst.policy_name}] {worst.reason}",
+            should_create_case=should_case,
         )
