@@ -60,20 +60,7 @@ export const ACTION_REGISTRY = {
     },
   ],
 
-  prompt_injection: [
-    {
-      id:      'inspect_prompt',
-      label:   'Inspect Prompt Flow',
-      primary: true,
-      action:  'openLineage',
-    },
-    {
-      id:           'view_session',
-      label:        'View Conversation Trace',
-      action:       'openRuntimeSession',
-      disabledWhen: (f) => !f.id,
-    },
-  ],
+  prompt_injection: [],
 
   secrets_exposure: [
     {

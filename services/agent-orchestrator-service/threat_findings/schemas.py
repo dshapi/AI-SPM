@@ -102,16 +102,31 @@ class FindingResponse(BaseModel):
     severity:         str
     status:           str
     created_at:       str
-    deduplicated:     bool          = False
-    confidence:       Optional[float] = None
-    risk_score:       Optional[float] = None
-    should_open_case: bool          = False
-    # ── Prioritization ────────────────────────────
-    priority_score:   Optional[float] = None
-    suppressed:       bool            = False
-    occurrence_count: int             = 1
-    group_id:         Optional[str]   = None
-    group_size:       int             = 1
+    deduplicated:     bool             = False
+    confidence:       Optional[float]  = None
+    risk_score:       Optional[float]  = None
+    should_open_case: bool             = False
+    # ── Prioritization ────────────────────────────────────────────────
+    priority_score:   Optional[float]  = None
+    suppressed:       bool             = False
+    occurrence_count: int              = 1
+    group_id:         Optional[str]    = None
+    group_size:       int              = 1
+    # ── Context fields (needed by UI Quick Links + detail panel) ──────
+    case_id:             Optional[str]       = None
+    asset:               Optional[str]       = None
+    environment:         Optional[str]       = None
+    source:              Optional[str]       = None
+    description:         Optional[str]       = None
+    hypothesis:          Optional[str]       = None
+    evidence:            List[Any]           = Field(default_factory=list)
+    correlated_events:   Optional[List[str]] = None
+    correlated_findings: Optional[List[str]] = None
+    triggered_policies:  Optional[List[str]] = None
+    policy_signals:      Optional[List[Any]] = None
+    recommended_actions: Optional[List[str]] = None
+    tenant_id:           Optional[str]       = None
+    updated_at:          Optional[str]       = None
 
     @classmethod
     def from_record(cls, rec: "FindingRecord") -> "FindingResponse":
@@ -128,4 +143,17 @@ class FindingResponse(BaseModel):
             group_id=rec.group_id,
             group_size=rec.group_size,
             case_id=rec.case_id,
+            asset=rec.asset,
+            environment=rec.environment,
+            source=rec.source,
+            description=rec.description,
+            hypothesis=rec.hypothesis,
+            evidence=rec.evidence or [],
+            correlated_events=rec.correlated_events,
+            correlated_findings=rec.correlated_findings,
+            triggered_policies=rec.triggered_policies,
+            policy_signals=rec.policy_signals,
+            recommended_actions=rec.recommended_actions,
+            tenant_id=rec.tenant_id,
+            updated_at=rec.updated_at,
         )

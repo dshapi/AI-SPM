@@ -1,6 +1,7 @@
 import { useState, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { ActionPanel } from '../../findings/actions/ActionPanel.jsx'
+import { ActionPanel }         from '../../findings/actions/ActionPanel.jsx'
+import { getActionsForFinding } from '../../findings/actions/actionRegistry.js'
 import { useFilterParams }  from '../../hooks/useFilterParams.js'
 import { useFindings, useFinding } from '../../hooks/useFindings.js'
 import {
@@ -530,6 +531,7 @@ function NetworkInvestigationSection({ finding }) {
 // ── Link Case inline widget ────────────────────────────────────────────────────
 
 function LinkCaseWidget({ findingId, currentCaseId, onLink }) {
+  const navigate    = useNavigate()
   const [open,       setOpen]       = useState(false)
   const [caseInput,  setCaseInput]  = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -552,10 +554,15 @@ function LinkCaseWidget({ findingId, currentCaseId, onLink }) {
 
   if (currentCaseId) {
     return (
-      <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100">
+      <button
+        onClick={() => navigate('/admin/cases')}
+        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg bg-blue-50 border border-blue-100
+                   hover:bg-blue-100 hover:border-blue-200 transition-colors text-left group"
+      >
         <Link size={11} className="text-blue-400 shrink-0" />
-        <span className="text-[12px] text-blue-700 font-medium">Case #{currentCaseId.slice(-6)}</span>
-      </div>
+        <span className="text-[12px] text-blue-700 font-medium flex-1">Case #{currentCaseId.slice(-6)}</span>
+        <ArrowUpRight size={10} className="text-blue-300 group-hover:text-blue-500 transition-colors" />
+      </button>
     )
   }
 
@@ -827,25 +834,34 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
           <div className="space-y-0.5">
             {[
               {
-                label:    'View in Inventory',
-                icon:     Database,
-                testId:   'quick-link-inventory',
-                href:     `/admin/inventory?asset=${encodeURIComponent(finding.asset.name)}`,
-                disabled: !finding.asset.name,
+                label:  'View in Inventory',
+                icon:   Database,
+                testId: 'quick-link-inventory',
+                // Only filter by asset when we have a real name — otherwise just open Inventory
+                href: finding.hasRealAsset
+                  ? `/admin/inventory?asset=${encodeURIComponent(finding.asset.name)}`
+                  : '/admin/inventory',
+                disabled: false,
               },
               {
-                label:    'Open Lineage Graph',
-                icon:     GitBranch,
-                testId:   'quick-link-lineage',
-                href:     `/admin/lineage?asset=${encodeURIComponent(finding.asset.name)}&finding_id=${finding.id}`,
-                disabled: !finding.asset.name,
+                label:  'Open Lineage Graph',
+                icon:   GitBranch,
+                testId: 'quick-link-lineage',
+                // Pass asset context only when real; always pass finding_id for the banner
+                href: finding.hasRealAsset
+                  ? `/admin/lineage?asset=${encodeURIComponent(finding.asset.name)}&finding_id=${finding.id}`
+                  : `/admin/lineage?finding_id=${finding.id}`,
+                disabled: false,
               },
               {
-                label:    'View Runtime Session',
-                icon:     Play,
-                testId:   'quick-link-runtime',
-                href:     `/admin/runtime?session_id=${encodeURIComponent(sessionId)}`,
-                disabled: !sessionId,
+                label:  'View Runtime Session',
+                icon:   Play,
+                testId: 'quick-link-runtime',
+                // Use a real correlated session if available; otherwise just open Runtime
+                href: finding.correlated_events?.length
+                  ? `/admin/runtime?session_id=${encodeURIComponent(finding.correlated_events[0])}`
+                  : '/admin/runtime',
+                disabled: false,
               },
             ].map(({ label, icon: Icon, testId, href, disabled }) => (
               <button
@@ -869,41 +885,37 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
         </PanelSection>
 
         {/* ── Investigation Actions (registry-driven, type-aware) ──────────── */}
-        <PanelSection label="Investigation Actions" icon={Zap}>
-          <ActionPanel finding={finding} />
-        </PanelSection>
-
-      </div>
-
-      {/* ── Action footer ── */}
-      <div className="px-4 pt-2 pb-3 border-t border-gray-100 bg-white shrink-0 space-y-1.5">
-
-        {/* Case link widget */}
-        <LinkCaseWidget
-          findingId={finding.id}
-          currentCaseId={finding.case_id}
-          onLink={onLinkCase}
-        />
-
-        {statusError && (
-          <p className="text-[11px] text-red-500 text-center">{statusError}</p>
+        {getActionsForFinding(finding).length > 0 && (
+          <PanelSection label="Investigation Actions" icon={Zap}>
+            <ActionPanel finding={finding} />
+          </PanelSection>
         )}
 
-        {/* Primary resolve */}
-        <Button
-          size="md"
-          disabled={isResolved || statusPending}
-          onClick={() => !isResolved && handleMarkStatus('resolved')}
-          className={cn(
-            'w-full h-9 text-[12px] gap-2 justify-center',
-            isResolved && 'bg-emerald-50 text-emerald-600 border border-emerald-200 pointer-events-none',
+        {/* ── Case + Resolve — live at the bottom of the scroll body so there's no gap ── */}
+        <div className="px-4 pt-2 pb-4 space-y-1.5 border-t border-gray-100">
+          <LinkCaseWidget
+            findingId={finding.id}
+            currentCaseId={finding.case_id}
+            onLink={onLinkCase}
+          />
+          {statusError && (
+            <p className="text-[11px] text-red-500 text-center">{statusError}</p>
           )}
-        >
-          {statusPending
-            ? <Loader2 size={13} className="animate-spin" />
-            : <CheckCheck size={13} />}
-          {isResolved ? 'Already Resolved' : 'Mark as Resolved'}
-        </Button>
+          <Button
+            size="md"
+            disabled={isResolved || statusPending}
+            onClick={() => !isResolved && handleMarkStatus('resolved')}
+            className={cn(
+              'w-full h-9 text-[12px] gap-2 justify-center',
+              isResolved && 'bg-emerald-50 text-emerald-600 border border-emerald-200 pointer-events-none',
+            )}
+          >
+            {statusPending
+              ? <Loader2 size={13} className="animate-spin" />
+              : <CheckCheck size={13} />}
+            {isResolved ? 'Already Resolved' : 'Mark as Resolved'}
+          </Button>
+        </div>
 
       </div>
     </div>

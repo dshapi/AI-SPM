@@ -116,10 +116,17 @@ export function normalizeFinding(f) {
     tenant_id:   f.tenant_id,
 
     // ── Asset ─────────────────────────────────────────────────────────────
-    asset: {
-      name: f.asset || f.source || f.tenant_id || 'Unknown',
-      type: guessAssetType(f.asset),
-    },
+    // Treat bare "unknown" (legacy default) the same as missing — fall back
+    // to source tag or the Threat Hunting AI Agent label.
+    asset: (() => {
+      const raw = f.asset && f.asset.toLowerCase() !== 'unknown' ? f.asset : null
+      const name = raw || (f.source === 'threat_hunt' ? 'Threat Hunting AI Agent' : null)
+                       || f.tenant_id || 'Unknown'
+      return { name, type: guessAssetType(name) }
+    })(),
+    // True only when the API returned a real, non-placeholder asset name.
+    // Quick Links use this to disable navigation that would land on blank pages.
+    hasRealAsset: !!(f.asset && f.asset.toLowerCase() !== 'unknown'),
 
     // ── Description / timing / environment ───────────────────────────────
     description:   f.description || f.hypothesis || '',

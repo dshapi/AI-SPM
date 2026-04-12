@@ -64,6 +64,16 @@ class ThreatFindingsService:
             is_proactive=req.is_proactive,
             confidence=req.confidence,
             risk_score=req.risk_score,
+            # Fields previously silently dropped
+            asset=req.asset,
+            environment=req.environment,
+            hypothesis=req.hypothesis,
+            correlated_events=req.correlated_events,
+            correlated_findings=req.correlated_findings,
+            triggered_policies=req.triggered_policies,
+            policy_signals=req.policy_signals,
+            recommended_actions=req.recommended_actions,
+            should_open_case=req.should_open_case,
         )
         await repo.insert(rec)
         logger.info(
