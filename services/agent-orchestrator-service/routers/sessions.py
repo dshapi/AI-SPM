@@ -25,13 +25,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from dependencies.auth import IdentityContext
-from dependencies.db import get_session_repo, get_event_repo
+from dependencies.db import get_session_repo, get_event_repo, get_case_repo
 from dependencies.rbac import (
     effective_permissions,
     require_agent_invoke,
     require_session_read,
 )
 from events.store import EventStore
+from models.cases import CaseRepository
 from models.event import EventRepository
 from models.session import SessionRepository
 from schemas.events import SessionEventListResponse, SessionTimelineEntry
@@ -136,6 +137,9 @@ async def create_session(
     # RequirePermission checks auth + RBAC; returns IdentityContext on success
     identity: IdentityContext = Depends(require_agent_invoke),
     service: SessionService = Depends(get_session_service),
+    session_repo: SessionRepository = Depends(get_session_repo),
+    event_repo: EventRepository = Depends(get_event_repo),
+    case_repo: CaseRepository = Depends(get_case_repo),
 ) -> CreateSessionResponse:
     trace_id = request.state.trace_id
     response.headers["X-Trace-ID"] = trace_id
@@ -150,6 +154,28 @@ async def create_session(
         identity=identity,
         trace_id=trace_id,
     )
+
+    # Auto-escalate blocked/escalated sessions to a case so they appear
+    # in the Cases tab without requiring manual triage from the Runtime page.
+    if result.policy.decision.value in ("block", "escalate"):
+        try:
+            cases_svc   = request.app.state.cases_service
+            results_svc = request.app.state.results_service
+            await cases_svc.create_case(
+                session_id=str(result.session_id),
+                reason=result.policy.reason or result.policy.decision.value,
+                session_repo=session_repo,
+                event_repo=event_repo,
+                results_svc=results_svc,
+                case_repo=case_repo,
+            )
+            logger.info(
+                "Auto-created case for blocked session=%s decision=%s",
+                result.session_id, result.policy.decision.value,
+            )
+        except Exception as exc:
+            # Never let case creation break the session response
+            logger.warning("Auto-case creation failed session=%s: %s", result.session_id, exc)
 
     return CreateSessionResponse(
         session_id=result.session_id,

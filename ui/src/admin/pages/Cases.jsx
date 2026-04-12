@@ -900,31 +900,61 @@ export default function Cases() {
   const [timeRange,    setTimeRange]    = useState('Last 7d')
   const [unassigned,   setUnassigned]   = useState(false)
 
-  // Fetch all cases from the DB-backed API on mount.
+  // Fetch all cases from the DB-backed API.
   // Uses relative paths so requests go through the nginx proxy (same pattern as Runtime.jsx).
+  // Retries on startup failure (handles orchestrator warm-up race condition),
+  // then polls every 30 s so new cases appear automatically.
   useEffect(() => {
-    async function loadCases() {
-      try {
-        const apiBase  = import.meta.env.VITE_API_URL || '/api'
-        const orchBase = (() => {
-          const raw = import.meta.env.VITE_ORCHESTRATOR_URL || ''
-          return (raw && !raw.startsWith('http')) ? raw : `${apiBase}/v1`
-        })()
+    let cancelled = false
 
+    const apiBase  = import.meta.env.VITE_API_URL || '/api'
+    const orchBase = (() => {
+      const raw = import.meta.env.VITE_ORCHESTRATOR_URL || ''
+      return (raw && !raw.startsWith('http')) ? raw : `${apiBase}/v1`
+    })()
+
+    async function fetchCases() {
+      try {
         const tokenRes = await fetch(`${apiBase}/dev-token`)
-        if (!tokenRes.ok) return
+        if (!tokenRes.ok) return false
         const { token } = await tokenRes.json()
 
         const res = await fetch(`${orchBase}/cases`, {
           headers: { Authorization: `Bearer ${token}` },
         })
-        if (!res.ok) return
+        if (!res.ok) return false
         const { cases: apiCases } = await res.json()
-        if (Array.isArray(apiCases)) setCases(apiCases.map(adaptApiCase))
-      } catch (_) { /* backend unavailable — show empty state */ }
-      finally { setLoading(false) }
+        if (Array.isArray(apiCases) && !cancelled) {
+          setCases(apiCases.map(adaptApiCase))
+        }
+        return true
+      } catch (_) {
+        return false
+      }
     }
-    loadCases()
+
+    // Initial load with retry (up to 3 attempts, 2 s apart) so a slow
+    // orchestrator startup doesn't leave the page permanently empty.
+    async function initialLoad() {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (cancelled) return
+        if (attempt > 0) await new Promise(r => setTimeout(r, 2000))
+        if (cancelled) return
+        const ok = await fetchCases()
+        if (ok) break
+      }
+      if (!cancelled) setLoading(false)
+    }
+
+    initialLoad()
+
+    // Poll every 30 s for live updates (silently — no loading spinner).
+    const interval = setInterval(() => { fetchCases() }, 30_000)
+
+    return () => {
+      cancelled = true
+      clearInterval(interval)
+    }
   }, [])
 
   // Auto-select case from ?case_id=<id> query param (e.g. after escalation from Runtime)

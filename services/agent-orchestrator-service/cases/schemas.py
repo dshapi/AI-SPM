@@ -42,6 +42,16 @@ class CreateCaseRequest(BaseModel):
     reason: str = Field(..., min_length=1, description="Human-readable reason for escalation")
 
 
+class CreateHuntCaseRequest(BaseModel):
+    """Direct case creation for the threat-hunting agent — no real session required."""
+    title: str = Field(..., min_length=1, description="Case title / one-line summary")
+    description: str = Field("", description="Full description of the threat")
+    severity: str = Field(..., description="low | medium | high | critical")
+    reason: str = Field("", description="Brief reason tag shown in the UI")
+    tenant_id: str = Field("default", description="Tenant the case belongs to")
+    ttps: list = Field(default_factory=list, description="MITRE ATT&CK / ATLAS TTP IDs")
+
+
 class CaseResponse(BaseModel):
     case_id: str
     session_id: str

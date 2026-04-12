@@ -137,7 +137,7 @@ services:
     environment:
       <<: *common-env
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-guard-3-8b}
+      GUARD_GROQ_MODEL: ${GUARD_GROQ_MODEL:-llama-guard-4-12b}
     volumes: *key-vol
     ports: ["8200:8200"]
     healthcheck:
@@ -381,7 +381,7 @@ services:
     environment:
       <<: *common-env
       GROQ_API_KEY: ${GROQ_API_KEY}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      HUNT_MODEL: ${HUNT_MODEL:-llama-3.3-70b-versatile}
       TENANTS: ${TENANTS:-t1}
       ORCHESTRATOR_URL: http://agent-orchestrator:8094
       PLATFORM_API_URL: http://api:8080

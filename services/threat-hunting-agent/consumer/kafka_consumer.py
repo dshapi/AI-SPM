@@ -141,6 +141,63 @@ class ThreatHuntConsumer:
             except Exception as exc:
                 logger.exception("Error in Kafka poll loop: %s", exc)
 
+    # ── Pre-filter ────────────────────────────────────────────────────────
+    # These thresholds decide which events are worth waking the agent for.
+    # A single routine block (e.g. one "jailbreak" keyword) is noise —
+    # the guard already handled it.  The agent is only useful when there is
+    # a pattern or a high-confidence signal it can act on.
+    _GUARD_SCORE_MIN:   float = 0.7   # ignore low-confidence flags
+    _HIGH_SCORE_MIN:    float = 0.85  # always pass through regardless of category
+    _PASS_CATEGORIES: set = {"S1", "S4", "S9"}  # always escalate these (CBRN, CSAM, violence)
+
+    def _should_enqueue(self, payload: dict) -> bool:
+        """
+        Return True only if this event is worth sending to the agent.
+
+        Filtered out (returns False):
+          - allow verdicts with low score (benign traffic)
+          - single low-score blocks that the guard already handled cleanly
+          - decision events with no guard signal at all
+
+        Always passed through (returns True):
+          - high-severity categories (S1, S4, S9)
+          - guard_score >= _HIGH_SCORE_MIN
+          - posture_enriched events (the agent uses these for trend analysis)
+          - audit events (always interesting for context)
+        """
+        topic = payload.get("_topic", "")
+
+        # Always pass posture and audit events — the agent uses them for context
+        if ".posture_enriched" in topic or ".audit" in topic:
+            return True
+
+        # Decision events: apply score + category filter
+        verdict  = payload.get("guard_verdict", "allow")
+        score    = float(payload.get("guard_score", 0.0))
+        cats     = set(payload.get("guard_categories", []))
+
+        # Always escalate dangerous categories regardless of score
+        if cats & self._PASS_CATEGORIES:
+            return True
+
+        # Always escalate very high confidence hits
+        if score >= self._HIGH_SCORE_MIN:
+            return True
+
+        # Drop low-signal blocks — guard handled them, nothing for agent to add
+        if verdict in ("block", "flag") and score < self._GUARD_SCORE_MIN:
+            logger.debug(
+                "_should_enqueue: dropping low-signal %s event score=%.2f cats=%s",
+                verdict, score, cats,
+            )
+            return False
+
+        # Drop clean allows with no meaningful score
+        if verdict == "allow" and score < 0.3:
+            return False
+
+        return True
+
     def _handle_message(self, msg: Any) -> None:
         """Enqueue a Kafka message into the appropriate tenant queue."""
         try:
@@ -152,6 +209,10 @@ class ThreatHuntConsumer:
             tenant_id = parts[1]
             payload = msg.value if isinstance(msg.value, dict) else {}
             payload["_topic"] = topic  # tag so agent knows the event source
+
+            if not self._should_enqueue(payload):
+                return  # drop — not worth waking the agent
+
             with self._queue_lock:
                 self._queues[tenant_id].append(payload)
         except Exception as exc:

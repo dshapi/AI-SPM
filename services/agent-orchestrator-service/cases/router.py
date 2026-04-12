@@ -19,11 +19,11 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from cases.schemas import CaseListResponse, CaseResponse, CreateCaseRequest
+from cases.schemas import CaseListResponse, CaseResponse, CreateCaseRequest, CreateHuntCaseRequest
 from cases.service import CasesService
 from dependencies.db import get_case_repo, get_event_repo, get_session_repo
 from dependencies.auth import IdentityContext
-from dependencies.rbac import require_session_override, require_session_read
+from dependencies.rbac import require_session_override, require_session_read, require_agent_invoke
 from models.cases import CaseRepository
 from models.event import EventRepository
 from models.session import SessionRepository
@@ -100,6 +100,59 @@ async def create_case(
             ).model_dump(),
         )
 
+    return CaseResponse.from_record(case)
+
+
+@router.post(
+    "/hunt",
+    response_model=CaseResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a case directly from the threat-hunting agent",
+    description=(
+        "**Required permission:** `agent.invoke`\n\n"
+        "Creates a case with a custom title and description — no real session required. "
+        "Intended for the threat-hunting-agent which has no chat session to escalate."
+    ),
+    responses={
+        201: {"description": "Hunt case created"},
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+    },
+)
+async def create_hunt_case(
+    body: CreateHuntCaseRequest,
+    request: Request,
+    response: Response,
+    identity: IdentityContext = Depends(require_agent_invoke),
+    case_repo: CaseRepository = Depends(get_case_repo),
+) -> CaseResponse:
+    from cases.schemas import CaseRecord
+    from uuid import uuid4
+
+    trace_id = request.state.trace_id
+    response.headers["X-Trace-ID"] = trace_id
+
+    _SEVERITY_RISK = {"low": (0.25, "allow"), "medium": (0.55, "escalate"),
+                      "high": (0.80, "escalate"), "critical": (0.95, "block")}
+    risk_score, decision = _SEVERITY_RISK.get(body.severity.lower(), (0.5, "escalate"))
+    ttps_str = ", ".join(body.ttps) if body.ttps else "none"
+    summary = f"[{body.severity.upper()}] {body.title}"
+    if body.description:
+        summary += f" — {body.description}"
+
+    case = CaseRecord(
+        case_id=str(uuid4()),
+        session_id=f"hunt:{uuid4()}",
+        reason=body.reason or f"threat-hunt · TTPs: {ttps_str}",
+        summary=summary,
+        risk_score=risk_score,
+        decision=decision,
+    )
+    await case_repo.insert(case)
+    logger.info(
+        "POST /cases/hunt case_id=%s severity=%s user=%s trace=%s",
+        case.case_id, body.severity, identity.user_id, trace_id,
+    )
     return CaseResponse.from_record(case)
 
 

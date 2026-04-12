@@ -120,10 +120,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # -- Agent -------------------------------------------------------------------
     agent = build_agent(
         groq_api_key=settings.groq_api_key,
-        model=settings.groq_model,
+        model=settings.hunt_model,
     )
     app.state.agent = agent
-    logger.info("LangChain agent built: model=%s", settings.groq_model)
+    logger.info("LangChain agent built: model=%s", settings.hunt_model)
 
     # -- Kafka consumer ----------------------------------------------------------
     def _hunt(tenant_id: str, events: list) -> str:

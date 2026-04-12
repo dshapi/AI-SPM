@@ -32,7 +32,7 @@ app = FastAPI(title="CPM Guard Model v3", version="3.0.0")
 # ─────────────────────────────────────────────────────────────────────────────
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-guard-3-8b")
+GROQ_MODEL   = os.getenv("GUARD_GROQ_MODEL", os.getenv("GROQ_MODEL", "llama-guard-4-12b"))
 
 _groq_client = None
 if GROQ_API_KEY:

@@ -1,26 +1,18 @@
 """
 tools/case_tool.py
 ───────────────────
-LangChain-compatible tool for creating threat findings in the orchestrator.
+LangChain-compatible tools for case management in the orchestrator.
 
-Flow:
-  1. Fetch a short-lived dev-token from {PLATFORM_API_URL}/dev-token.
-  2. POST the finding to {ORCHESTRATOR_URL}/api/v1/threat-findings.
-  3. Return the finding ID (or existing ID if deduplicated).
-
-batch_hash deduplication:
-  The agent computes a stable SHA-256 of the sorted (tenant_id, title, evidence)
-  dict to avoid creating duplicate findings for the same burst of events.
+create_case  — POST /api/v1/cases/hunt  (direct, no real session needed)
 
 An httpx-based HTTP client is used; in tests the module-level
 `_http_client` is patched with a fake.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import httpx
 
@@ -72,51 +64,38 @@ def _fetch_dev_token() -> str:
     return token
 
 
-def _compute_batch_hash(tenant_id: str, title: str, evidence: Dict[str, Any]) -> str:
-    """Stable SHA-256 of the key finding fields to enable deduplication."""
-    payload = json.dumps(
-        {"tenant_id": tenant_id, "title": title, "evidence": evidence},
-        sort_keys=True,
-        default=str,
-    )
-    return hashlib.sha256(payload.encode()).hexdigest()
-
-
 # ---------------------------------------------------------------------------
-# Tool: create_threat_finding
+# Tool: create_case
 # ---------------------------------------------------------------------------
 
-def create_threat_finding(
-    tenant_id: str,
+def create_case(
     title: str,
     severity: str,
     description: str,
-    evidence: Dict[str, Any],
+    reason: str = "",
+    tenant_id: str = "default",
     ttps: Optional[List[str]] = None,
 ) -> str:
     """
-    Create a threat finding in the orchestrator service.
+    Create a case directly in the orchestrator (no real session required).
 
-    Fetches a dev-token automatically, then POSTs to /api/v1/threat-findings.
-    If an identical finding already exists (same batch_hash), the existing
-    record is returned with deduplicated=true.
+    Fetches a dev-token automatically, then POSTs to /api/v1/cases/hunt.
+    The case appears immediately in the Cases tab with the exact title and
+    description provided — no generic placeholder text.
 
     Args:
-        tenant_id: Tenant to scope the finding to.
-        title: Short descriptive title (max ~100 chars).
-        severity: One of 'low', 'medium', 'high', 'critical'.
-        description: Detailed human-readable description of the threat.
-        evidence: Dict of supporting evidence (log excerpts, metric values, etc.).
-        ttps: Optional list of MITRE ATT&CK / ATLAS technique IDs (e.g. ['AML.T0051']).
+        title:       Short descriptive title shown as the case heading.
+        severity:    One of 'low', 'medium', 'high', 'critical'.
+        description: Full narrative description of the threat.
+        reason:      Brief tag shown under the case ID (e.g. 'prompt-injection').
+        tenant_id:   Tenant to scope the case to.
+        ttps:        Optional MITRE ATT&CK / ATLAS technique IDs.
 
     Returns:
-        JSON with keys: id, title, severity, status, created_at, deduplicated.
+        JSON with keys: case_id, summary, severity, status, created_at.
     """
     if severity not in ("low", "medium", "high", "critical"):
         return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
-
-    ttps = ttps or []
-    batch_hash = _compute_batch_hash(tenant_id, title, evidence)
 
     try:
         token = _fetch_dev_token()
@@ -128,25 +107,23 @@ def create_threat_finding(
         "title": title,
         "severity": severity,
         "description": description,
-        "evidence": evidence,
-        "ttps": ttps,
+        "reason": reason,
         "tenant_id": tenant_id,
-        "batch_hash": batch_hash,
+        "ttps": ttps or [],
     }
 
     try:
         client = _get_client()
         resp = client.post(
-            f"{_orchestrator_url}/api/v1/threat-findings",
+            f"{_orchestrator_url}/api/v1/cases/hunt",
             json=payload,
             headers={"Authorization": f"Bearer {token}"},
         )
         resp.raise_for_status()
-        data = resp.json()
-        return json.dumps(data)
+        return json.dumps(resp.json())
     except httpx.HTTPStatusError as exc:
-        logger.error("create_threat_finding HTTP %d: %s", exc.response.status_code, exc.response.text)
+        logger.error("create_case HTTP %d: %s", exc.response.status_code, exc.response.text)
         return json.dumps({"error": f"HTTP {exc.response.status_code}: {exc.response.text}"})
     except Exception as exc:
-        logger.exception("create_threat_finding failed: %s", exc)
+        logger.exception("create_case failed: %s", exc)
         return json.dumps({"error": str(exc)})

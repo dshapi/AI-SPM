@@ -31,7 +31,7 @@ from tools.guard_tool import (
 )
 from tools.case_tool import (
     configure as configure_case_tool,
-    create_threat_finding,
+    create_case,
     set_http_client as set_case_http_client,
 )
 
@@ -54,8 +54,8 @@ __all__ = [
     # Guard
     "screen_text",
     "set_guard_url",
-    # Case / finding creation
-    "create_threat_finding",
+    # Case creation
+    "create_case",
     "configure_case_tool",
     "set_case_http_client",
 ]

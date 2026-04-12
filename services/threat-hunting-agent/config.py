@@ -11,8 +11,9 @@ class Settings(BaseSettings):
     tenants: str = "t1"  # override with TENANTS=t1,t2,t3
 
     # Groq / LLM — GROQ_API_KEY is REQUIRED; service will refuse to start if missing
+    # Use HUNT_MODEL (not GROQ_MODEL) to avoid colliding with the guard-model service
     groq_api_key: str = Field(..., min_length=1)
-    groq_model:   str = "llama-3.3-70b-versatile"
+    hunt_model:   str = "llama-3.3-70b-versatile"
 
     # Hunt tuning
     hunt_batch_window_sec: int = 30

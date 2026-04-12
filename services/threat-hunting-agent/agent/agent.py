@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from agent.prompts import SYSTEM_PROMPT
 from tools import (
-    create_threat_finding,
+    create_case,
     evaluate_opa_policy,
     get_freeze_state,
     lookup_mitre_technique,
@@ -94,12 +94,12 @@ class _ScreenTextInput(BaseModel):
     text: str = Field(..., description="Text to screen through the guard model")
 
 
-class _CreateFindingInput(BaseModel):
-    tenant_id: str = Field(..., description="Tenant to scope the finding")
-    title: str = Field(..., description="Short descriptive title")
+class _CreateCaseInput(BaseModel):
+    title: str = Field(..., description="Short descriptive case title shown in the Cases tab")
     severity: str = Field(..., description="low | medium | high | critical")
-    description: str = Field(..., description="Detailed description of the threat")
-    evidence: Dict[str, Any] = Field(default_factory=dict, description="Supporting evidence dict")
+    description: str = Field(..., description="Full narrative description of the threat")
+    reason: str = Field("", description="Brief tag shown under the case ID, e.g. 'prompt-injection'")
+    tenant_id: str = Field("default", description="Tenant to scope the case to")
     ttps: List[str] = Field(default_factory=list, description="MITRE ATT&CK / ATLAS TTP IDs")
 
 
@@ -199,10 +199,14 @@ def _build_tools() -> list:
             args_schema=_ScreenTextInput,
         ),
         StructuredTool.from_function(
-            func=create_threat_finding,
-            name="create_threat_finding",
-            description="Create a persisted threat finding in the orchestrator (deduplicated).",
-            args_schema=_CreateFindingInput,
+            func=create_case,
+            name="create_case",
+            description=(
+                "Open a new case in the Cases tab with a custom title and description. "
+                "Use this when you have identified a credible threat that requires human review. "
+                "The case appears immediately and is sorted newest-first in the UI."
+            ),
+            args_schema=_CreateCaseInput,
         ),
     ]
 

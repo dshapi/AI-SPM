@@ -55,13 +55,8 @@ class ThreatFindingsService:
         case = CaseRecord(
             case_id=str(uuid4()),
             session_id=f"threat-hunt:{rec.id}",   # synthetic; agent hunts have no real session
-            reason=f"[{req.severity.upper()}] {req.title}",
-            summary=(
-                f"Threat finding raised by the hunt agent for tenant '{req.tenant_id}'. "
-                f"Severity: {req.severity}. "
-                f"TTPs: {ttps_str}. "
-                f"{req.description}"
-            ),
+            reason=f"threat-hunt · TTPs: {ttps_str}",
+            summary=f"[{req.severity.upper()}] {req.title} — {req.description}",
             risk_score=risk_score,
             decision=decision,
         )
