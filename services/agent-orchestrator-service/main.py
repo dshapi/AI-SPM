@@ -156,6 +156,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             ("source",              "TEXT"),
             ("updated_at",          "TEXT"),
             ("is_proactive",        "BOOLEAN"),
+            ("dedup_key",        "TEXT"),
+            ("occurrence_count", "INTEGER"),
+            ("first_seen",       "TEXT"),
+            ("last_seen",        "TEXT"),
+            ("group_id",         "TEXT"),
+            ("group_size",       "INTEGER"),
+            ("priority_score",   "REAL"),
+            ("suppressed",       "BOOLEAN"),
         ]
         try:
             async with engine.begin() as conn:

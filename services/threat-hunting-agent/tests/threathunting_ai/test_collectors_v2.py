@@ -212,3 +212,102 @@ class TestDataLeakageCollector:
         pt.set_connection_factory(None)
         result = collect()
         assert result == []
+
+
+class TestToolMisuseCollector:
+    def test_high_frequency_returns_finding(self):
+        """High frequency tool use (>20 calls per hour) should return finding."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        # Mock result: actor "bot" made 25 tool calls in last hour
+        rows = [{"actor": "bot", "cnt": 25}]
+        pt.set_connection_factory(_make_pg_factory(rows))
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert len(result) >= 1
+        high_freq = [r for r in result if r["type"] == "high_frequency_tool_use"]
+        assert len(high_freq) >= 1
+        assert high_freq[0]["severity"] == "high"
+        assert high_freq[0]["anomalous"] is True
+
+    def test_high_frequency_empty_returns_no_finding(self):
+        """Empty result should return no findings."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        pt.set_connection_factory(_make_pg_factory([]))
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert result == []
+
+    def test_rapid_chaining_returns_finding(self):
+        """Rapid tool chaining (>5 calls within 60 seconds) should return finding."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        # Mock result: session "s1" had 6 tool calls in a 60-second burst
+        rows = [{
+            "session_id": "s1",
+            "burst_start": "2026-01-01T00:00:00",
+            "burst_count": 6
+        }]
+        pt.set_connection_factory(_make_pg_factory(rows))
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert len(result) >= 1
+        chaining = [r for r in result if r["type"] == "rapid_tool_chaining"]
+        assert len(chaining) >= 1
+        assert chaining[0]["severity"] == "high"
+        assert chaining[0]["anomalous"] is True
+
+    def test_blocked_ratio_returns_finding(self):
+        """High blocked tool ratio (>30%, min 5 calls) should return critical finding."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        # Mock result: actor "bot" had 10 tool calls, 4 blocked (40% ratio)
+        rows = [{
+            "actor": "bot",
+            "blocked": 4,
+            "total": 10,
+            "block_ratio": 40.0
+        }]
+        pt.set_connection_factory(_make_pg_factory(rows))
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert len(result) >= 1
+        blocked = [r for r in result if r["type"] == "high_blocked_tool_ratio"]
+        assert len(blocked) >= 1
+        assert blocked[0]["severity"] == "critical"
+        assert blocked[0]["anomalous"] is True
+
+    def test_no_postgres_returns_empty(self):
+        """When Postgres connection factory is None, should return []."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        pt.set_connection_factory(None)
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert result == []
+
+    def test_db_exception_returns_empty(self):
+        """When DB raises exception, should return [] gracefully."""
+        from threathunting_ai.collectors.tool_misuse_collector import ToolMisuseCollector
+        import tools.postgres_tool as pt
+
+        # Create a factory that raises an exception
+        def failing_factory():
+            raise RuntimeError("Database connection failed")
+
+        pt.set_connection_factory(failing_factory)
+        collector = ToolMisuseCollector()
+        result = collector.collect()
+
+        assert result == []

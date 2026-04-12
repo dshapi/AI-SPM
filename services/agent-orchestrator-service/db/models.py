@@ -18,6 +18,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
 )
@@ -155,7 +156,19 @@ class ThreatFindingORM(Base):
     updated_at          = Column(String,  nullable=True)
     is_proactive        = Column(Boolean, nullable=True, default=False)
 
+    # ── Prioritization fields (all nullable — added via incremental migration) ─
+    dedup_key        = Column(String,   nullable=True, index=True)
+    occurrence_count = Column(Integer,  nullable=True)
+    first_seen       = Column(String,   nullable=True)   # ISO-8601
+    last_seen        = Column(String,   nullable=True)   # ISO-8601
+    group_id         = Column(String,   nullable=True)
+    group_size       = Column(Integer,  nullable=True)
+    priority_score   = Column(Float,    nullable=True)
+    suppressed       = Column(Boolean,  nullable=True, default=False)
+
     __table_args__ = (
         Index("ix_threat_findings_tenant",   "tenant_id", "created_at"),
         Index("ix_threat_findings_severity", "severity",  "status"),
+        Index("ix_threat_findings_priority", "priority_score"),
+        Index("ix_threat_findings_dedup",    "dedup_key"),
     )

@@ -42,6 +42,16 @@ class FindingRecord:
     updated_at:          Optional[str]        = None
     is_proactive:        bool                 = False
 
+    # ── Prioritization ────────────────────────────────────────────────
+    dedup_key:        Optional[str]   = None
+    occurrence_count: int             = 1
+    first_seen:       Optional[str]   = None
+    last_seen:        Optional[str]   = None
+    group_id:         Optional[str]   = None
+    group_size:       int             = 1
+    priority_score:   Optional[float] = None
+    suppressed:       bool            = False
+
 
 class CreateFindingRequest(BaseModel):
     title:       str   = Field(..., min_length=1)
@@ -83,21 +93,28 @@ class FindingFilter:
     offset:     int            = 0
     min_risk_score: Optional[float] = None
     sort_by:        Optional[str]   = None
+    include_suppressed: bool = False
 
 
 class FindingResponse(BaseModel):
-    id:           str
-    title:        str
-    severity:     str
-    status:       str
-    created_at:   str
-    deduplicated: bool = False
-    confidence:   Optional[float] = None
-    risk_score:   Optional[float] = None
-    should_open_case: bool = False
+    id:               str
+    title:            str
+    severity:         str
+    status:           str
+    created_at:       str
+    deduplicated:     bool          = False
+    confidence:       Optional[float] = None
+    risk_score:       Optional[float] = None
+    should_open_case: bool          = False
+    # ── Prioritization ────────────────────────────
+    priority_score:   Optional[float] = None
+    suppressed:       bool            = False
+    occurrence_count: int             = 1
+    group_id:         Optional[str]   = None
+    group_size:       int             = 1
 
     @classmethod
-    def from_record(cls, rec: FindingRecord) -> "FindingResponse":
+    def from_record(cls, rec: "FindingRecord") -> "FindingResponse":
         return cls(
             id=rec.id, title=rec.title, severity=rec.severity,
             status=rec.status, created_at=rec.created_at,
@@ -105,4 +122,9 @@ class FindingResponse(BaseModel):
             confidence=rec.confidence,
             risk_score=rec.risk_score,
             should_open_case=rec.should_open_case,
+            priority_score=rec.priority_score,
+            suppressed=rec.suppressed,
+            occurrence_count=rec.occurrence_count,
+            group_id=rec.group_id,
+            group_size=rec.group_size,
         )
