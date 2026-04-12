@@ -62,6 +62,8 @@ class ThreatFindingsService:
             tenant_id=req.tenant_id,
             source=req.source,
             is_proactive=req.is_proactive,
+            confidence=req.confidence,
+            risk_score=req.risk_score,
         )
         await repo.insert(rec)
         logger.info(
