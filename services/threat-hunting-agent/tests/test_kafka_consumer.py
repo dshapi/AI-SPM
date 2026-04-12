@@ -69,8 +69,9 @@ class TestTopics:
 
     def test_topic_count(self):
         thc = _make_thc([])
-        # 3 topics × 2 tenants = 6
-        assert len(thc._topics_for_tenants()) == 6
+        # 5 topics × 2 tenants = 10
+        # (audit, decision, posture_enriched, sessions.blocked, sessions.policy_decision)
+        assert len(thc._topics_for_tenants()) == 10
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -87,7 +88,8 @@ class TestHandleMessage:
 
     def test_tags_topic(self):
         thc = _make_thc([])
-        msg = FakeMsg(topic="cpm.t1.decision", value={"posture_score": 0.8})
+        # Use a high-score decision event so _should_enqueue passes it through
+        msg = FakeMsg(topic="cpm.t1.decision", value={"posture_score": 0.8, "guard_verdict": "block", "guard_score": 0.9})
         thc._handle_message(msg)
         assert thc._queues["t1"][0]["_topic"] == "cpm.t1.decision"
 
