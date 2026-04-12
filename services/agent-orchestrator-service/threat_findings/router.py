@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from dependencies.auth import IdentityContext
 from dependencies.rbac import require_session_override
+from models.cases import CaseRepository
 from schemas.session import ErrorDetail, ErrorResponse
 from threat_findings.models import ThreatFindingRepository
 from threat_findings.schemas import CreateFindingRequest, FindingResponse
@@ -33,6 +34,12 @@ async def get_finding_repo(
     return ThreatFindingRepository(session)
 
 
+async def get_case_repo(
+    session: AsyncSession = Depends(get_async_db),
+) -> CaseRepository:
+    return CaseRepository(session)
+
+
 # ── Route ─────────────────────────────────────────────────────────────────────
 
 @router.post(
@@ -56,12 +63,13 @@ async def get_finding_repo(
     ),
 )
 async def create_finding(
-    body:     CreateFindingRequest,
-    request:  Request,
-    response: Response,
-    identity: IdentityContext             = Depends(require_session_override),
-    repo:     ThreatFindingRepository     = Depends(get_finding_repo),
-    svc:      ThreatFindingsService       = Depends(get_findings_service),
+    body:      CreateFindingRequest,
+    request:   Request,
+    response:  Response,
+    identity:  IdentityContext             = Depends(require_session_override),
+    repo:      ThreatFindingRepository     = Depends(get_finding_repo),
+    case_repo: CaseRepository              = Depends(get_case_repo),
+    svc:       ThreatFindingsService       = Depends(get_findings_service),
 ) -> FindingResponse:
     trace_id = getattr(request.state, "trace_id", "")
     logger.info(
@@ -69,7 +77,7 @@ async def create_finding(
         body.tenant_id, identity.user_id, trace_id,
     )
     try:
-        rec = await svc.create_finding(body, repo)
+        rec = await svc.create_finding(body, repo, case_repo)
         if rec.deduplicated:
             response.status_code = status.HTTP_200_OK
         return FindingResponse.from_record(rec)
