@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import { ActionPanel } from '../../findings/actions/ActionPanel.jsx'
 import { useFilterParams }  from '../../hooks/useFilterParams.js'
 import { useFindings, useFinding } from '../../hooks/useFindings.js'
 import {
@@ -53,6 +54,36 @@ function confidenceColor(conf) {
   if (conf >= 0.85)  return 'text-blue-600'
   if (conf >= 0.60)  return 'text-blue-400'
   return 'text-gray-400'
+}
+
+// ── Network-finding helpers ────────────────────────────────────────────────────
+
+/**
+ * Returns true when a finding is related to unexpected network exposure
+ * (proc-network collector or title heuristics).
+ */
+function isNetworkFinding(finding) {
+  const title  = (finding.title  ?? '').toLowerCase()
+  const source = (finding.source ?? '').toLowerCase()
+  return source === 'unexpected_listen_ports' ||
+    title.includes('listen port') ||
+    title.includes('network exposure') ||
+    title.includes('unexpected port')
+}
+
+/**
+ * Parses evidence items for port/severity data.
+ * Returns [{port, severity, raw}] for any item that contains a port number.
+ */
+function parseNetworkEvidence(evidence) {
+  return (evidence ?? []).flatMap(item => {
+    const str = typeof item === 'string' ? item : JSON.stringify(item)
+    // Match "port <anything non-digit> <digits>" or a bare ":digits" (e.g. ":9090")
+    const portMatch = /port[^0-9]*(\d+)/i.exec(str) ?? /:\s*(\d{2,5})\b/.exec(str)
+    const sevMatch  = /severity[:\s]+(\w+)/i.exec(str)
+    if (!portMatch) return []
+    return [{ port: parseInt(portMatch[1], 10), severity: sevMatch?.[1] ?? 'unknown', raw: str }]
+  })
 }
 
 // ── Filter options ─────────────────────────────────────────────────────────────
@@ -451,6 +482,51 @@ function PanelSection({ label, icon: Icon, children, className }) {
   )
 }
 
+// ── Network Investigation section ─────────────────────────────────────────────
+
+/**
+ * Shows parsed port/severity rows for network-exposure findings.
+ * Action buttons are intentionally omitted — they live in ActionPanel.
+ */
+function NetworkInvestigationSection({ finding }) {
+  const networkFinding = isNetworkFinding(finding)
+  const ports          = parseNetworkEvidence(finding.evidence)
+
+  if (!networkFinding && ports.length === 0) return null
+
+  return (
+    <PanelSection label="Network Investigation" icon={Network}>
+      {ports.length > 0 ? (
+        <div className="space-y-1.5" data-testid="network-ports-list">
+          {ports.map(({ port, severity, raw }, i) => {
+            const sev    = severity.toLowerCase()
+            const rowCls = (sev === 'high' || sev === 'critical')
+              ? 'bg-red-50/60 border-red-100'
+              : sev === 'medium'
+              ? 'bg-orange-50/50 border-orange-100'
+              : 'bg-gray-50 border-gray-100'
+            const txtCls = (sev === 'high' || sev === 'critical')
+              ? 'text-red-700'
+              : sev === 'medium' ? 'text-orange-700' : 'text-gray-600'
+            return (
+              <div key={i} className={cn('flex items-center gap-2 px-2.5 py-1.5 rounded-lg border', rowCls)}>
+                <Network size={9} className="text-gray-400 shrink-0" />
+                <span className={cn('font-mono text-[11.5px] font-semibold', txtCls)}>:{port}</span>
+                <span className={cn('text-[9.5px] uppercase font-bold tracking-wide', txtCls)}>{severity}</span>
+                <span className="text-[10px] text-gray-400 truncate flex-1 min-w-0">{raw}</span>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <p className="text-[12px] text-gray-400" data-testid="network-no-data">
+          Network exposure data unavailable.
+        </p>
+      )}
+    </PanelSection>
+  )
+}
+
 // ── Link Case inline widget ────────────────────────────────────────────────────
 
 function LinkCaseWidget({ findingId, currentCaseId, onLink }) {
@@ -522,6 +598,7 @@ function LinkCaseWidget({ findingId, currentCaseId, onLink }) {
 // ── Finding detail panel ───────────────────────────────────────────────────────
 
 function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
+  const navigate = useNavigate()
   const [statusPending, setStatusPending] = useState(false)
   const [statusError,   setStatusError]   = useState(null)
 
@@ -530,6 +607,9 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
   const headerBg   = RISK_HEADER_BG[finding.severity]  ?? 'bg-gray-50/60 border-b-gray-100'
   const stripColor = RISK_STRIP[finding.severity]       ?? 'bg-gray-300'
   const isResolved = finding.status === 'Resolved'
+
+  // Derive a session ID for Runtime links: prefer correlated_events[0], fall back to finding.id
+  const sessionId = finding.correlated_events?.[0] ?? finding.id
 
   const handleMarkStatus = async (newStatus) => {
     setStatusPending(true)
@@ -654,6 +734,9 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
           </PanelSection>
         )}
 
+        {/* ── Network Investigation (shown for network-exposure findings) ── */}
+        <NetworkInvestigationSection finding={finding} />
+
         {/* ── Policy Signals (NEW) ─────────────────────────────────────── */}
         {finding.policy_signals && finding.policy_signals.length > 0 && (
           <PanelSection label="Policy Signals" icon={Shield}>
@@ -739,24 +822,55 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
           <MiniTimeline events={finding.timeline} />
         </PanelSection>
 
-        {/* ── Quick Links (existing) ────────────────────────────────────── */}
+        {/* ── Quick Links ───────────────────────────────────────────────────── */}
         <PanelSection label="Quick Links">
           <div className="space-y-0.5">
             {[
-              { label: 'View in Inventory',    icon: Database  },
-              { label: 'Open Lineage Graph',   icon: GitBranch },
-              { label: 'View Runtime Session', icon: Play      },
-            ].map(({ label, icon: Icon }) => (
+              {
+                label:    'View in Inventory',
+                icon:     Database,
+                testId:   'quick-link-inventory',
+                href:     `/admin/inventory?asset=${encodeURIComponent(finding.asset.name)}`,
+                disabled: !finding.asset.name,
+              },
+              {
+                label:    'Open Lineage Graph',
+                icon:     GitBranch,
+                testId:   'quick-link-lineage',
+                href:     `/admin/lineage?asset=${encodeURIComponent(finding.asset.name)}&finding_id=${finding.id}`,
+                disabled: !finding.asset.name,
+              },
+              {
+                label:    'View Runtime Session',
+                icon:     Play,
+                testId:   'quick-link-runtime',
+                href:     `/admin/runtime?session_id=${encodeURIComponent(sessionId)}`,
+                disabled: !sessionId,
+              },
+            ].map(({ label, icon: Icon, testId, href, disabled }) => (
               <button
                 key={label}
-                className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] text-blue-600 font-medium hover:bg-blue-50/60 transition-colors"
+                data-testid={testId}
+                disabled={disabled}
+                onClick={() => !disabled && navigate(href)}
+                className={cn(
+                  'w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[12px] font-medium transition-colors',
+                  disabled
+                    ? 'text-gray-300 cursor-not-allowed'
+                    : 'text-blue-600 hover:bg-blue-50/60',
+                )}
               >
-                <Icon size={11} className="shrink-0 text-blue-400" />
+                <Icon size={11} className={cn('shrink-0', disabled ? 'text-gray-200' : 'text-blue-400')} />
                 {label}
-                <ArrowUpRight size={11} className="ml-auto text-blue-300" />
+                <ArrowUpRight size={11} className={cn('ml-auto', disabled ? 'text-gray-200' : 'text-blue-300')} />
               </button>
             ))}
           </div>
+        </PanelSection>
+
+        {/* ── Investigation Actions (registry-driven, type-aware) ──────────── */}
+        <PanelSection label="Investigation Actions" icon={Zap}>
+          <ActionPanel finding={finding} />
         </PanelSection>
 
       </div>
