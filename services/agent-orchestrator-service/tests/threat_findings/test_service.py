@@ -1,7 +1,7 @@
 import pytest
-from unittest.mock import AsyncMock, call
+from unittest.mock import AsyncMock, MagicMock, call
 from threat_findings.service import ThreatFindingsService
-from threat_findings.schemas import CreateFindingRequest
+from threat_findings.schemas import CreateFindingRequest, FindingRecord
 
 
 @pytest.fixture
@@ -106,3 +106,74 @@ async def test_create_finding_deduplicates(svc):
     finding_repo.insert.assert_not_called()
     # No new case for a deduplicated finding
     case_repo.insert.assert_not_called()
+
+
+# ── Tests for new ThreatFindingsService methods ──────────────────────────────
+
+def _new_repo(existing=None):
+    """Return a ThreatFindingRepository mock for new service methods."""
+    repo = MagicMock()
+    repo.get_by_batch_hash = AsyncMock(return_value=existing)
+    repo.insert = AsyncMock()
+    repo.update_status = AsyncMock()
+    repo.attach_case = AsyncMock()
+    return repo
+
+
+class TestPersistFindingFromDict:
+    @pytest.mark.asyncio
+    async def test_persists_new_finding(self):
+        svc = ThreatFindingsService()
+        repo = _new_repo(existing=None)
+        finding_dict = {
+            "finding_id": "fid1",
+            "timestamp": "2026-04-12T00:00:00+00:00",
+            "severity": "high",
+            "confidence": 0.8,
+            "risk_score": 0.9,
+            "title": "Test",
+            "hypothesis": "H",
+            "evidence": ["ev1"],
+            "correlated_events": [],
+            "triggered_policies": [],
+            "policy_signals": [],
+            "recommended_actions": ["block"],
+            "should_open_case": True,
+        }
+        rec = await svc.persist_finding_from_dict(finding_dict, "t1", repo)
+        assert rec.id == "fid1"
+        assert rec.should_open_case is True
+        repo.insert.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_deduplicates_existing(self):
+        existing_rec = FindingRecord(
+            id="old", batch_hash="bh", title="T", severity="low",
+            description="d", evidence=[], ttps=[], tenant_id="t1",
+        )
+        svc = ThreatFindingsService()
+        repo = _new_repo(existing=existing_rec)
+        finding_dict = {
+            "finding_id": "new", "timestamp": "2026-04-12T00:00:00+00:00",
+            "severity": "high", "confidence": 0.8, "risk_score": 0.9,
+            "title": "T", "hypothesis": "H", "evidence": [],
+            "correlated_events": [], "triggered_policies": [],
+            "policy_signals": [], "recommended_actions": [], "should_open_case": False,
+        }
+        rec = await svc.persist_finding_from_dict(finding_dict, "t1", repo)
+        assert rec.deduplicated is True
+        repo.insert.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_link_case_calls_attach(self):
+        svc = ThreatFindingsService()
+        repo = _new_repo()
+        await svc.link_case("fid1", "case-x", repo)
+        repo.attach_case.assert_called_once_with("fid1", "case-x")
+
+    @pytest.mark.asyncio
+    async def test_mark_status_calls_update(self):
+        svc = ThreatFindingsService()
+        repo = _new_repo()
+        await svc.mark_status("fid1", "investigating", repo)
+        repo.update_status.assert_called_once_with("fid1", "investigating")
