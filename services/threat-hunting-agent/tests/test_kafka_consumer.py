@@ -35,12 +35,18 @@ def _make_thc(
     hunt_fn=None,
     batch_window_sec: int = 60,
     queue_max: int = 10,
+    persist_fn=None,
 ) -> ThreatHuntConsumer:
     hunt_called: List[tuple] = []
 
     def default_hunt(tenant_id, events):
         hunt_called.append((tenant_id, events))
-        return "ok"
+        return {
+            "finding_id": "test-finding-1",
+            "severity": "medium",
+            "should_open_case": False,
+            "title": "Test Finding",
+        }
 
     thc = ThreatHuntConsumer(
         kafka_bootstrap="localhost:9092",
@@ -49,6 +55,7 @@ def _make_thc(
         batch_window_sec=batch_window_sec,
         queue_max=queue_max,
         consumer_factory=lambda: _make_consumer(messages),
+        persist_fn=persist_fn,
     )
     thc._hunt_called = hunt_called
     return thc
@@ -175,3 +182,26 @@ class TestLifecycle:
         thc.start()
         thc.stop()
         thc._consumer.close.assert_called_once()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# persist_fn callback
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPersistFn:
+    def test_persist_fn_called_after_hunt(self):
+        persisted = []
+        thc = _make_thc([], batch_window_sec=9999,
+                        persist_fn=lambda t, f: persisted.append((t, f)))
+        thc._queues["t1"].append({"event_id": "e1"})
+        thc._stop_event.set()
+        thc._fire_hunts()
+        assert len(persisted) == 1
+        assert persisted[0][0] == "t1"
+        assert persisted[0][1]["finding_id"] == "test-finding-1"
+
+    def test_persist_fn_none_does_not_crash(self):
+        thc = _make_thc([], batch_window_sec=9999, persist_fn=None)
+        thc._queues["t1"].append({"event_id": "e1"})
+        thc._stop_event.set()
+        thc._fire_hunts()  # should not raise

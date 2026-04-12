@@ -50,6 +50,7 @@ class ThreatHuntConsumer:
         batch_window_sec: int = 30,
         queue_max: int = 20,
         consumer_factory: Optional[Callable] = None,
+        persist_fn: Optional[Callable] = None,
     ) -> None:
         self._bootstrap = kafka_bootstrap
         self._tenant_list = tenant_list
@@ -57,6 +58,7 @@ class ThreatHuntConsumer:
         self._batch_window_sec = batch_window_sec
         self._queue_max = queue_max
         self._consumer_factory = consumer_factory or self._default_consumer_factory
+        self._persist_fn = persist_fn
 
         # Per-tenant event queues
         self._queues: Dict[str, deque] = defaultdict(lambda: deque(maxlen=self._queue_max))
@@ -256,6 +258,13 @@ class ThreatHuntConsumer:
                             finding.get("severity", "?"),
                             finding.get("should_open_case", False),
                         )
+                        if self._persist_fn is not None:
+                            try:
+                                self._persist_fn(tenant_id, finding)
+                            except Exception as persist_exc:
+                                logger.exception(
+                                    "persist_fn failed tenant=%s: %s", tenant_id, persist_exc
+                                )
                     else:
                         # Backward-compat: old string return (should not happen post-refactor)
                         logger.info("Hunt complete: tenant=%s summary_len=%d", tenant_id, len(str(finding)))

@@ -34,6 +34,7 @@ from pydantic import BaseModel
 from config import get_settings
 from agent.agent import build_agent, run_hunt
 from consumer.kafka_consumer import ThreatHuntConsumer
+from service.findings_service import FindingsService
 from tools.postgres_tool import set_connection_factory
 from tools.redis_tool import set_redis_client
 from tools.opa_tool import set_opa_client
@@ -125,9 +126,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.agent = agent
     logger.info("LangChain agent built: model=%s", settings.hunt_model)
 
+    # -- FindingsService ---------------------------------------------------------
+    findings_svc = FindingsService(
+        orchestrator_url=settings.orchestrator_url,
+        dev_token_url=f"{settings.platform_api_url}/dev-token",
+    )
+    app.state.findings_svc = findings_svc
+    logger.info("FindingsService configured: orchestrator=%s", settings.orchestrator_url)
+
     # -- Kafka consumer ----------------------------------------------------------
     def _hunt(tenant_id: str, events: list) -> dict:
         return run_hunt(app.state.agent, tenant_id, events)
+
+    def _persist(tenant_id: str, finding: dict) -> None:
+        findings_svc.persist_finding(finding, tenant_id)
 
     consumer = ThreatHuntConsumer(
         kafka_bootstrap=settings.kafka_bootstrap_servers,
@@ -135,6 +147,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         hunt_agent=_hunt,
         batch_window_sec=settings.hunt_batch_window_sec,
         queue_max=settings.hunt_queue_max,
+        persist_fn=_persist,
     )
     consumer.start()
     app.state.consumer = consumer
