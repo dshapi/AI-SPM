@@ -12,7 +12,6 @@ class Settings(BaseSettings):
     kafka_bootstrap_servers: str = "kafka-broker:9092"
 
     # Groq / LLM — GROQ_API_KEY is REQUIRED; service will refuse to start if missing
-    # Use HUNT_MODEL (not GROQ_MODEL) to avoid colliding with the guard-model service
     groq_api_key: str = Field(..., min_length=1)
     hunt_model:   str = "llama-3.3-70b-versatile"
 

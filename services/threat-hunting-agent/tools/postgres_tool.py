@@ -81,13 +81,19 @@ def query_audit_logs(
     """
     limit = min(limit, 200)
 
+    # Sanitize free-text filters: only apply if they look like real values
+    # (alphanumeric + underscores/hyphens). Protects against LLM hallucinations
+    # like "=" or other garbage the model might pass as a filter.
+    import re as _re
+    _safe = lambda v: bool(v and _re.fullmatch(r"[\w\-\.@]+", v))
+
     conditions = ["tenant_id = %s"]
     params: list = [tenant_id]
 
-    if event_type:
+    if _safe(event_type):
         conditions.append("event_type = %s")
         params.append(event_type)
-    if actor:
+    if _safe(actor):
         conditions.append("actor = %s")
         params.append(actor)
 
@@ -209,13 +215,16 @@ def query_model_registry(
     """
     limit = min(limit, 200)
 
+    _VALID_RISK_TIERS = {"minimal", "limited", "high", "unacceptable"}
+    _VALID_STATUSES   = {"registered", "under_review", "approved", "deprecated", "retired"}
+
     conditions = ["tenant_id = %s"]
     params: list = [tenant_id]
 
-    if risk_tier:
+    if risk_tier and risk_tier in _VALID_RISK_TIERS:
         conditions.append("risk_tier = %s")
         params.append(risk_tier)
-    if status:
+    if status and status in _VALID_STATUSES:
         conditions.append("status = %s")
         params.append(status)
 

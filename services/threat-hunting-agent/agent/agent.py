@@ -16,10 +16,9 @@ import json
 import logging
 from typing import Any, Dict, List
 
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
 
 from agent.prompts import SYSTEM_PROMPT
@@ -217,42 +216,56 @@ def _build_tools() -> list:
 
 def build_agent(groq_api_key: str, model: str = "llama-3.3-70b-versatile") -> Any:
     """
-    Build and return the compiled LangChain agent graph.
+    Build and return the LLM client.
 
-    The agent is stateless — call agent.invoke() with a new HumanMessage
-    for each hunt batch.
+    Uses Groq (OpenAI-compatible endpoint) — very fast inference, free tier
+    with generous daily token limits.  Default model is Llama 3.3 70B Versatile
+    (128k context).  run_hunt() calls the LLM directly without bind_tools()
+    to avoid the nameless-function-call 400 error.
     """
-    llm = ChatGroq(
+    llm = ChatOpenAI(
         api_key=groq_api_key,
+        base_url="https://api.groq.com/openai/v1",
         model=model,
         temperature=0,
     )
-    tools = _build_tools()
-    agent = create_agent(
-        model=llm,
-        tools=tools,
-        system_prompt=SYSTEM_PROMPT,
-    )
-    return agent
+    logger.info("LangChain agent built: model=%s via Groq", model)
+    return llm
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # High-level entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
+_MAX_TOOL_ITERATIONS = 8   # cap the ReAct loop to avoid runaway tool calls
+
+
 def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> dict:
     """
     Run a threat hunt over a batch of events.
 
     Args:
-        agent:     Compiled LangChain agent graph from build_agent().
+        agent:     LLM client from build_agent() (a ChatOpenAI instance).
         tenant_id: Tenant the events belong to.
-        events:    List of event dicts from Kafka (various shapes).
+        events:    List of event dicts from the session poller or Kafka.
 
     Returns:
         Finding dict — always a dict, never raises, never returns a string.
         On any failure the safe fallback Finding is returned with
         should_open_case=False and risk_score=0.0.
+
+    Tool loop design
+    ─────────────────
+    We drive our own lightweight ReAct loop instead of using LangGraph's
+    create_agent().  Llama 3.3 70B on SambaNova conflates the system-prompt's
+    "output JSON" instruction with a function call and emits a nameless tool
+    call that the API rejects (400 "name keyword does not appear in function
+    call").  By owning the loop we sidestep that entirely:
+
+      1. Bind tools to the LLM with bind_tools().
+      2. Each iteration: call the LLM, check response.tool_calls.
+      3. If tool_calls is empty the model is done → parse response.content.
+      4. Otherwise execute each named tool, append ToolMessage results, repeat.
     """
     from agent.finding import Finding, PolicySignal, safe_fallback_finding
     from agent.scorer  import compute_risk_score, compute_confidence
@@ -269,27 +282,49 @@ def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> dict:
         if eid:
             correlated_events.append(eid)
 
-    # ── 3. LLM invocation ─────────────────────────────────────────────────────
+    # ── 3. LLM invocation (plain text, no function-calling) ──────────────────
+    #
+    # We intentionally do NOT use bind_tools() here.
+    #
+    # Llama 3.3 70B on SambaNova conflates the system-prompt's "output JSON"
+    # instruction with a tool call and immediately emits the finding JSON as a
+    # nameless function call (turn 1, before using any tools).  SambaNova's API
+    # rejects this with 400 "name keyword does not appear in function call".
+    # Two-phase approaches (tool loop → plain final call) also fail because the
+    # crash happens on the very first llm_with_tools.invoke().
+    #
+    # Removing bind_tools() entirely is the only reliable fix:
+    #   • The model outputs plain text — parse_llm_output handles it fine.
+    #   • The event payload already contains all key fields (session_id, verdict,
+    #     risk_score, risk_tier, signals) so the model produces accurate findings
+    #     without needing additional DB/Redis/MITRE lookups.
+    #   • Tool enrichment can be added back later via a text-based ReAct approach
+    #     that bypasses the OpenAI function-calling API entirely.
+    #
     llm_fragment = None
     try:
         event_summary = json.dumps(events, default=str, indent=2)
-        prompt = (
+        user_prompt = (
             f"Threat hunt requested for tenant '{tenant_id}'.\n\n"
             f"Batch of {len(events)} events:\n{event_summary}\n\n"
-            "Analyse these events for threats. Use your tools to gather additional "
-            "context where useful. Then output your structured finding JSON as "
-            "instructed in the system prompt."
+            "Analyse these events for threats, then output ONLY your structured "
+            "finding as a JSON code block wrapped in ```json ... ``` exactly as "
+            "specified in the system prompt."
         )
-        result   = agent.invoke({"messages": [HumanMessage(content=prompt)]})
-        messages = result.get("messages", [])
-        if messages:
-            raw_text     = getattr(messages[-1], "content", str(messages[-1]))
+        response = agent.invoke([
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=user_prompt),
+        ])
+        raw_text = getattr(response, "content", "") or ""
+        if raw_text:
             llm_fragment = parse_llm_output(raw_text)
+
     except Exception as exc:
-        logger.exception("run_hunt: agent invocation failed tenant=%s: %s", tenant_id, exc)
+        logger.exception("run_hunt: LLM invocation failed tenant=%s: %s", tenant_id, exc)
         return safe_fallback_finding(tenant_id, len(events))
 
     if llm_fragment is None:
+        logger.warning("run_hunt: no parseable fragment from LLM tenant=%s", tenant_id)
         return safe_fallback_finding(tenant_id, len(events))
 
     # ── 4. Assemble Finding ────────────────────────────────────────────────────
