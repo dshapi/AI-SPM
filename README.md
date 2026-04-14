@@ -73,31 +73,6 @@ Implement proper governance controls around AI usage.
 | **Supported Models**     | Anthropic / OpenAI-compatible endpoint / 3rd party model imprort 
 | **Compliance Framework** | NIST AI RMF (GOVERN / MAP / MEASURE / MANAGE)                    |
 
----
-
-## Table of Contents
-
-- [Security & Access Control](#security--access-control)
-  - [Authentication & Authorization](#authentication--authorization)
-  - [Prompt Security](#prompt-security)
-  - [Output Security](#output-security)
-- [LLM Integration & Gateway](#llm-integration--gateway)
-  - [Model Management](#model-management)
-  - [Agentic Tools](#agentic-tools)
-- [Conversation Memory](#conversation-memory)
-- [Observability & Compliance](#observability--compliance)
-  - [Prometheus Metrics](#prometheus-metrics)
-  - [Grafana Dashboards](#grafana-dashboards)
-  - [Audit & Compliance](#audit--compliance)
-  - [Behavioural Analytics](#behavioural-analytics)
-- [Infrastructure & Event Pipeline](#infrastructure--event-pipeline)
-  - [Kafka Event Bus](#kafka-event-bus)
-  - [Platform Services](#platform-services)
-- [UI & Developer Experience](#ui--developer-experience)
-- [Roadmap](#roadmap)
-
----
-
 
 
 <div align="center">
@@ -386,14 +361,18 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxx
 
 Get a free key at [app.tavily.com](https://app.tavily.com). Without this key, the web search tool will silently skip search calls and Claude will answer from its training data only.
 
-### Groq (optional — accelerates Llama Guard 3)
+### Groq (required for Threat Hunting Agent + optional guard acceleration)
 
 ```dotenv
 GROQ_API_KEY=gsk_xxxxxxxxxxxx
-GROQ_MODEL=llama-guard-3-8b
+HUNT_MODEL=llama-3.3-70b-versatile   # model used by the threat-hunting agent
 ```
 
-Get a free key at [console.groq.com](https://console.groq.com). Without this, the platform falls back to a built-in regex classifier for content moderation (still functional, just less accurate).
+Get a free key at [console.groq.com](https://console.groq.com).
+
+Groq is used in two places:
+- **Threat Hunting Agent** — `GROQ_API_KEY` is **required**. Without it the `threat-hunting-agent` service will refuse to start.
+- **Guard Model (Llama Guard)** — optional. Without a key the guard falls back to a built-in regex classifier (still functional, just less accurate).
 
 ---
 
@@ -586,12 +565,42 @@ ports:
   - "3100:3000"  # change 3000 → 3100 (host:container)
 ```
 
+### Threat hunting collectors report `column "session_id" does not exist`
+
+The `audit_export` table is missing the `session_id` column added in migration `002`. Run the migration once while the stack is up:
+
+```bash
+# Option A — via Alembic
+docker compose exec spm-api alembic upgrade head
+
+# Option B — direct SQL
+docker compose exec spm-db psql -U spm_rw -d spm -c "
+  ALTER TABLE audit_export ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
+  CREATE INDEX IF NOT EXISTS idx_audit_export_session_id ON audit_export (session_id);
+"
+```
+
+### `threat-hunting-agent` fails to start — `GROQ_API_KEY` missing
+
+The threat-hunting-agent requires a Groq API key. Set it in `.env`:
+
+```dotenv
+GROQ_API_KEY=gsk_xxxxxxxxxxxx
+```
+
+Get a free key at [console.groq.com](https://console.groq.com), then rebuild the service:
+
+```bash
+docker compose up -d --build threat-hunting-agent
+```
+
 ### Rebuilding a single service after code changes
 
 ```bash
-docker compose up -d --build api          # rebuild API only
-docker compose up -d --build ui           # rebuild UI only
-docker compose up -d --build spm-aggregator  # rebuild SPM aggregator
+docker compose up -d --build api                  # rebuild API only
+docker compose up -d --build ui                   # rebuild UI only
+docker compose up -d --build spm-aggregator       # rebuild SPM aggregator
+docker compose up -d --build threat-hunting-agent # rebuild threat hunting agent
 ```
 
 ---
@@ -605,7 +614,10 @@ The following variables can be tuned in `.env`. All have sane defaults and only 
 | `ANTHROPIC_API_KEY` | *(required)* | Anthropic API key |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Claude model to use |
 | `TAVILY_API_KEY` | *(optional)* | Tavily key for web search tool |
-| `GROQ_API_KEY` | *(optional)* | Groq key for Llama Guard 3 |
+| `GROQ_API_KEY` | *(required for threat hunting)* | Groq key — powers the Threat Hunting Agent LLM and optionally accelerates Llama Guard 3 |
+| `HUNT_MODEL` | `llama-3.3-70b-versatile` | Groq model used by the threat-hunting agent |
+| `HUNT_BATCH_WINDOW_SEC` | `30` | Kafka batch window for the threat-hunting agent (seconds) |
+| `THREATHUNTING_AI_INTERVAL_SEC` | `300` | Proactive threat scan interval (seconds) |
 | `TENANTS` | `t1` | Comma-separated tenant IDs |
 | `RATE_LIMIT_RPM` | `60` | Max requests per minute per user |
 | `GUARD_MODEL_ENABLED` | `true` | Enable/disable content guard |
@@ -709,14 +721,18 @@ TAVILY_API_KEY=tvly-xxxxxxxxxxxx
 
 Get a free key at [app.tavily.com](https://app.tavily.com). Without this key, the web search tool will silently skip search calls and Claude will answer from its training data only.
 
-### Groq (optional — accelerates Llama Guard 3)
+### Groq (required for Threat Hunting Agent + optional guard acceleration)
 
 ```dotenv
 GROQ_API_KEY=gsk_xxxxxxxxxxxx
-GROQ_MODEL=llama-guard-3-8b
+HUNT_MODEL=llama-3.3-70b-versatile   # model used by the threat-hunting agent
 ```
 
-Get a free key at [console.groq.com](https://console.groq.com). Without this, the platform falls back to a built-in regex classifier for content moderation (still functional, just less accurate).
+Get a free key at [console.groq.com](https://console.groq.com).
+
+Groq is used in two places:
+- **Threat Hunting Agent** — `GROQ_API_KEY` is **required**. Without it the `threat-hunting-agent` service will refuse to start.
+- **Guard Model (Llama Guard)** — optional. Without a key the guard falls back to a built-in regex classifier (still functional, just less accurate).
 
 ---
 
@@ -908,12 +924,42 @@ ports:
   - "3100:3000"  # change 3000 → 3100 (host:container)
 ```
 
+### Threat hunting collectors report `column "session_id" does not exist`
+
+The `audit_export` table is missing the `session_id` column added in migration `002`. Run the migration once while the stack is up:
+
+```bash
+# Option A — via Alembic
+docker compose exec spm-api alembic upgrade head
+
+# Option B — direct SQL
+docker compose exec spm-db psql -U spm_rw -d spm -c "
+  ALTER TABLE audit_export ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
+  CREATE INDEX IF NOT EXISTS idx_audit_export_session_id ON audit_export (session_id);
+"
+```
+
+### `threat-hunting-agent` fails to start — `GROQ_API_KEY` missing
+
+The threat-hunting-agent requires a Groq API key. Set it in `.env`:
+
+```dotenv
+GROQ_API_KEY=gsk_xxxxxxxxxxxx
+```
+
+Get a free key at [console.groq.com](https://console.groq.com), then rebuild the service:
+
+```bash
+docker compose up -d --build threat-hunting-agent
+```
+
 ### Rebuilding a single service after code changes
 
 ```bash
-docker compose up -d --build api          # rebuild API only
-docker compose up -d --build ui           # rebuild UI only
-docker compose up -d --build spm-aggregator  # rebuild SPM aggregator
+docker compose up -d --build api                  # rebuild API only
+docker compose up -d --build ui                   # rebuild UI only
+docker compose up -d --build spm-aggregator       # rebuild SPM aggregator
+docker compose up -d --build threat-hunting-agent # rebuild threat hunting agent
 ```
 
 ---
@@ -927,7 +973,10 @@ The following variables can be tuned in `.env`. All have sane defaults and only 
 | `ANTHROPIC_API_KEY` | *(required)* | Anthropic API key |
 | `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | Claude model to use |
 | `TAVILY_API_KEY` | *(optional)* | Tavily key for web search tool |
-| `GROQ_API_KEY` | *(optional)* | Groq key for Llama Guard 3 |
+| `GROQ_API_KEY` | *(required for threat hunting)* | Groq key — powers the Threat Hunting Agent LLM and optionally accelerates Llama Guard 3 |
+| `HUNT_MODEL` | `llama-3.3-70b-versatile` | Groq model used by the threat-hunting agent |
+| `HUNT_BATCH_WINDOW_SEC` | `30` | Kafka batch window for the threat-hunting agent (seconds) |
+| `THREATHUNTING_AI_INTERVAL_SEC` | `300` | Proactive threat scan interval (seconds) |
 | `TENANTS` | `t1` | Comma-separated tenant IDs |
 | `RATE_LIMIT_RPM` | `60` | Max requests per minute per user |
 | `GUARD_MODEL_ENABLED` | `true` | Enable/disable content guard |
@@ -1113,6 +1162,11 @@ A full reference of every technology, library, and external service used in the 
 
 ## Architecture Overview
 
+![Orbyx AI-SPM Architecture](docs/architecture.png)
+
+<details>
+<summary>ASCII diagram</summary>
+
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                     Browser (React)                      │
@@ -1128,20 +1182,34 @@ A full reference of every technology, library, and external service used in the 
 │  (events)   │ │(cache)│ │(policy) │ │  + Tavily      │
 └──────┬──────┘ └───────┘ └─────────┘ └────────────────┘
        │
-┌──────▼──────────────────────────────────────────────────┐
-│             SPM Aggregator  (Python)                     │
-│         Consumes events → writes to Postgres            │
+       ├─────────────────────────────────────────────────┐
+       │                                                 │
+┌──────▼──────────────────────────────────────────────┐  │
+│             SPM Aggregator  (Python)                 │  │
+│         Consumes events → writes to Postgres         │  │
+└──────────────────────────┬──────────────────────────┘  │
+                           │ SQL                          │ Kafka
+┌──────────────────────────▼──────────────────────────┐  │
+│              SPM API  (FastAPI / Python)             │  │
+│   Model registry · Posture · Compliance · Enforce   │  │
+└──────────────────────────┬──────────────────────────┘  │
+                           │                             │
+┌──────────────────────────▼──────────────────────────┐  │
+│          Observability  (Prometheus + Grafana)       │  │
+└─────────────────────────────────────────────────────┘  │
+                                                         │
+┌────────────────────────────────────────────────────────▼┐
+│          Threat Hunting Agent  (LangChain + Groq)        │
+│  9 proactive scans · Redis · Postgres · /proc · OPA      │
 └──────────────────────────┬──────────────────────────────┘
-                           │ SQL
+                           │ HTTP  POST /api/v1/threat-findings
 ┌──────────────────────────▼──────────────────────────────┐
-│              SPM API  (FastAPI / Python)                 │
-│   Model registry · Posture · Compliance · Enforcement   │
-└──────────────────────────┬──────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────┐
-│          Observability  (Prometheus + Grafana)           │
+│       Agent Orchestrator  (FastAPI / Python)             │
+│  Session lifecycle · Risk scoring · Findings · Cases     │
 └─────────────────────────────────────────────────────────┘
 ```
+
+</details>
 
 ---
 
@@ -1179,6 +1247,8 @@ All backend services are written in **Python 3.11** and served with **FastAPI + 
 | `tool-parser` | — | Parses and validates tool call requests |
 | `executor` | — | Executes approved tool calls |
 | `agent` | — | Orchestrates multi-step agentic workflows |
+| `agent-orchestrator` | 8094 | Session lifecycle, risk scoring, threat finding storage, case management |
+| `threat-hunting-agent` | — | Autonomous AI threat hunter — 9 proactive scans + LangChain/Groq LLM |
 | `startup-orchestrator` | — | One-shot init container: keys, Kafka topics, OPA seed |
 
 ### Core Python Libraries
@@ -1225,7 +1295,7 @@ The UI is a single-page app served by an Nginx container (`ui`) on port 3000. No
 |---|---|---|
 | **Anthropic Claude** | LLM backend (Haiku / Sonnet / Opus) | ✅ Yes |
 | **Tavily** | Real-time web search tool for Claude | ⚠️ Optional |
-| **Groq** | Fast Llama Guard 3 inference for content moderation | ⚠️ Optional |
+| **Groq** | Threat Hunting Agent LLM (Llama 3.3 70B) + Llama Guard 3 content moderation | ✅ Required (threat hunting) / ⚠️ Optional (guard) |
 
 ---
 
@@ -1280,6 +1350,64 @@ Audit Event → Kafka → SPM Aggregator → PostgreSQL + Prometheus
     │
     ▼
 Response → User
+```
+
+---
+
+## Threat Hunting Agent
+
+The **threat-hunting-agent** is an autonomous AI security service that continuously scans the platform for threats — independent of user-triggered requests. It runs a LangChain agent backed by **Groq + Llama 3.3 70B Versatile** and fires on two triggers:
+
+- **Kafka consumer** — reacts to session events in near real-time
+- **Scheduler** — runs a full proactive scan cycle every 5 minutes (configurable via `THREATHUNTING_AI_INTERVAL_SEC`)
+
+### Proactive Scans
+
+Every scan cycle runs all 9 detectors in parallel. Each detector queries live data (Postgres, Redis, `/proc`) and produces structured findings that the agent analyses with the LLM before posting to the orchestrator.
+
+| Scan | What it detects |
+|---|---|
+| `exposed_credentials` | API keys, tokens, and passwords stored in Redis under unexpected namespaces |
+| `sensitive_data_exposure` | PII patterns, DB connection strings in Redis (broader sweep) |
+| `unused_open_ports` | Internal service ports reachable that should not be (misconfigured or rogue services) |
+| `unexpected_listen_ports` | Ports in LISTEN state in `/proc/net/tcp` not on the allowed service list |
+| `overprivileged_tools` | AI models in the registry with unacceptable risk tier still set to `active` |
+| `runtime_anomaly_detection` | High-frequency actors, enforcement block clusters (3+/session/hour), session storms (5+/actor/10 min) |
+| `prompt_secret_exfiltration` | API keys and bearer tokens inside prompt/response text in the audit log |
+| `data_leakage_detection` | SSNs, credit card numbers, email addresses in agent response text |
+| `tool_misuse_detection` | High tool-call frequency (>20/actor/hour), rapid chaining (>5 calls/session/min), high block ratios |
+
+### Findings & Cases
+
+When a scan finds an anomaly the LLM produces a structured **threat finding** (severity, hypothesis, evidence, recommended actions) which is:
+
+1. Posted to the agent-orchestrator via `POST /api/v1/threat-findings`
+2. Deduplicated by batch hash — the same pattern won't flood the findings tab
+3. Automatically prioritised (risk score, recency, occurrence count)
+4. Escalated to a **Case** when `should_open_case=true` and priority score ≥ 0.40
+
+### Configuration
+
+```dotenv
+GROQ_API_KEY=gsk_xxxxxxxxxxxx           # required — service won't start without it
+HUNT_MODEL=llama-3.3-70b-versatile      # LLM model (any Groq-hosted model)
+HUNT_BATCH_WINDOW_SEC=30                # Kafka batch window
+THREATHUNTING_AI_INTERVAL_SEC=300       # Proactive scan interval (seconds)
+```
+
+### Database Migration
+
+The threat hunting collectors query the `session_id` column on the `audit_export` table. If you are upgrading an existing installation run the migration before starting the agent:
+
+```bash
+# Option A — via Alembic (recommended)
+docker compose exec spm-api alembic upgrade head
+
+# Option B — direct SQL (if Alembic is unavailable)
+docker compose exec spm-db psql -U spm_rw -d spm -c "
+  ALTER TABLE audit_export ADD COLUMN IF NOT EXISTS session_id VARCHAR(64);
+  CREATE INDEX IF NOT EXISTS idx_audit_export_session_id ON audit_export (session_id);
+"
 ```
 
 ---
