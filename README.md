@@ -1164,6 +1164,10 @@ A full reference of every technology, library, and external service used in the 
 
 ![Orbyx AI-SPM Architecture](docs/architecture.png)
 
+### Control Plane & Data Path
+
+![Control Plane & Data Path](docs/architecture-flows.png)
+
 <details>
 <summary>ASCII diagram</summary>
 
