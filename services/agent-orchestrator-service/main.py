@@ -231,16 +231,36 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.threat_findings_service = ThreatFindingsService()
     logger.info("CasesService initialised (DB-backed)")
 
-    # ── LLM Client (optional — disabled gracefully if key not set) -────────
-    llm_api_key = os.getenv("LLM_API_KEY", "")
-    llm_model   = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
-    if llm_api_key:
-        from clients.llm_client import LLMClient
-        app.state.llm_client = LLMClient(api_key=llm_api_key, model=llm_model)
-        logger.info("LLMClient initialised: model=%s", llm_model)
+    # ── LLM Client ────────────────────────────────────────────────────────
+    # Set LLM_PROVIDER=docker  to use Docker Model Runner (no API key needed).
+    # Set LLM_PROVIDER=anthropic (default) to use the Anthropic Claude API.
+    llm_provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
+
+    if llm_provider == "docker":
+        from clients.llm_client import DockerModelClient
+        docker_model    = os.getenv("LLM_MODEL", "ai/smollm2")
+        docker_base_url = os.getenv(
+            "DOCKER_MODEL_RUNNER_URL",
+            DockerModelClient.DEFAULT_BASE_URL,
+        )
+        app.state.llm_client = DockerModelClient(
+            model=docker_model,
+            base_url=docker_base_url,
+        )
+        logger.info(
+            "DockerModelClient initialised: model=%s base_url=%s",
+            docker_model, docker_base_url,
+        )
     else:
-        app.state.llm_client = None
-        logger.info("LLM_API_KEY not set — LLM execution step disabled")
+        llm_api_key = os.getenv("LLM_API_KEY", "")
+        llm_model   = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
+        if llm_api_key:
+            from clients.llm_client import LLMClient
+            app.state.llm_client = LLMClient(api_key=llm_api_key, model=llm_model)
+            logger.info("LLMClient initialised: model=%s", llm_model)
+        else:
+            app.state.llm_client = None
+            logger.info("LLM_API_KEY not set — LLM execution step disabled")
 
     # ── Guard + Output scanner → PromptProcessor ───────────────────────────
     guard_url   = os.getenv("GUARD_MODEL_URL", "")

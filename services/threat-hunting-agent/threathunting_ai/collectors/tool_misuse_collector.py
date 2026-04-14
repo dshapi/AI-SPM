@@ -208,3 +208,9 @@ class ToolMisuseCollector:
             results.append(finding)
 
         return results
+
+
+# ── Module-level API (matches all other collectors) ───────────────────────────
+def collect() -> list:
+    """Module-level shim — wraps ToolMisuseCollector for scan_registry."""
+    return ToolMisuseCollector().collect()
