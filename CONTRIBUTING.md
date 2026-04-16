@@ -1,6 +1,10 @@
 # Contributing to Orbyx AI SPM
 
-Thanks for your interest in contributing! Here's everything you need to get started.
+Thanks for your interest in contributing! Help wanted.. !
+
+“Add new guard model integrations”
+“Improve OPA policies for tool control”
+“Add attack simulation scenarios”
 
 ---
 
