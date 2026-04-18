@@ -16,3 +16,46 @@ from consumers.topic_resolver import resolve_topics
 def test_simulation_events_topic_in_resolver():
     topics = resolve_topics(["t1"])
     assert "cpm.t1.simulation.events" in topics
+
+
+from unittest.mock import MagicMock, patch
+import platform_shared.simulation_events as sim_events
+
+def _make_producer():
+    p = MagicMock()
+    p.produce = MagicMock()
+    return p
+
+def test_publish_started_calls_send_event():
+    producer = _make_producer()
+    with patch("platform_shared.simulation_events.send_event") as mock_send:
+        sim_events.publish_started(
+            producer, session_id="sess-1", prompt="hello",
+            attack_type="custom", execution_mode="live",
+        )
+    mock_send.assert_called_once()
+    kwargs = mock_send.call_args
+    assert kwargs[1]["event_type"] == "simulation.started"
+    assert kwargs[1]["source_service"] == "api-simulation"
+    assert kwargs[1]["session_id"] == "sess-1"
+
+def test_publish_blocked_includes_categories():
+    producer = _make_producer()
+    with patch("platform_shared.simulation_events.send_event") as mock_send:
+        sim_events.publish_blocked(
+            producer, session_id="sess-1", categories=["S1", "S2"],
+            correlation_id="corr-1", decision_reason="Guard model block",
+        )
+    payload = mock_send.call_args[0][2].model_dump()   # 3rd positional arg is _SimPayload
+    assert payload["categories"] == ["S1", "S2"]
+
+def test_publish_completed_event_type():
+    producer = _make_producer()
+    with patch("platform_shared.simulation_events.send_event") as mock_send:
+        sim_events.publish_completed(producer, session_id="sess-1", summary={})
+    assert mock_send.call_args[1]["event_type"] == "simulation.completed"
+
+def test_sim_payload_model_dump_returns_payload():
+    from platform_shared.simulation_events import _SimPayload
+    sp = _SimPayload({"key": "value"})
+    assert sp.model_dump() == {"key": "value"}
