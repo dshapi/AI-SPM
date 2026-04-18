@@ -466,7 +466,7 @@ export function ResultsPanel({
   const [copied,        setCopied]        = useState(false)
   const [selectedEvent, setSelectedEvent] = useState(null)
 
-  const { state, events: simEvents = [], mode } = simulation
+  const { state, events: simEvents = [], mode, steps = [], simError } = simulation
   const isGarak    = mode === 'garak'
   const RESULT_TABS = isGarak ? [...BASE_TABS, ...GARAK_TABS] : BASE_TABS
 
@@ -523,6 +523,31 @@ export function ResultsPanel({
           <div>
             <p className="text-[13px] font-medium text-gray-500">No simulation run yet</p>
             <p className="text-[11px] text-gray-400 mt-1">Configure an attack type and click Run Simulation to see results here.</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ── Failed / error state ─────────────────────────────────────────────────────
+  const isFailed = state === 'error' || (simError && !result && !running && simEvents.length === 0)
+  if (isFailed) {
+    return (
+      <div className="flex flex-col h-full">
+        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
+          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
+          <span className="text-[12px] font-semibold text-gray-700">Results</span>
+          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-[10px] font-bold text-red-700 shrink-0">
+            Failed
+          </span>
+        </div>
+        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8">
+          <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center">
+            <AlertCircle size={18} className="text-red-400" />
+          </div>
+          <div>
+            <p className="text-[13px] font-medium text-gray-700">Simulation failed</p>
+            <p className="text-[11px] text-gray-400 mt-1">{simError || 'An unexpected error occurred. Check the console for details.'}</p>
           </div>
         </div>
       </div>
@@ -589,13 +614,18 @@ export function ResultsPanel({
             type="button"
             onClick={() => setActiveTab(tab)}
             className={cn(
-              'h-9 px-3 text-[11px] font-medium border-b-2 shrink-0 transition-colors whitespace-nowrap',
+              'h-9 px-3 text-[11px] font-medium border-b-2 shrink-0 transition-colors whitespace-nowrap inline-flex items-center gap-1',
               activeTab === tab
                 ? 'text-blue-600 border-blue-600'
                 : 'text-gray-500 border-transparent hover:text-gray-700',
             )}
           >
             {tab}
+            {tab === 'Timeline' && steps.length > 0 && (
+              <span className="px-1 py-0.5 rounded text-[9px] bg-blue-100 text-blue-600 font-bold tabular-nums leading-none">
+                {steps.length}
+              </span>
+            )}
           </button>
         ))}
       </div>
@@ -609,6 +639,7 @@ export function ResultsPanel({
             simulation={simulation}
             selectedId={selectedEvent?.id}
             onSelect={handleSelectEvent}
+            steps={steps}
           />
         )}
 

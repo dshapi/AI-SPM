@@ -14,8 +14,9 @@ import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { ResultsPanel }  from '../../components/simulation/ResultsPanel.jsx'
-import { createSession, fetchSessionEvents, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
-import { useSimulationStream } from '../../hooks/useSimulationStream.js'
+import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
+import { useSimulationState } from '../../hooks/useSimulationState.js'
+import { buildResultFromSimEvents } from '../../lib/buildResultFromSimEvents.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -506,103 +507,7 @@ function _adaptBackendResults(sr) {
 }
 
 
-/**
- * _buildResultFromSimEvents(simEvents) → MOCK_RESULTS-compatible object
- *
- * Constructs the result object directly from the WS simulation events.
- * Used instead of fetchSessionResults because simulation sessions live on
- * api:8080 (/simulate/single|garak) and have no corresponding record in
- * the agent-orchestrator (/api/v1/sessions).  Calling fetchSessionResults
- * always returned 404 silently, leaving `result` permanently null.
- *
- * Information extracted:
- *   simulation.blocked  → verdict, categories, decision_reason, explanation
- *   simulation.allowed  → verdict, response_preview
- *   simulation.completed → summary (probes_run for Garak)
- *   All events          → decision trace timeline
- */
-function _buildResultFromSimEvents(simEvents) {
-  if (!simEvents || simEvents.length === 0) return null
-
-  // Find terminal event
-  const blockedEv  = simEvents.find(e => e.stage === 'blocked')
-  const allowedEv  = simEvents.find(e => e.stage === 'allowed')
-  const completedEv = simEvents.find(e => e.stage === 'completed')
-  const terminal   = blockedEv || allowedEv
-
-  if (!terminal && !completedEv) return null   // no useful data yet
-
-  const summary    = completedEv?.details?.summary || {}
-
-  // If terminal event was dropped by the WS race condition, fall back to the
-  // verdict recorded in simulation.completed summary (always emitted last).
-  const isBlocked  = blockedEv
-    ? true
-    : allowedEv
-      ? false
-      : summary.result === 'blocked'    // completedEv-only fallback
-  const verdict    = isBlocked ? 'blocked' : 'allowed'
-  const d          = (terminal || completedEv).details || {}
-
-  // Decision trace — one entry per sim event
-  const decisionTrace = simEvents.map((e, idx) => {
-    const rawLabel = (e.event_type || '')
-      .split('.').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
-    const ts = e.timestamp
-      ? (() => { try { return new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) } catch { return '' } })()
-      : ''
-    return { step: idx + 1, label: rawLabel, status: e.status, detail: e.details?.message || rawLabel, ts }
-  })
-
-  // Policy impact — derive from categories on blocked event
-  const categories = d.categories || summary.categories || []
-  const policyAction = isBlocked ? 'BLOCK' : 'ALLOW'
-  const policyImpact = categories.map(cat => ({
-    policy:   cat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
-    action:   policyAction,
-    trigger:  d.decision_reason || cat,
-    severity: isBlocked ? 'critical' : 'ok',
-  }))
-  if (policyImpact.length === 0) {
-    policyImpact.push({
-      policy:   'Policy Engine v1',
-      action:   policyAction,
-      trigger:  d.decision_reason || (isBlocked ? 'Blocked by policy engine' : 'Allowed through policy gate'),
-      severity: isBlocked ? 'critical' : 'ok',
-    })
-  }
-
-  const policiesTriggered = categories.length > 0 ? categories : ['Policy Engine v1']
-
-  // Garak summary info
-  const probesRun  = summary.probes_run
-  const outputText = isBlocked
-    ? null
-    : probesRun
-      ? `[Garak scan completed — ${probesRun} probe${probesRun !== 1 ? 's' : ''} run, profile: ${summary.profile || 'default'}]`
-      : (d.response_preview || '[Session allowed through policy gate]')
-
-  return {
-    verdict,
-    riskScore:         isBlocked ? 85 : 20,
-    riskLevel:         isBlocked ? 'High' : 'Low',
-    executionMs:       summary.duration_ms ?? 0,
-    policiesTriggered,
-    decisionTrace,
-    output:            outputText,
-    blockedMessage:    isBlocked
-      ? `Your request was terminated by the policy engine. ${d.decision_reason || ''} This event has been logged for security review.`.trim()
-      : null,
-    policyImpact,
-    risk: {
-      injectionDetected: categories.some(c => c.includes('injection')),
-      anomalyScore:      isBlocked ? 0.85 : 0.2,
-      techniques:        categories.map(c => c.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())),
-      explanation:       d.decision_reason || (isBlocked ? 'Blocked by policy engine.' : 'No elevated risk signals detected.'),
-    },
-    recommendations: [],
-  }
-}
+// buildResultFromSimEvents is now in lib/buildResultFromSimEvents.js (imported above).
 
 // ── Small primitives ───────────────────────────────────────────────────────────
 
@@ -1174,63 +1079,41 @@ function deriveSimState(connectionStatus, running) {
 
 export default function Simulation() {
   const [config,      setConfig]     = useState(DEFAULT_CONFIG)
-  const [running,     setRunning]    = useState(false)
-  const [result,      setResult]     = useState(null)
   // apiError: non-null string means the live call failed and we fell back to mock
   const [apiError,    setApiError]   = useState(null)
-  // sessionId: truthy when result came from the real orchestrator (not mock)
-  const [sessionId,   setSessionId]  = useState(null)
   const [compareMode, setCompareMode]= useState(false)
-  const [resultA,     setResultA]    = useState(null)   // before
-  const [resultB,     setResultB]    = useState(null)   // after
+  const [resultA,     setResultA]    = useState(null)   // before (compare mode)
+  const [resultB,     setResultB]    = useState(null)   // after  (compare mode)
 
-  // ── WebSocket live streaming ────────────────────────────────────────────────
-  const { connectionStatus, simEvents, startStream, stopStream } = useSimulationStream()
+  // ── Unified simulation lifecycle state ────────────────────────────────────
+  const { simState, startSimulation, resetSimulation } = useSimulationState()
+  const {
+    status:          simStatus,
+    steps:           simSteps,
+    partialResults,
+    finalResults:    result,
+    error:           simError,
+    startedAt,
+    completedAt,
+    sessionId,
+    simEvents,
+    connectionStatus,
+  } = simState
+
+  // Convenience alias used by disabled-button logic and legacy prop
+  const running = simStatus === 'running'
 
   // Construct simulation prop for ResultsPanel
   const simulation = {
-    state:  deriveSimState(connectionStatus, running),
-    events: simEvents,
-    mode:   config.attackType === 'custom' && config.customMode === 'garak' ? 'garak' : 'single',
+    state:          deriveSimState(connectionStatus, running),
+    events:         simEvents,
+    mode:           config.attackType === 'custom' && config.customMode === 'garak' ? 'garak' : 'single',
+    steps:          simSteps,
+    partialResults,
+    startedAt,
+    completedAt,
+    simError,
   }
-
-  /**
-   * Build result from simEvents whenever a terminal stage event arrives.
-   *
-   * Replaces the previous fetchSessionResults() call which targeted
-   * ORCHESTRATOR_BASE/sessions/{id}/results — the agent-orchestrator.
-   * Simulation sessions (run via /api/simulate/single|garak on api:8080)
-   * have NO record in the orchestrator, so that call always returned 404
-   * and `result` was permanently null, leaving the Summary/Output/Policy
-   * Impact tabs empty even after a successful run.
-   *
-   * We now derive the result purely from the WS events that the backend
-   * already emits: simulation.blocked, simulation.allowed, simulation.completed.
-   * fetchSessionResults / _adaptBackendResults are kept for the Runtime page
-   * (agent-orchestrator sessions) but are not used here.
-   */
-  useEffect(() => {
-    if (simEvents.length === 0) return
-    const last = simEvents[simEvents.length - 1]
-    // Only materialise result on a terminal event — avoids premature renders
-    if (!['completed', 'error', 'blocked', 'allowed'].includes(last.stage)) return
-    const built = _buildResultFromSimEvents(simEvents)
-    if (built) setResult(built)
-  }, [simEvents])
-
-  // Stop running when simulation reaches a terminal stage via stream events.
-  // Terminal stages from the real backend pipeline:
-  //   blocked  — policy.decision with decision=block
-  //   allowed  — policy.decision with decision=allow
-  //   error    — any error event
-  //   completed — future/legacy simulation.completed event
-  useEffect(() => {
-    const last = simEvents[simEvents.length - 1]
-    if (!last) return
-    if (['completed', 'error', 'blocked', 'allowed'].includes(last.stage)) {
-      setRunning(false)
-    }
-  }, [simEvents])
 
   // ── Config change handler ───────────────────────────────────────────────────
   const handleChange = (key, val) => setConfig(c => ({ ...c, [key]: val }))
@@ -1245,45 +1128,16 @@ export default function Simulation() {
       else if (!resultB) setResultB(result)
     }
 
-    const sid = crypto.randomUUID()
-    setSessionId(sid)
-    setRunning(true)
-    setResult(null)
     setApiError(null)
-
-    // Connect WS *before* POST so no events are missed
-    startStream(sid)
-
-    try {
-      if (config.attackType === 'custom' && config.customMode === 'garak') {
-        await runGarakSimulation({
-          garakConfig: config.garakConfig,
-          sessionId: sid,
-          executionMode: config.execMode,
-        })
-      } else {
-        await runSinglePromptSimulation({
-          prompt: config.prompt,
-          sessionId: sid,
-          executionMode: config.execMode,
-          attackType: config.attackType,
-        })
-      }
-    } catch (err) {
-      console.error('[SimLab] run error:', err)
-      setRunning(false)
-    }
-  }, [config, startStream, compareMode, result, resultA, resultB])
+    await startSimulation(config)
+  }, [config, startSimulation, compareMode, result, resultA, resultB])
 
   // ── Reset ───────────────────────────────────────────────────────────────────
   const handleReset = () => {
-    stopStream()       // close the active simulation WS stream (Instance 2)
-    setRunning(false)
-    setResult(null)
+    resetSimulation()
     setResultA(null)
     setResultB(null)
     setApiError(null)
-    setSessionId(null)
   }
 
   return (

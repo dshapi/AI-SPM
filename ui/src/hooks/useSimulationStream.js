@@ -44,7 +44,7 @@ const EVENT_TYPE_STAGE = {
  * For "policy.decision" the stage is driven by payload.decision so that
  * the event lands in the correct timeline phase (blocked/allowed).
  */
-function toSimulationEvent(wsEvent) {
+export function toSimulationEvent(wsEvent) {
   const et      = wsEvent.event_type || ''
   const payload = wsEvent.payload    || {}
 
@@ -95,6 +95,7 @@ export function useSimulationStream() {
     seenRef.current.add(key)
 
     const simEvent = toSimulationEvent(latest)
+    console.log('[SimStream] event', simEvent.event_type, 'stage:', simEvent.stage)
     setSimEvents(prev => {
       const next = [...prev, simEvent]
       next.sort((a, b) => {
