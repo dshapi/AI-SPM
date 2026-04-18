@@ -13,7 +13,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
-import { ExplainabilityPanel } from '../../components/ExplainabilityPanel.jsx'
+import { ResultsPanel }  from '../../components/simulation/ResultsPanel.jsx'
 import { createSession, fetchSessionEvents, fetchSessionResults, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
 import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
 import { useSimulationStream } from '../../hooks/useSimulationStream.js'
@@ -508,14 +508,6 @@ function _adaptBackendResults(sr) {
 
 
 // ── Small primitives ───────────────────────────────────────────────────────────
-
-function SectionLabel({ children, className }) {
-  return (
-    <p className={cn('text-[10px] font-bold uppercase tracking-[0.08em] text-gray-400 leading-none', className)}>
-      {children}
-    </p>
-  )
-}
 
 function BuilderSectionLabel({ number, children }) {
   return (
@@ -1041,604 +1033,6 @@ function DecisionTrace({ trace }) {
   )
 }
 
-// ── SimulationResult ───────────────────────────────────────────────────────────
-
-const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability']
-
-function SimulationResult({ result, attackType, config, running, apiError, sessionId, connectionStatus, simEvents = [] }) {
-  const [activeTab, setActiveTab] = useState('Summary')
-  const [copied, setCopied] = useState(false)
-  const [selectedEvent, setSelectedEvent] = useState(null)
-
-  // Auto-switch to Decision Trace (most informative tab) on each new result.
-  // Spec: prefer Timeline if it exists, otherwise Decision Trace; never Summary.
-  useEffect(() => { setActiveTab('Decision Trace') }, [result])
-
-  // Switch to Timeline tab when a run starts (events arriving)
-  useEffect(() => {
-    if (simEvents.length === 0 && connectionStatus === 'connecting') {
-      setActiveTab('Timeline')
-    }
-  }, [simEvents, connectionStatus])
-
-  // Clear selected event when simEvents list becomes empty
-  useEffect(() => {
-    if (simEvents.length === 0) setSelectedEvent(null)
-  }, [simEvents])
-
-  // Show spinner while the HTTP round-trip is in progress OR while we're
-  // waiting for the first WS event to arrive (no result yet + socket pending)
-  const isConnecting = connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
-  const showSpinner  = running || (isConnecting && !result)
-
-  if (showSpinner) {
-    const streamMsg = !running && isConnecting ? 'Opening live stream…' : 'Simulating attack…'
-    return (
-      <div className="flex flex-col h-full">
-        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center px-8">
-          <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
-            <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
-          </div>
-          <div>
-            <p className="text-[13px] font-semibold text-gray-700">{streamMsg}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
-          </div>
-          <div className="flex flex-col items-center gap-1.5 text-[11px] text-gray-400">
-            {['Assembling context…', 'Scanning with Prompt-Guard v3…', 'Evaluating policy chain…'].map((s, i) => (
-              <span key={i} className="flex items-center gap-1.5">
-                <RefreshCw size={9} className="animate-spin text-blue-400" />
-                {s}
-              </span>
-            ))}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  if (!result) {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8">
-          <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center">
-            <FlaskConical size={18} className="text-gray-400" />
-          </div>
-          <div>
-            <p className="text-[13px] font-medium text-gray-500">No simulation run yet</p>
-            <p className="text-[11px] text-gray-400 mt-1">Configure an attack type and click Run Simulation to see results here.</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  const vcfg = VERDICT_CFG[result.verdict] ?? VERDICT_CFG.allowed
-
-  return (
-    <div className="flex flex-col h-full overflow-hidden">
-
-      {/* Panel header */}
-      <div className="h-10 px-4 flex items-center justify-between border-b border-gray-100 shrink-0">
-        <div className="flex items-center gap-2 min-w-0">
-          <Target size={13} className="text-gray-400 shrink-0" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700 shrink-0">Results</span>
-          {/* Verdict chip */}
-          <span className={cn(
-            'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold shrink-0',
-            vcfg.bg, vcfg.border, vcfg.txt,
-          )}>
-            <span className={cn('w-1.5 h-1.5 rounded-full', vcfg.dot)} />
-            {vcfg.label}
-          </span>
-          {/* Data-source indicator — reflects WebSocket connection status */}
-          {sessionId && !apiError && connectionStatus === 'connected' && (
-            <span
-              title={`Live stream · session: ${sessionId}`}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-50 border border-emerald-200 text-[9.5px] font-semibold text-emerald-700 shrink-0"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              Live
-            </span>
-          )}
-          {sessionId && !apiError && (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') && (
-            <span
-              title="Opening WebSocket stream…"
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-[9.5px] font-semibold text-amber-700 shrink-0"
-            >
-              <RefreshCw size={8} className="animate-spin" strokeWidth={2.5} />
-              {connectionStatus === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}
-            </span>
-          )}
-          {sessionId && !apiError && connectionStatus === 'closed' && (
-            <span
-              title={`Stream closed · session: ${sessionId}`}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-gray-100 border border-gray-200 text-[9.5px] font-semibold text-gray-500 shrink-0"
-            >
-              <span className="w-1.5 h-1.5 rounded-full bg-gray-400" />
-              Stream ended
-            </span>
-          )}
-          {sessionId && !apiError && connectionStatus === 'error' && (
-            <span
-              title="WebSocket error — data may be incomplete"
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-[9.5px] font-semibold text-red-600 shrink-0 cursor-help"
-            >
-              <AlertCircle size={9} strokeWidth={2.5} />
-              Stream error
-            </span>
-          )}
-          {/* Fallback to mock data when live API is unavailable */}
-          {apiError && (
-            <span
-              title={`API error: ${apiError}`}
-              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-[9.5px] font-semibold text-amber-700 shrink-0 cursor-help"
-            >
-              <AlertCircle size={9} strokeWidth={2.5} />
-              Simulated
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-2 text-[10px] text-gray-400 shrink-0">
-          <Clock size={10} strokeWidth={2} />
-          <span className="font-mono">{result.executionMs}ms</span>
-        </div>
-      </div>
-
-      {/* Tabs */}
-      <div className="flex items-center gap-0 border-b border-gray-100 px-4 shrink-0 overflow-x-auto">
-        {RESULT_TABS.map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              'h-9 px-3 text-[11px] font-medium border-b-2 shrink-0 transition-colors whitespace-nowrap',
-              activeTab === tab
-                ? 'text-blue-600 border-blue-600'
-                : 'text-gray-500 border-transparent hover:text-gray-700',
-            )}
-          >
-            {tab}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      <div className="flex-1 overflow-y-auto">
-
-        {/* ── Summary ── */}
-        {activeTab === 'Summary' && (
-          <div className="p-4 space-y-4">
-            {/* Verdict hero */}
-            <div className={cn('rounded-xl border-2 p-5', vcfg.bg, vcfg.border)}>
-              <div className="flex items-center gap-4">
-                <div className={cn('w-12 h-12 rounded-xl flex items-center justify-center shrink-0 border-2', vcfg.border,
-                  result.verdict === 'blocked'   ? 'bg-red-100'
-                  : result.verdict === 'escalated' ? 'bg-orange-100'
-                  : result.verdict === 'flagged' ? 'bg-amber-100'
-                  : 'bg-emerald-100',
-                )}>
-                  <vcfg.icon size={26} className={vcfg.txt} strokeWidth={1.75} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className={cn('text-[22px] font-black tracking-tight leading-none uppercase', vcfg.txt)}>
-                    {vcfg.label}
-                  </p>
-                  <p className="text-[11.5px] text-gray-600 mt-1.5 leading-snug">
-                    {result.verdict === 'blocked'   && 'Request terminated before reaching the model. No AI output was generated.'}
-                    {result.verdict === 'escalated' && 'Risk exceeded the escalation threshold. The pipeline halted at the policy gate — no model was invoked. Manual approval is required.'}
-                    {result.verdict === 'flagged'   && 'Request processed with restrictions. Security alert raised and audit log updated.'}
-                    {result.verdict === 'allowed'   && 'All policy checks passed. Request processed and response returned normally.'}
-                  </p>
-                </div>
-                <div className="shrink-0 text-right">
-                  <p className={cn('text-[32px] font-black tabular-nums leading-none', vcfg.txt)}>{result.riskScore}</p>
-                  <p className="text-[9.5px] font-bold uppercase tracking-wide text-gray-400 mt-0.5">Risk Score</p>
-                </div>
-              </div>
-            </div>
-
-            {/* Stats row */}
-            <div className="grid grid-cols-3 gap-2">
-              {[
-                {
-                  label: 'Risk Level',
-                  value: result.riskLevel,
-                  sub: `Score: ${result.riskScore}/100`,
-                  accent: result.riskScore >= 80 ? 'border-l-red-500' : result.riskScore >= 50 ? 'border-l-amber-500' : 'border-l-emerald-500',
-                  valColor: result.riskScore >= 80 ? 'text-red-600 text-[16px]' : result.riskScore >= 50 ? 'text-amber-600 text-[16px]' : 'text-emerald-600 text-[16px]',
-                },
-                {
-                  label: 'Policies Hit',
-                  value: result.policiesTriggered.length,
-                  sub: result.policiesTriggered.length === 0 ? 'None triggered' : `${result.policiesTriggered.length} polic${result.policiesTriggered.length === 1 ? 'y' : 'ies'}`,
-                  accent: result.policiesTriggered.length > 0 ? 'border-l-violet-500' : 'border-l-gray-300',
-                  valColor: 'text-gray-900 text-[22px]',
-                },
-                {
-                  label: 'Exec Time',
-                  value: `${result.executionMs}ms`,
-                  sub: 'Policy chain eval',
-                  accent: 'border-l-blue-400',
-                  valColor: 'text-gray-900 text-[18px]',
-                },
-              ].map(stat => (
-                <div key={stat.label} className={cn('bg-white rounded-lg border border-gray-200 border-l-[3px] px-3 py-2.5', stat.accent)}>
-                  <p className="text-[9.5px] font-bold uppercase tracking-[0.08em] text-gray-400 leading-none mb-1.5">{stat.label}</p>
-                  <p className={cn('font-bold leading-none tabular-nums', stat.valColor)}>{stat.value}</p>
-                  <p className="text-[9.5px] text-gray-400 mt-1">{stat.sub}</p>
-                </div>
-              ))}
-            </div>
-
-            {/* Triggered policies */}
-            {result.policiesTriggered.length > 0 && (
-              <div>
-                <SectionLabel className="mb-2">Policies Triggered</SectionLabel>
-                <div className="flex flex-wrap gap-1.5">
-                  {result.policiesTriggered.map(p => (
-                    <span key={p} className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2.5 py-1 rounded-lg">
-                      <Shield size={9} strokeWidth={2.5} />
-                      {p}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Config echo — secondary */}
-            <details className="group">
-              <summary className="flex items-center gap-1.5 cursor-pointer list-none text-[10.5px] text-gray-400 hover:text-gray-600 transition-colors select-none">
-                <ChevronRight size={11} className="group-open:rotate-90 transition-transform" strokeWidth={2} />
-                Simulation config
-              </summary>
-              <div className="mt-2 bg-gray-50/80 rounded-lg border border-gray-100 divide-y divide-gray-100 overflow-hidden">
-                {[
-                  ['Agent',       config.agent],
-                  ['Model',       config.model],
-                  ['Environment', config.environment],
-                  ['Attack',      ATTACK_TYPES.find(a => a.id === attackType)?.label],
-                  ['Mode',        EXEC_MODES.find(m => m.id === config.execMode)?.label],
-                ].map(([k, v]) => (
-                  <div key={k} className="flex items-center justify-between px-3 py-1.5">
-                    <span className="text-[10px] text-gray-400 font-medium">{k}</span>
-                    <span className="text-[10px] text-gray-600 font-semibold text-right truncate ml-3">{v}</span>
-                  </div>
-                ))}
-              </div>
-            </details>
-          </div>
-        )}
-
-        {/* ── Decision Trace ── */}
-        {activeTab === 'Decision Trace' && (
-          <div className="p-4">
-            <div className="flex items-center justify-between mb-4">
-              <p className="text-[11px] text-gray-500">Step-by-step evaluation path through the policy engine.</p>
-              <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
-                <Clock size={10} strokeWidth={2} />
-                <span className="font-mono">{result.executionMs}ms total</span>
-              </div>
-            </div>
-            <DecisionTrace trace={result.decisionTrace} />
-          </div>
-        )}
-
-        {/* ── Output ── */}
-        {activeTab === 'Output' && (
-          <div className="p-4 space-y-3">
-            {result.verdict === 'blocked' ? (
-              /* Dramatic blocked state */
-              <div className="rounded-xl border-2 border-red-200 overflow-hidden">
-                {/* Header bar */}
-                <div className="bg-red-600 px-4 py-3 flex items-center gap-3">
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded-full bg-red-400/60" />
-                    <span className="w-3 h-3 rounded-full bg-red-400/40" />
-                    <span className="w-3 h-3 rounded-full bg-red-400/30" />
-                  </div>
-                  <span className="text-[11px] font-bold text-red-100 uppercase tracking-wide flex-1 text-center">REQUEST TERMINATED</span>
-                  <XCircle size={14} className="text-red-200" strokeWidth={2} />
-                </div>
-                {/* Body */}
-                <div className="bg-red-50 px-5 py-5">
-                  <div className="flex flex-col items-center text-center mb-4">
-                    <div className="w-12 h-12 rounded-full bg-red-100 border-2 border-red-200 flex items-center justify-center mb-3">
-                      <XCircle size={24} className="text-red-500" strokeWidth={1.75} />
-                    </div>
-                    <p className="text-[13px] font-bold text-red-700">Attack Blocked</p>
-                    <p className="text-[10.5px] text-red-500 mt-0.5">No model output was generated</p>
-                  </div>
-                  <div className="bg-white rounded-lg border border-red-200 px-3.5 py-3">
-                    <p className="text-[9.5px] font-bold uppercase tracking-wide text-red-400 mb-1.5">Safety message returned to user</p>
-                    <p className="text-[11.5px] text-gray-700 leading-relaxed">{result.blockedMessage}</p>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* Terminal with chrome */
-              <>
-                <div className="rounded-xl border border-gray-800 overflow-hidden shadow-md">
-                  {/* Terminal chrome */}
-                  <div className="bg-gray-800 px-4 py-2.5 flex items-center gap-3">
-                    <div className="flex items-center gap-1.5">
-                      <span className="w-3 h-3 rounded-full bg-red-500" />
-                      <span className="w-3 h-3 rounded-full bg-amber-400" />
-                      <span className="w-3 h-3 rounded-full bg-emerald-500" />
-                    </div>
-                    <div className="flex-1 text-center">
-                      <span className="text-[10.5px] text-gray-400 font-mono">{config.model}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {result.verdict === 'flagged' && (
-                        <span className="text-[9px] font-bold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full">
-                          Restricted
-                        </span>
-                      )}
-                      <button
-                        onClick={() => { navigator.clipboard.writeText(result.output || ''); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-                        className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
-                      >
-                        <Copy size={10} strokeWidth={2} />
-                        {copied ? 'Copied' : 'Copy'}
-                      </button>
-                    </div>
-                  </div>
-                  {/* Output body */}
-                  <div className="bg-gray-950 px-4 py-4">
-                    <div className="flex items-center gap-2 mb-3 text-[10px] text-gray-500">
-                      <span className="text-emerald-500 font-mono">$</span>
-                      <span className="font-mono">model_response --agent {config.agent}</span>
-                    </div>
-                    <pre className="text-[11.5px] font-mono text-gray-200 leading-relaxed whitespace-pre-wrap break-words">
-                      {result.output}
-                    </pre>
-                  </div>
-                </div>
-                {/* Footer meta */}
-                <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                  <CheckCircle2 size={10} className="text-emerald-500" strokeWidth={2} />
-                  <span className="font-mono">{result.output?.length ?? 0} chars</span>
-                  <span>·</span>
-                  <span>~{Math.round((result.output?.length ?? 0) / 4)} tokens</span>
-                  <span>·</span>
-                  <span>{result.executionMs}ms total</span>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-
-        {/* ── Policy Impact ── */}
-        {activeTab === 'Policy Impact' && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-gray-400">How each policy evaluated this request.</p>
-            {result.policyImpact.length === 0 ? (
-              <div className="text-center py-6 text-[12px] text-gray-400">No policies triggered.</div>
-            ) : (
-              result.policyImpact.map((pi, i) => {
-                const acfg = POLICY_ACTION_CFG[pi.action] ?? POLICY_ACTION_CFG.SKIP
-                return (
-                  <div key={i} className={cn(
-                    'rounded-xl border p-3.5 flex items-start gap-3',
-                    pi.severity === 'critical' ? 'bg-red-50/60 border-red-200'
-                      : pi.severity === 'high' ? 'bg-amber-50/60 border-amber-200'
-                      : 'bg-gray-50 border-gray-200',
-                  )}>
-                    <div className={cn(
-                      'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
-                      pi.severity === 'critical' ? 'bg-red-100' : pi.severity === 'high' ? 'bg-amber-100' : 'bg-gray-100',
-                    )}>
-                      <Shield size={14} className={
-                        pi.severity === 'critical' ? 'text-red-600' : pi.severity === 'high' ? 'text-amber-600' : 'text-gray-500'
-                      } strokeWidth={1.75} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <span className="text-[12px] font-semibold text-gray-800">{pi.policy}</span>
-                        <Badge variant={acfg.badge}>{pi.action}</Badge>
-                      </div>
-                      <p className="text-[10.5px] text-gray-500 leading-snug">{pi.trigger}</p>
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
-        )}
-
-        {/* ── Risk Analysis ── */}
-        {activeTab === 'Risk Analysis' && (
-          <div className="p-4 space-y-4">
-            {/* Score bar */}
-            <div className="bg-white rounded-xl border border-gray-200 p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div>
-                  <SectionLabel>Anomaly Score</SectionLabel>
-                  <p className="text-[10px] text-gray-400 mt-0.5">0.85 block threshold · 0.50 flag threshold</p>
-                </div>
-                <span className={cn(
-                  'text-[28px] font-black tabular-nums leading-none',
-                  result.risk.anomalyScore >= 0.8 ? 'text-red-600' : result.risk.anomalyScore >= 0.5 ? 'text-amber-600' : 'text-emerald-600',
-                )}>
-                  {result.risk.anomalyScore.toFixed(2)}
-                </span>
-              </div>
-              {/* Gradient bar with threshold markers */}
-              <div className="relative h-3 rounded-full overflow-visible bg-gray-100">
-                {/* Gradient track */}
-                <div className="absolute inset-0 rounded-full overflow-hidden"
-                  style={{ background: 'linear-gradient(to right, #10b981 0%, #f59e0b 50%, #ef4444 85%, #dc2626 100%)' }}
-                >
-                  {/* Score fill overlay (dark mask from right) */}
-                  <div
-                    className="absolute top-0 right-0 bottom-0 bg-gray-100 transition-all duration-700"
-                    style={{ width: `${(1 - result.risk.anomalyScore) * 100}%` }}
-                  />
-                </div>
-                {/* Block threshold marker at 85% */}
-                <div className="absolute top-[-3px] bottom-[-3px] w-px bg-red-600 z-10" style={{ left: '85%' }}>
-                  <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                    <span className="text-[8px] font-bold text-red-600 bg-white px-0.5">0.85</span>
-                  </div>
-                </div>
-                {/* Flag threshold marker at 50% */}
-                <div className="absolute top-[-3px] bottom-[-3px] w-px bg-amber-500 z-10" style={{ left: '50%' }}>
-                  <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                    <span className="text-[8px] font-bold text-amber-600 bg-white px-0.5">0.50</span>
-                  </div>
-                </div>
-              </div>
-              <div className="flex justify-between text-[9px] text-gray-400 mt-2">
-                <span className="text-emerald-600 font-medium">Benign</span>
-                <span className="text-red-600 font-medium">Critical</span>
-              </div>
-            </div>
-
-            {/* Injection flag */}
-            <div className="flex items-center justify-between py-2 px-3 bg-white rounded-lg border border-gray-200">
-              <span className="text-[11.5px] font-medium text-gray-700">Injection Detected</span>
-              {result.risk.injectionDetected ? (
-                <Badge variant="critical">Yes</Badge>
-              ) : (
-                <Badge variant="success">No</Badge>
-              )}
-            </div>
-
-            {/* Techniques */}
-            {result.risk.techniques.length > 0 && (
-              <div>
-                <SectionLabel className="mb-2">Techniques Identified</SectionLabel>
-                <div className="space-y-1.5">
-                  {result.risk.techniques.map((t, i) => (
-                    <div key={i} className="flex items-center gap-2 text-[11px] text-gray-700 bg-red-50/60 border border-red-100 rounded-lg px-3 py-1.5">
-                      <AlertTriangle size={10} className="text-red-500 shrink-0" strokeWidth={2} />
-                      {t}
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Explanation */}
-            <div>
-              <SectionLabel className="mb-2">Analyst Explanation</SectionLabel>
-              <div className="bg-blue-50/60 border border-blue-100 rounded-xl px-3.5 py-3">
-                <div className="flex items-start gap-2">
-                  <Info size={12} className="text-blue-500 shrink-0 mt-0.5" strokeWidth={2} />
-                  <p className="text-[11.5px] text-gray-700 leading-relaxed">{result.risk.explanation}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Recommendations ── */}
-        {activeTab === 'Recommendations' && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
-            {result.recommendations.map((rec, i) => (
-              <div key={i} className="bg-white rounded-xl border border-gray-200 p-3.5 flex items-start gap-3">
-                <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
-                  <rec.icon size={14} className="text-gray-600" strokeWidth={1.75} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[12px] font-semibold text-gray-800">{rec.label}</p>
-                  <p className="text-[10.5px] text-gray-500 mt-0.5 leading-snug">{rec.desc}</p>
-                </div>
-                {rec.action && (
-                  <Button variant="outline" size="sm" className="shrink-0 text-[10.5px] h-7 px-2.5">
-                    {rec.action}
-                  </Button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {/* ── Timeline ── */}
-        {activeTab === 'Timeline' && (
-          <div style={{ padding: '16px 0' }}>
-            <div style={{ marginBottom: 8, fontSize: 12, color: '#6b7280' }}>
-              {connectionStatus === 'connected' ? '● Live' : connectionStatus}
-            </div>
-            {simEvents.length === 0 ? (
-              <p style={{ color: '#9ca3af', fontSize: 13 }}>No events yet.</p>
-            ) : (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {simEvents.map(ev => (
-                  <div
-                    key={ev.id}
-                    onClick={() => {
-                      setSelectedEvent(ev)
-                      if (ev.details?.explanation) setActiveTab('Explainability')
-                    }}
-                    title={ev.details?.explanation?.title || ev.event_type}
-                    style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 12,
-                      padding: '8px 12px',
-                      cursor: 'pointer',
-                      background: ev.stage === 'blocked' ? '#fef2f2'
-                                : ev.stage === 'allowed' ? '#f0fdf4'
-                                : ev.stage === 'error'   ? '#fff7ed'
-                                : '#f9fafb',
-                      borderRadius: 6,
-                      borderLeft: `3px solid ${
-                        ev.stage === 'blocked' ? '#ef4444'
-                      : ev.stage === 'allowed' ? '#22c55e'
-                      : ev.stage === 'error'   ? '#f97316'
-                      : '#d1d5db'}`,
-                      outline: selectedEvent?.id === ev.id ? '2px solid #6366f1' : 'none',
-                      outlineOffset: 1,
-                      transition: 'outline 0.1s',
-                    }}
-                  >
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 500, fontSize: 13 }}>
-                        {ev.event_type}
-                      </div>
-                      {ev.details?.message && (
-                        <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
-                          {ev.details.message}
-                        </div>
-                      )}
-                      {ev.details?.categories?.length > 0 && (
-                        <div style={{ fontSize: 12, color: '#ef4444', marginTop: 2 }}>
-                          Categories: {ev.details.categories.join(', ')}
-                        </div>
-                      )}
-                    </div>
-                    <div style={{ fontSize: 11, color: '#9ca3af', whiteSpace: 'nowrap' }}>
-                      {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'Explainability' && (
-          <div style={{ padding: '16px 0' }}>
-            <ExplainabilityPanel
-              event={selectedEvent}
-              explanation={selectedEvent?.details?.explanation ?? null}
-            />
-          </div>
-        )}
-
-      </div>
-    </div>
-  )
-}
-
 // ── Side-by-side compare panel ─────────────────────────────────────────────────
 
 function CompareBadge({ a, b }) {
@@ -1671,6 +1065,15 @@ const DEFAULT_CONFIG = {
   garakConfig:        { ...GARAK_DEFAULT_CONFIG },
 }
 
+/** Derive simulation state from connectionStatus + running flag */
+function deriveSimState(connectionStatus, running) {
+  if (connectionStatus === 'error') return 'error'
+  if (running && (connectionStatus === 'connecting' || connectionStatus === 'reconnecting')) return 'connecting'
+  if (running && connectionStatus === 'connected') return 'running'
+  if (!running && connectionStatus === 'closed') return 'completed'
+  return 'idle'
+}
+
 export default function Simulation() {
   const [config,      setConfig]     = useState(DEFAULT_CONFIG)
   const [running,     setRunning]    = useState(false)
@@ -1686,6 +1089,13 @@ export default function Simulation() {
   // ── WebSocket live streaming ────────────────────────────────────────────────
   const { connectionStatus: wsConnectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
   const { connectionStatus, simEvents, startStream, stopStream } = useSimulationStream()
+
+  // Construct simulation prop for ResultsPanel
+  const simulation = {
+    state:  deriveSimState(connectionStatus, running),
+    events: simEvents,
+    mode:   config.attackType === 'custom' && config.customMode === 'garak' ? 'garak' : 'single',
+  }
 
   /**
    * Fetch structured results from backend whenever a WS event arrives.
@@ -1844,10 +1254,10 @@ export default function Simulation() {
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
-              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
+              <ResultsPanel result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
             </>
           ) : (
-            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
+            <ResultsPanel result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
           )}
         </div>
 
@@ -1862,7 +1272,7 @@ export default function Simulation() {
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />
             </div>
-            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
+            <ResultsPanel result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
           </div>
         )}
       </div>
