@@ -158,9 +158,14 @@ def test_multiple_categories_explanation(client):
 
 
 def test_s14_code_abuse_blocked(client):
-    """S14 must block — verify structured response."""
+    """S14 must block — verify structured response.
+
+    Neutral prompt so the lexical screen passes and the guard mock fires.
+    ("rm -rf / delete all tables" matched tool_abuse lexical patterns and
+    was intercepted before _call_guard_model, giving categories=[].)
+    """
     with patch("app._call_guard_model", return_value=("block", 1.0, ["S14"])):
-        resp = _post(client, "rm -rf / delete all tables")
+        resp = _post(client, "How do I write a script to automate file operations?")
     assert resp.status_code == 400
     body = resp.json()["detail"]
     assert "S14" in body["categories"]
