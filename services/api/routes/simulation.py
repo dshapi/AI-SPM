@@ -19,6 +19,7 @@ Event flow:
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
 import sys
@@ -88,9 +89,44 @@ class GarakSimRequest(BaseModel):
 
 # ── Background workers ───────────────────────────────────────────────────────
 
+async def _ws_wait_for_connection(session_id: str, timeout_s: float = 2.0) -> None:
+    """
+    Block (via asyncio.sleep) until *session_id* has an active WS connection
+    registered in ConnectionManager, or until *timeout_s* seconds elapse.
+
+    This guards against the startup race where the browser initiates the WS
+    upgrade and the POST /simulate/single concurrently.  FastAPI's
+    BackgroundTasks run immediately after the response is sent, which can
+    beat the WS handshake: ConnectionManager.broadcast() silently drops events
+    for sessions with no registered connections, so the terminal event never
+    reaches the browser and `running` stays True forever.
+    """
+    import ws.session_ws as _sw
+    manager = getattr(_sw, "_manager", None)
+    if manager is None:
+        return                              # no WS layer — nothing to wait for
+    poll_interval = 0.1
+    elapsed = 0.0
+    while elapsed < timeout_s:
+        if session_id in manager.active_session_ids:
+            return                          # connection registered — safe to emit
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+    log.warning(
+        "simulation: WS connection not established after %.1fs for session %s — "
+        "proceeding anyway (events may be lost if client is not connected)",
+        timeout_s, session_id,
+    )
+
+
 async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                               execution_mode: str) -> None:
     """Run prompt through PSS; emit simulation events via WS (direct) and Kafka."""
+    # Wait for the browser's WS connection to be registered before emitting
+    # any events.  Without this guard the background task races ahead of the
+    # WS handshake and all events are silently dropped by ConnectionManager.
+    await _ws_wait_for_connection(session_id)
+
     app_mod = sys.modules.get("app")
     if app_mod is None:
         log.error("simulation: app module not found")
@@ -202,6 +238,9 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
     without Kafka the frontend never received a terminal event and
     `running` stayed True forever.
     """
+    # Same startup race guard as _run_single_prompt — see that function.
+    await _ws_wait_for_connection(session_id)
+
     app_mod = sys.modules.get("app")
     producer = getattr(app_mod, "_producer", None) if app_mod else None
 
