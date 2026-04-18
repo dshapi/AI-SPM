@@ -29,6 +29,9 @@ from pydantic import BaseModel
 log = logging.getLogger("api.simulation")
 router = APIRouter()
 
+from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
+_explainer = _PolicyExplainer()
+
 
 # ── Request schemas ──────────────────────────────────────────────────────────
 
@@ -90,12 +93,27 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
         result = await pss.evaluate(prompt, ctx)
 
         correlation_id = str(uuid.uuid4())
+
+        # Build explanation for blocked events
+        _policy_event = {
+            "categories":     result.categories,
+            "blocked_by":     getattr(result, "blocked_by", None),
+            "reason":         result.reason or "",
+            "input_fragment": prompt[:200],
+            "decision":       "deny" if result.is_blocked else "allow",
+        }
+        _explanation = _explainer.explain(_policy_event) if result.is_blocked else None
+
         if result.is_blocked:
             if producer:
-                publish_blocked(producer, session_id=session_id,
-                                categories=result.categories,
-                                decision_reason=result.reason or "blocked",
-                                correlation_id=correlation_id)
+                publish_blocked(
+                    producer,
+                    session_id=session_id,
+                    categories=result.categories,
+                    decision_reason=result.reason or "blocked",
+                    correlation_id=correlation_id,
+                    explanation=_explanation.get("explanation") if _explanation else None,
+                )
         else:
             if producer:
                 publish_allowed(producer, session_id=session_id,
