@@ -329,8 +329,8 @@ export function ResultsPanel({
           </div>
         )}
 
-        {/* Only render tab panels when not in pure-spinner mode */}
-        {(!showSpinner || simEvents.length > 0) && (
+        {/* Only render tab panels when there's something to show */}
+        {!showSpinner && (result || simEvents.length > 0) && (
 
           <>
             {/* ── Summary ── */}
