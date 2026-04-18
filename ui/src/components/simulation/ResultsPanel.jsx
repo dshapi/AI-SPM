@@ -306,8 +306,26 @@ export function ResultsPanel({
       {/* Tab content area */}
       <div className="flex-1 overflow-y-auto">
 
-        {/* ── Empty / Spinner overlay (inside content, tab bar stays) ── */}
-        {showSpinner && (
+        {/* ── Timeline tab: always rendered so events appear live during run ── */}
+        {activeTab === 'Timeline' && (
+          <TimelineTab
+            simulation={simulation}
+            selectedId={selectedEvent?.id}
+            onSelect={handleSelectEvent}
+          />
+        )}
+
+        {/* ── Explainability: always visible so users can read it after clicking event ── */}
+        {activeTab === 'Explainability' && (
+          <div className="p-4">
+            {selectedEvent
+              ? <ExplainabilityPanel event={selectedEvent} />
+              : <TabEmpty label="Click a timeline event with an explanation to view details." />}
+          </div>
+        )}
+
+        {/* ── Empty / Spinner overlay for all other tabs while running ── */}
+        {showSpinner && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
           <div className="flex flex-col items-center justify-center gap-4 text-center px-8 py-16">
             <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
               <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
@@ -321,8 +339,8 @@ export function ResultsPanel({
           </div>
         )}
 
-        {/* Tab panels — always rendered (each tab owns its empty state) */}
-        {!showSpinner && (
+        {/* Tab panels for all non-Timeline/Explainability tabs — rendered after spinner clears */}
+        {!showSpinner && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
 
           <>
             {/* ── Summary ── */}
@@ -616,23 +634,6 @@ export function ResultsPanel({
               </div>
             )}
 
-            {/* ── Timeline ── */}
-            {activeTab === 'Timeline' && (
-              <div className="px-4">
-                <TimelineTab
-                  simulation={simulation}
-                  selectedId={selectedEvent?.id ?? null}
-                  onSelect={handleSelectEvent}
-                />
-              </div>
-            )}
-
-            {/* ── Explainability ── */}
-            {activeTab === 'Explainability' && (
-              <div style={{ padding: '16px' }}>
-                <ExplainabilityPanel event={selectedEvent} />
-              </div>
-            )}
           </>
         )}
 

@@ -1099,13 +1099,13 @@ export default function Simulation() {
    * Only fires when we have a live session (not the mock-fallback path).
    */
   useEffect(() => {
-    if (!sessionId || apiError || liveEvents.length === 0) return
+    if (!sessionId || apiError || simEvents.length === 0) return
 
     // WS event arrived → pull fresh structured results from backend
     fetchSessionResults(sessionId)
       .then(sr => setResult(_adaptBackendResults(sr)))
       .catch(err => console.warn('[SimLab] Results refresh failed:', err.message))
-  }, [liveEvents, sessionId, apiError])
+  }, [simEvents, sessionId, apiError])
 
   // Stop running when simulation completes or errors via stream events
   useEffect(() => {
