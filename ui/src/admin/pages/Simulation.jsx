@@ -904,7 +904,7 @@ function SimulationBuilder({
           <BuilderSectionLabel number="05">Execution Mode</BuilderSectionLabel>
           <div className="space-y-1.5">
             {EXEC_MODES.map(em => {
-              const disabled = em.id === 'replay' || em.id === 'hypothetical'
+              const disabled = (em.id !== 'live') && isGarak
               const active   = !disabled && execMode === em.id
               return (
                 <button
