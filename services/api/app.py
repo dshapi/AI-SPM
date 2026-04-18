@@ -50,6 +50,7 @@ from security.adapters.policy_adapter import OPAAdapter
 # ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
 from ws.connection_manager import ConnectionManager
 from ws.session_ws import init_ws_layer, router as ws_router
+from ws.simulation_ws import router as simulation_ws_router
 from consumers.session_event_consumer import SessionEventConsumer
 from consumers.topic_resolver import resolve_topics, configured_tenants
 
@@ -430,6 +431,9 @@ app.add_middleware(
 
 # WebSocket endpoint: /ws/sessions/{session_id}
 app.include_router(ws_router)
+
+# WebSocket simulation endpoint: /ws/simulation/{session_id}
+app.include_router(simulation_ws_router)
 
 # Simulation endpoints: /api/simulate/single, /api/simulate/garak
 app.include_router(simulation_router)
