@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ActionPanel }         from '../../findings/actions/ActionPanel.jsx'
 import { getActionsForFinding } from '../../findings/actions/actionRegistry.js'
@@ -971,21 +971,25 @@ export default function Alerts() {
   const { setSearch, setSeverity, setStatus, setTimeRange, setMinRisk, setHighRiskOnly } = setters
 
   // ── API filters (passed to hook) ───────────────────────────────────────────
-  function timeRangeToFromTime(range) {
-    const hours = { 'Last 1h': 1, 'Last 24h': 24, 'Last 7d': 168, 'Last 30d': 720 }[range]
-    if (!hours) return undefined
-    return new Date(Date.now() - hours * 3_600_000).toISOString()
-  }
-
-  const apiFilters = {
-    severity:      highRiskOnly ? 'high' : severity,  // handled client-side too
-    status,
-    min_risk_score: minRisk ? parseFloat(minRisk) : undefined,
-    from_time:     timeRangeToFromTime(timeRange),
-    sort_by:       'created_at',
-    limit:          50,
-    offset:         0,
-  }
+  // Memoised so the object reference only changes when a filter value changes.
+  // Without useMemo, timeRangeToFromTime() would call Date.now() on every render,
+  // producing a new ISO string each time → new filterKey → infinite refetch loop.
+  const apiFilters = useMemo(() => {
+    function timeRangeToFromTime(range) {
+      const hours = { 'Last 1h': 1, 'Last 24h': 24, 'Last 7d': 168, 'Last 30d': 720 }[range]
+      if (!hours) return undefined
+      return new Date(Date.now() - hours * 3_600_000).toISOString()
+    }
+    return {
+      severity:      highRiskOnly ? 'high' : severity,
+      status,
+      min_risk_score: minRisk ? parseFloat(minRisk) : undefined,
+      from_time:     timeRangeToFromTime(timeRange),
+      sort_by:       'created_at',
+      limit:         50,
+      offset:        0,
+    }
+  }, [highRiskOnly, severity, status, minRisk, timeRange])
 
   const { findings, total, loading, error, refetch, markStatus, attachCase } = useFindings(apiFilters)
 
