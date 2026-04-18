@@ -209,12 +209,14 @@ export function ResultsPanel({
 
   const { state, events: simEvents = [], mode } = simulation
 
-  // Auto-switch to Timeline when simulation starts streaming
+  // Auto-switch to Timeline only for Garak runs (multi-probe, event-heavy).
+  // Single-prompt runs stay on the current tab; the result effect below
+  // will switch to Decision Trace once the result arrives.
   useEffect(() => {
-    if (state === 'connecting' || state === 'running') {
+    if (mode === 'garak' && (state === 'connecting' || state === 'running')) {
       setActiveTab('Timeline')
     }
-  }, [state])
+  }, [state, mode])
 
   // Auto-switch to Decision Trace when static result arrives
   useEffect(() => {

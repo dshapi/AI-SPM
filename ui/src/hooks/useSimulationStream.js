@@ -21,23 +21,60 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionSocket } from './useSessionSocket'
 
 /**
+ * Maps backend event_type → timeline stage used by PHASE_MAP in phaseGrouping.js.
+ *
+ * Backend emits dot-namespaced types (e.g. "prompt.received", "risk.calculated",
+ * "policy.decision") — NOT "simulation.{stage}".  This table normalises them
+ * into the stage values the timeline UI understands.
+ */
+const EVENT_TYPE_STAGE = {
+  'prompt.received':  'started',
+  'posture.enriched': 'progress',
+  'risk.scored':      'progress',
+  'risk.calculated':  'progress',
+}
+
+/**
  * Parse a WsEvent into a SimulationEvent.
- * event_type format: "simulation.{stage}" (e.g. "simulation.started", "simulation.blocked")
+ *
+ * Handles two event_type conventions:
+ *   Legacy assumption: "simulation.{stage}" (e.g. "simulation.blocked")
+ *   Real backend:      "{category}.{action}" (e.g. "policy.decision")
+ *
+ * For "policy.decision" the stage is driven by payload.decision so that
+ * the event lands in the correct timeline phase (blocked/allowed).
  */
 function toSimulationEvent(wsEvent) {
-  const parts = (wsEvent.event_type || '').split('.')
-  // parts[0] = "simulation", parts[1] = stage
-  const stage  = parts[1] || 'unknown'
-  const status = parts[2] || stage
+  const et      = wsEvent.event_type || ''
+  const payload = wsEvent.payload    || {}
+
+  let stage
+
+  if (et === 'policy.decision') {
+    // Decision is "block" | "allow" | "escalate" — map to timeline stage
+    const dec = (payload.decision || '').toLowerCase()
+    if      (dec === 'block')    stage = 'blocked'
+    else if (dec === 'allow')    stage = 'allowed'
+    else if (dec === 'escalate') stage = 'progress'  // escalated → show in Injection phase
+    else                         stage = 'progress'
+  } else if (EVENT_TYPE_STAGE[et]) {
+    stage = EVENT_TYPE_STAGE[et]
+  } else if (et.startsWith('simulation.')) {
+    // Legacy/future "simulation.{stage}" convention
+    stage = et.split('.')[1] || 'progress'
+  } else {
+    // Unknown event type — show in Injection phase as generic progress
+    stage = 'progress'
+  }
 
   return {
-    id:             `${wsEvent.event_type}:${wsEvent.correlation_id || ''}:${wsEvent.timestamp}`,
-    event_type:     wsEvent.event_type,
+    id:             `${et}:${wsEvent.correlation_id || ''}:${wsEvent.timestamp}`,
+    event_type:     et,
     stage,
-    status,
+    status:         stage,
     timestamp:      wsEvent.timestamp,
     source_service: wsEvent.source_service,
-    details:        wsEvent.payload || {},
+    details:        payload,
   }
 }
 
@@ -46,13 +83,13 @@ export function useSimulationStream() {
   const [simEvents, setSimEvents] = useState([])
   const seenRef = useRef(new Set())
 
-  // Transform incoming WsEvents → SimulationEvents, filtering to simulation.* only
+  // Transform incoming WsEvents → SimulationEvents
   useEffect(() => {
     const latest = liveEvents[liveEvents.length - 1]
     if (!latest) return
-    if (!latest.event_type?.startsWith('simulation.')) return
 
-    // Dedup key includes timestamp to allow multiple progress events
+    // Dedup key: type + correlation + timestamp — allows multiple events of the
+    // same type (e.g. several policy.decision events in a Garak multi-probe run)
     const key = `${latest.event_type}:${latest.correlation_id || ''}:${latest.timestamp}`
     if (seenRef.current.has(key)) return
     seenRef.current.add(key)
