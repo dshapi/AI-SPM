@@ -19,7 +19,7 @@ from typing import Optional
 from fastapi import APIRouter
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
-from models.ws_event import WsConnectedFrame, WsPingFrame
+from models.ws_event import WsConnectedFrame, WsEvent, WsPingFrame
 import ws.session_ws as _session_ws   # singletons populated by lifespan
 
 log = logging.getLogger("api.ws.simulation")
@@ -73,11 +73,27 @@ async def simulation_events_ws(websocket: WebSocket, session_id: str) -> None:
             if websocket.client_state != WebSocketState.CONNECTED:
                 break
 
+            # Validate against the WsEvent contract before forwarding
             try:
-                await websocket.send_text(event_dict)
-                log.debug(
-                    "simulation_event_sent session_id=%s",
+                validated = WsEvent(**event_dict)
+            except Exception as exc:
+                log.warning(
+                    "simulation_event_validation_error session_id=%s error=%s payload=%s",
                     session_id,
+                    exc,
+                    event_dict,
+                )
+                continue
+
+            if websocket.client_state != WebSocketState.CONNECTED:
+                break
+
+            try:
+                await websocket.send_text(validated.model_dump_json())
+                log.debug(
+                    "simulation_event_sent session_id=%s event_type=%s",
+                    session_id,
+                    validated.event_type,
                 )
             except Exception as exc:
                 log.info(
