@@ -841,7 +841,7 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
                 href: finding.hasRealAsset
                   ? `/admin/inventory?asset=${encodeURIComponent(finding.asset.name)}`
                   : '/admin/inventory',
-                disabled: false,
+                disabled: !finding.asset?.name,
               },
               {
                 label:  'Open Lineage Graph',
@@ -851,7 +851,7 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
                 href: finding.hasRealAsset
                   ? `/admin/lineage?asset=${encodeURIComponent(finding.asset.name)}&finding_id=${finding.id}`
                   : `/admin/lineage?finding_id=${finding.id}`,
-                disabled: false,
+                disabled: !finding.asset?.name,
               },
               {
                 label:  'View Runtime Session',
@@ -900,6 +900,20 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
           />
           {statusError && (
             <p className="text-[11px] text-red-500 text-center">{statusError}</p>
+          )}
+          {!isResolved && finding.status !== 'Investigating' && (
+            <Button
+              variant="outline"
+              size="md"
+              disabled={statusPending}
+              onClick={() => handleMarkStatus('investigating')}
+              className="w-full h-9 text-[12px] gap-2 justify-center"
+            >
+              {statusPending
+                ? <Loader2 size={13} className="animate-spin" />
+                : <Shield size={13} />}
+              Investigate
+            </Button>
           )}
           <Button
             size="md"
