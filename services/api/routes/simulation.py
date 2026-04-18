@@ -179,7 +179,7 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
 
 # ── Route handlers ───────────────────────────────────────────────────────────
 
-@router.post("/api/simulate/single")
+@router.post("/simulate/single")
 async def simulate_single(req: SinglePromptSimRequest,
                            background_tasks: BackgroundTasks):
     """Run a single prompt through the security pipeline and stream events."""
@@ -193,7 +193,7 @@ async def simulate_single(req: SinglePromptSimRequest,
     return {"session_id": req.session_id, "status": "started"}
 
 
-@router.post("/api/simulate/garak")
+@router.post("/simulate/garak")
 async def simulate_garak(req: GarakSimRequest,
                           background_tasks: BackgroundTasks):
     """Start a Garak scan and stream per-probe events."""
