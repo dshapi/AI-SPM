@@ -1,30 +1,82 @@
+/**
+ * ResultsPanel.jsx
+ * ────────────────
+ * Production-grade simulation results panel.
+ *
+ * Design principles
+ * ─────────────────
+ * • Consumes SimulationState directly from useSimulationState — no separate
+ *   result/running/sessionId props.
+ * • Tabs are ALWAYS visible regardless of status (idle, running, completed,
+ *   failed). Each tab renders its own appropriate empty/loading/error state.
+ * • Summary, Timeline, and Explainability are extracted into dedicated
+ *   sub-components. All other tab panels live inline here.
+ * • Supports progressive rendering: Timeline and Summary update live as
+ *   WebSocket events arrive during a running simulation.
+ * • Extensible for Garak: probe grouping, multi-attack coverage, and
+ *   per-probe results are already wired in.
+ *
+ * Props
+ * ─────
+ *   simulationState  SimulationState      — from useSimulationState()
+ *   mode             'single'|'garak'     — determines tab set + grouping
+ *   attackType       string               — for display in header/config
+ *   config           object | null        — simulation config object
+ *   apiError         string | null        — non-null → "Simulated" fallback badge
+ */
 import { useState, useEffect } from 'react'
 import {
-  Target, RefreshCw, FlaskConical, Clock, Info,
+  Target, Clock,
   AlertTriangle, XCircle, Shield, ArrowRight,
-  CheckCircle2, AlertCircle, Copy, ChevronRight,
+  CheckCircle2, AlertCircle, Copy, Info,
+  ChevronRight, RefreshCw,
 } from 'lucide-react'
-import { cn }                    from '../../lib/utils.js'
-import { Badge }                 from '../ui/Badge.jsx'
-import { Button }                from '../ui/Button.jsx'
-import { ExplainabilityPanel }   from '../ExplainabilityPanel.jsx'
-import { RiskTrend }             from './RiskTrend.jsx'
-import { PhaseSection }          from './PhaseSection.jsx'
+import { cn }               from '../../lib/utils.js'
+import { Badge }            from '../ui/Badge.jsx'
+import { Button }           from '../ui/Button.jsx'
+import { Summary }          from './Summary.jsx'
+import { Timeline }         from './Timeline.jsx'
+import { ExplainabilityTab } from './Explainability.jsx'
+import { TabEmpty }         from './EmptyState.jsx'
+import { RiskTrend }        from './RiskTrend.jsx'
+import { PhaseSection }     from './PhaseSection.jsx'
 import { groupByPhase, groupByPhaseAndProbe } from '../../lib/phaseGrouping.js'
 
-// ── Constants ──────────────────────────────────────────────────────────────────
+// ── Tab configuration ─────────────────────────────────────────────────────────
 
-const BASE_TABS  = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability']
+const BASE_TABS  = [
+  'Summary',
+  'Decision Trace',
+  'Output',
+  'Policy Impact',
+  'Risk Analysis',
+  'Recommendations',
+  'Timeline',
+  'Explainability',
+]
 const GARAK_TABS = ['Probe Results', 'Coverage']
 
+// ── Config maps ───────────────────────────────────────────────────────────────
+
 const VERDICT_CFG = {
-  blocked:   { label: 'BLOCKED',   icon: XCircle,       bg: 'bg-red-50',     border: 'border-red-200',    txt: 'text-red-700',    dot: 'bg-red-500'    },
-  escalated: { label: 'ESCALATED', icon: AlertTriangle, bg: 'bg-orange-50',  border: 'border-orange-200', txt: 'text-orange-700', dot: 'bg-orange-500' },
-  flagged:   { label: 'FLAGGED',   icon: AlertTriangle, bg: 'bg-amber-50',   border: 'border-amber-200',  txt: 'text-amber-700',  dot: 'bg-amber-500'  },
-  allowed:   { label: 'ALLOWED',   icon: CheckCircle2,  bg: 'bg-emerald-50', border: 'border-emerald-200',txt: 'text-emerald-700',dot: 'bg-emerald-500'},
+  blocked: {
+    label: 'BLOCKED',   icon: XCircle,       bg: 'bg-red-50',     border: 'border-red-200',
+    txt:   'text-red-700',    dot: 'bg-red-500',
+  },
+  escalated: {
+    label: 'ESCALATED', icon: AlertTriangle, bg: 'bg-orange-50',  border: 'border-orange-200',
+    txt:   'text-orange-700', dot: 'bg-orange-500',
+  },
+  flagged: {
+    label: 'FLAGGED',   icon: AlertTriangle, bg: 'bg-amber-50',   border: 'border-amber-200',
+    txt:   'text-amber-700',  dot: 'bg-amber-500',
+  },
+  allowed: {
+    label: 'ALLOWED',   icon: CheckCircle2,  bg: 'bg-emerald-50', border: 'border-emerald-200',
+    txt:   'text-emerald-700',dot: 'bg-emerald-500',
+  },
 }
 
-// Status → trace display
 const TRACE_CFG = {
   ok:       { label: 'OK'       },
   warn:     { label: 'Warn'     },
@@ -33,7 +85,6 @@ const TRACE_CFG = {
   flagged:  { label: 'Flagged'  },
 }
 
-// Policy action badge mapping
 const POLICY_ACTION_CFG = {
   BLOCK:    { badge: 'critical', icon: XCircle       },
   ESCALATE: { badge: 'high',     icon: AlertTriangle },
@@ -42,9 +93,11 @@ const POLICY_ACTION_CFG = {
   SKIP:     { badge: 'neutral',  icon: ArrowRight    },
 }
 
-const STAGE_RISK = { started: 10, progress: 50, blocked: 90, allowed: 30, error: 70, completed: 10 }
+const STAGE_RISK = {
+  started: 10, progress: 50, blocked: 90, allowed: 30, error: 70, completed: 10,
+}
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function getRiskScore(event) {
   const explicit = event?.details?.risk_score
@@ -60,16 +113,18 @@ function SectionLabel({ children, className }) {
   )
 }
 
-function TabEmpty({ label = 'No data yet' }) {
-  return (
-    <div className="flex items-center justify-center py-16 px-8 text-center">
-      <p className="text-[12px] text-gray-400">{label}</p>
-    </div>
-  )
+/** Format elapsed duration for display in the header. */
+function formatDuration(startedAt, completedAt) {
+  if (!startedAt) return null
+  const ms = (completedAt ?? Date.now()) - startedAt
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
-// ── DecisionTrace ──────────────────────────────────────────────────────────────
-// Restored from bbdff80 — vertical connector line with colour-coded step cards.
+// ── DecisionTrace ─────────────────────────────────────────────────────────────
+// Vertical connector-line rendering of a policy decision trace.
+// Restored from bbdff80 and kept here (not extracted) since it is tightly
+// coupled to the TRACE_CFG colour mapping above.
 
 function DecisionTrace({ trace }) {
   return (
@@ -109,7 +164,9 @@ function DecisionTrace({ trace }) {
             {/* Number + vertical connector */}
             <div className="flex flex-col items-center shrink-0">
               <div className={cn('w-6 h-6 rounded-full flex items-center justify-center text-white shrink-0 mt-2.5', numBg)}>
-                <span className="text-[9px] font-bold tabular-nums">{String(step.step).padStart(2, '0')}</span>
+                <span className="text-[9px] font-bold tabular-nums">
+                  {String(step.step).padStart(2, '0')}
+                </span>
               </div>
               {!isLast && (
                 <div className="flex-1 mt-1.5 mb-1.5 w-px border-l-2 border-dashed border-gray-200" />
@@ -123,7 +180,9 @@ function DecisionTrace({ trace }) {
               cardAccent, cardBg,
             )}>
               <div className="flex items-start justify-between gap-2 mb-1.5">
-                <span className="text-[11.5px] font-semibold text-gray-800 leading-snug">{step.label}</span>
+                <span className="text-[11.5px] font-semibold text-gray-800 leading-snug">
+                  {step.label}
+                </span>
                 <div className="flex items-center gap-1.5 shrink-0">
                   <span className={statusChip}>{scfg.label}</span>
                   <span className="text-[9.5px] text-gray-400 font-mono">{step.ts}</span>
@@ -140,13 +199,13 @@ function DecisionTrace({ trace }) {
   )
 }
 
-// ── Status indicators ──────────────────────────────────────────────────────────
-// Restored from bbdff80 with per-state chips and title attributes.
+// ── StatusChip ────────────────────────────────────────────────────────────────
+// Live / Connecting / Stream-ended chip shown in the header.
 
-function StatusChip({ state, connectionStatus, sessionId, apiError }) {
+function StatusChip({ status, connectionStatus, sessionId, apiError }) {
   if (!sessionId || apiError) return null
 
-  if (connectionStatus === 'connected' && state === 'running') {
+  if (connectionStatus === 'connected' && status === 'running') {
     return (
       <span
         title={`Live stream · session: ${sessionId}`}
@@ -157,6 +216,7 @@ function StatusChip({ state, connectionStatus, sessionId, apiError }) {
       </span>
     )
   }
+
   if (connectionStatus === 'connecting' || connectionStatus === 'reconnecting') {
     return (
       <span
@@ -168,6 +228,7 @@ function StatusChip({ state, connectionStatus, sessionId, apiError }) {
       </span>
     )
   }
+
   if (connectionStatus === 'closed') {
     return (
       <span
@@ -179,6 +240,7 @@ function StatusChip({ state, connectionStatus, sessionId, apiError }) {
       </span>
     )
   }
+
   if (connectionStatus === 'error') {
     return (
       <span
@@ -190,64 +252,11 @@ function StatusChip({ state, connectionStatus, sessionId, apiError }) {
       </span>
     )
   }
+
   return null
 }
 
-// ── Timeline tab ───────────────────────────────────────────────────────────────
-// Uses PhaseSection-based grouped rendering (upgrade over bbdff80's flat list).
-
-function TimelineTab({ simulation, selectedId, onSelect }) {
-  const { events = [], mode, state } = simulation
-  const isGarak = mode === 'garak'
-
-  const statusLabel = state === 'running'
-    ? <span className="inline-flex items-center gap-1.5 text-[11px] text-emerald-600 font-semibold">
-        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
-        LIVE
-      </span>
-    : state === 'connecting'
-      ? <span className="text-[11px] text-amber-600 font-medium">Connecting…</span>
-      : state === 'completed'
-        ? <span className="text-[11px] text-gray-400">Completed</span>
-        : <span className="text-[11px] text-gray-400">Idle</span>
-
-  if (events.length === 0) {
-    return (
-      <div className="p-4">
-        <div className="mb-3">{statusLabel}</div>
-        <p className="text-[12px] text-gray-400">
-          {state === 'idle' ? 'Run a simulation to see events here.' : 'No events yet…'}
-        </p>
-      </div>
-    )
-  }
-
-  const grouped = isGarak ? groupByPhaseAndProbe(events) : groupByPhase(events)
-  const PHASE_ORDER = ['Recon', 'Injection', 'Exploitation', 'Exfiltration', 'System', 'Other']
-  const sortedPhases = [
-    ...PHASE_ORDER.filter(p => grouped[p]),
-    ...Object.keys(grouped).filter(p => !PHASE_ORDER.includes(p)),
-  ]
-
-  return (
-    <div className="p-4">
-      <div className="mb-3">{statusLabel}</div>
-      {sortedPhases.map(phase => (
-        <PhaseSection
-          key={phase}
-          phase={phase}
-          events={grouped[phase]}
-          isGarak={isGarak}
-          selectedId={selectedId}
-          onSelect={onSelect}
-          getRiskScore={getRiskScore}
-        />
-      ))}
-    </div>
-  )
-}
-
-// ── Garak Output Summary ───────────────────────────────────────────────────────
+// ── GarakOutputSummary ────────────────────────────────────────────────────────
 
 function GarakOutputSummary({ events }) {
   const probeSet = new Set(events.map(e => e.details?.probe_name).filter(Boolean))
@@ -260,10 +269,10 @@ function GarakOutputSummary({ events }) {
       <p className="text-[12px] font-bold text-gray-700 mb-3">Garak Scan Summary</p>
       <div className="grid grid-cols-2 gap-2">
         {[
-          { label: 'Probes executed', value: probeSet.size, color: 'text-gray-700' },
-          { label: 'Blocked',         value: blocked,       color: 'text-red-600'  },
-          { label: 'Allowed',         value: allowed,       color: 'text-emerald-600' },
-          { label: 'Errors',          value: errors,        color: 'text-orange-600'  },
+          { label: 'Probes executed', value: probeSet.size, color: 'text-gray-700'    },
+          { label: 'Blocked',          value: blocked,       color: 'text-red-600'     },
+          { label: 'Allowed',          value: allowed,       color: 'text-emerald-600' },
+          { label: 'Errors',           value: errors,        color: 'text-orange-600'  },
         ].map(({ label, value, color }) => (
           <div key={label} className="bg-gray-50 border border-gray-200 rounded-xl p-3">
             <div className={cn('text-[22px] font-black tabular-nums', color)}>{value}</div>
@@ -275,26 +284,33 @@ function GarakOutputSummary({ events }) {
   )
 }
 
-// ── Probe Results tab (Garak) ──────────────────────────────────────────────────
+// ── ProbeResultsTab ───────────────────────────────────────────────────────────
 
 const OUTCOME_CFG = {
-  blocked:  { label: 'Blocked',  bg: 'bg-red-50',     border: 'border-red-200',     dot: 'bg-red-500',     txt: 'text-red-700'     },
-  allowed:  { label: 'Allowed',  bg: 'bg-emerald-50', border: 'border-emerald-200', dot: 'bg-emerald-500', txt: 'text-emerald-700' },
-  progress: { label: 'Running',  bg: 'bg-amber-50',   border: 'border-amber-200',   dot: 'bg-amber-400',   txt: 'text-amber-700'   },
-  error:    { label: 'Error',    bg: 'bg-orange-50',  border: 'border-orange-200',  dot: 'bg-orange-500',  txt: 'text-orange-700'  },
+  blocked:  { label: 'Blocked', bg: 'bg-red-50',     border: 'border-red-200',     dot: 'bg-red-500',     txt: 'text-red-700'     },
+  allowed:  { label: 'Allowed', bg: 'bg-emerald-50', border: 'border-emerald-200', dot: 'bg-emerald-500', txt: 'text-emerald-700' },
+  progress: { label: 'Running', bg: 'bg-amber-50',   border: 'border-amber-200',   dot: 'bg-amber-400',   txt: 'text-amber-700'   },
+  error:    { label: 'Error',   bg: 'bg-orange-50',  border: 'border-orange-200',  dot: 'bg-orange-500',  txt: 'text-orange-700'  },
 }
 
-function ProbeResultsTab({ events, state }) {
+function ProbeResultsTab({ events, status }) {
   if (events.length === 0) {
-    return <TabEmpty label={state === 'idle' ? 'Run a Garak scan to see per-probe results.' : 'Waiting for probe results…'} />
+    return (
+      <TabEmpty
+        label={status === 'idle'
+          ? 'Run a Garak scan to see per-probe results.'
+          : 'Waiting for probe results…'}
+      />
+    )
   }
 
+  // Reduce events to the highest-priority outcome per probe name
+  const PRIORITY = { blocked: 3, allowed: 3, error: 2, progress: 1 }
   const probeMap = new Map()
   for (const ev of events) {
     const name = ev.details?.probe_name
     if (!name) continue
     const existing = probeMap.get(name)
-    const PRIORITY = { blocked: 3, allowed: 3, error: 2, progress: 1 }
     if (!existing || (PRIORITY[ev.stage] ?? 0) >= (PRIORITY[existing.stage] ?? 0)) {
       probeMap.set(name, ev)
     }
@@ -323,14 +339,17 @@ function ProbeResultsTab({ events, state }) {
         ))}
       </div>
 
-      {/* Probe list */}
+      {/* Per-probe list */}
       <div className="space-y-1.5">
         {probes.map(([probeName, ev]) => {
           const cfg   = OUTCOME_CFG[ev.stage] ?? OUTCOME_CFG.progress
           const step  = ev.details?.step
           const total = ev.details?.total
           return (
-            <div key={probeName} className={cn('flex items-center gap-3 rounded-xl border px-3 py-2.5', cfg.bg, cfg.border)}>
+            <div
+              key={probeName}
+              className={cn('flex items-center gap-3 rounded-xl border px-3 py-2.5', cfg.bg, cfg.border)}
+            >
               <span className={cn('w-2 h-2 rounded-full shrink-0', cfg.dot)} />
               <div className="flex-1 min-w-0">
                 <p className="text-[11.5px] font-semibold text-gray-800 truncate">{probeName}</p>
@@ -342,7 +361,10 @@ function ProbeResultsTab({ events, state }) {
                 {step != null && total != null && (
                   <span className="text-[9.5px] text-gray-400 font-mono">{step}/{total}</span>
                 )}
-                <span className={cn('text-[10px] font-bold px-2 py-0.5 rounded-full border', cfg.bg, cfg.border, cfg.txt)}>
+                <span className={cn(
+                  'text-[10px] font-bold px-2 py-0.5 rounded-full border',
+                  cfg.bg, cfg.border, cfg.txt,
+                )}>
                   {cfg.label}
                 </span>
               </div>
@@ -354,19 +376,19 @@ function ProbeResultsTab({ events, state }) {
   )
 }
 
-// ── Coverage tab (Garak) ───────────────────────────────────────────────────────
+// ── CoverageTab ───────────────────────────────────────────────────────────────
 
 const PROBE_CATEGORY_MAP = {
-  'injection':    'Prompt Injection',
-  'jailbreak':    'Jailbreak',
-  'exfil':        'Exfiltration',
-  'pii':          'PII Leakage',
-  'hallucination':'Hallucination',
-  'toxicity':     'Toxicity',
-  'dan':          'DAN / Role-play',
-  'encoding':     'Encoding Bypass',
-  'continuation': 'Continuation Attack',
-  'default':      'General',
+  injection:    'Prompt Injection',
+  jailbreak:    'Jailbreak',
+  exfil:        'Exfiltration',
+  pii:          'PII Leakage',
+  hallucination:'Hallucination',
+  toxicity:     'Toxicity',
+  dan:          'DAN / Role-play',
+  encoding:     'Encoding Bypass',
+  continuation: 'Continuation Attack',
+  default:      'General',
 }
 
 function inferCategory(probeName = '') {
@@ -377,22 +399,31 @@ function inferCategory(probeName = '') {
   return 'Other'
 }
 
-function CoverageTab({ events, state }) {
+function CoverageTab({ events, status }) {
   if (events.length === 0) {
-    return <TabEmpty label={state === 'idle' ? 'Run a Garak scan to see attack coverage.' : 'Waiting for probe data…'} />
+    return (
+      <TabEmpty
+        label={status === 'idle'
+          ? 'Run a Garak scan to see attack coverage.'
+          : 'Waiting for probe data…'}
+      />
+    )
   }
 
-  const catMap = new Map()
+  // Deduplicate by probe name, keeping the highest-priority stage
+  const PRIORITY = { blocked: 3, allowed: 3, error: 2, progress: 1 }
   const seenProbes = new Map()
   for (const ev of events) {
     const name = ev.details?.probe_name
     if (!name) continue
-    const PRIORITY = { blocked: 3, allowed: 3, error: 2, progress: 1 }
     const existing = seenProbes.get(name)
-    if (!existing || (PRIORITY[ev.stage] ?? 0) >= (PRIORITY[existing.stage] ?? 0)) {
+    if (!existing || (PRIORITY[ev.stage] ?? 0) >= (PRIORITY[existing] ?? 0)) {
       seenProbes.set(name, ev.stage)
     }
   }
+
+  // Group by attack category
+  const catMap = new Map()
   for (const [probeName, stage] of seenProbes) {
     const cat   = inferCategory(probeName)
     const entry = catMap.get(cat) ?? { total: 0, blocked: 0 }
@@ -408,7 +439,9 @@ function CoverageTab({ events, state }) {
     <div className="p-4 space-y-3">
       <div className="flex items-center justify-between mb-1">
         <SectionLabel>Attack Category Coverage</SectionLabel>
-        <span className="text-[10px] text-gray-400">{seenProbes.size} probe{seenProbes.size !== 1 ? 's' : ''} run</span>
+        <span className="text-[10px] text-gray-400">
+          {seenProbes.size} probe{seenProbes.size !== 1 ? 's' : ''} run
+        </span>
       </div>
       {categories.map(([cat, { total, blocked }]) => {
         const pct      = total > 0 ? Math.round((blocked / total) * 100) : 0
@@ -436,51 +469,51 @@ function CoverageTab({ events, state }) {
   )
 }
 
-// ── Main ResultsPanel ──────────────────────────────────────────────────────────
+// ── Main ResultsPanel ─────────────────────────────────────────────────────────
 
-/**
- * ResultsPanel
- * ─────────────
- * Props
- * ─────
- *   simulation    { state: 'idle'|'connecting'|'running'|'completed'|'error', events: SimulationEvent[], mode: 'single'|'garak'|null }
- *   result        mock/live result object | null
- *   attackType    string
- *   config        config object  (agent, model, environment, execMode, attackType)
- *   running       boolean
- *   apiError      string | null
- *   sessionId     string | null
- *   connectionStatus   string (from useSimulationStream)
- */
 export function ResultsPanel({
-  simulation = { state: 'idle', events: [], mode: null },
-  result,
+  simulationState,
+  mode        = 'single',
   attackType,
   config,
-  running,
   apiError,
-  sessionId,
-  connectionStatus,
 }) {
+  // ── Destructure simulationState (safe-default so the panel never crashes) ───
+  const {
+    status           = 'idle',
+    steps            = [],
+    partialResults   = [],
+    finalResults,
+    error,
+    startedAt,
+    completedAt,
+    sessionId,
+    simEvents        = [],
+    connectionStatus = 'idle',
+  } = simulationState ?? {}
+
   const [activeTab,     setActiveTab]     = useState('Summary')
   const [copied,        setCopied]        = useState(false)
   const [selectedEvent, setSelectedEvent] = useState(null)
 
-  const { state, events: simEvents = [], mode, steps = [], simError } = simulation
+  // ── Derived flags ───────────────────────────────────────────────────────────
   const isGarak    = mode === 'garak'
   const RESULT_TABS = isGarak ? [...BASE_TABS, ...GARAK_TABS] : BASE_TABS
 
+  // Data normalization: finalResults is the built result object; may be null
+  const result = finalResults
+
   // ── Auto-switch logic ────────────────────────────────────────────────────────
-  // Garak: switch to Timeline when the stream opens (many live probe events).
-  // Built-in (single-prompt): stay on Summary — it's the most useful landing tab.
+  // Garak: jump to Timeline when stream opens — many live probe events.
+  // Single: stay on Summary — spinner shows progress before result arrives.
   useEffect(() => {
-    if (state === 'connecting' || state === 'running') {
+    if (status === 'running') {
       if (isGarak) setActiveTab('Timeline')
       else setActiveTab('Summary')
     }
-  }, [state, isGarak])
+  }, [status, isGarak])
 
-  // When results arrive: Garak → Decision Trace; single-prompt → Summary.
+  // When result arrives: Garak → Decision Trace; single → Summary.
   useEffect(() => {
     if (result) {
       if (isGarak) setActiveTab('Decision Trace')
@@ -488,88 +521,35 @@ export function ResultsPanel({
     }
   }, [result, isGarak])
 
-  // Clear selected event on new run.
+  // Clear selected event at the start of a new run.
   useEffect(() => {
     if (simEvents.length === 0) setSelectedEvent(null)
   }, [simEvents])
 
+  // ── Event selection handler ─────────────────────────────────────────────────
   const handleSelectEvent = (ev) => {
     setSelectedEvent(ev)
+    // Auto-jump to Explainability if the event carries an explanation payload
     if (ev?.details?.explanation) setActiveTab('Explainability')
   }
 
-  const vcfg = result ? (VERDICT_CFG[result.verdict] ?? VERDICT_CFG.allowed) : null
+  // ── Header state values ─────────────────────────────────────────────────────
+  const vcfg     = result ? (VERDICT_CFG[result.verdict] ?? VERDICT_CFG.allowed) : null
+  const duration = formatDuration(startedAt, completedAt)
 
-  // Whether the spinner should gate non-Timeline/non-Explainability tabs.
-  // Restored from bbdff80: spinner shows while HTTP is in flight OR WS is connecting.
-  const isConnecting = connectionStatus === 'connecting' || connectionStatus === 'reconnecting'
-  const showSpinner  = running || (isConnecting && !result)
-
-  // ── Empty state (no result, no events, not running) ──────────────────────────
-  // Restored from bbdff80: show a proper idle panel before any run.
-  const isIdle = !result && !running && simEvents.length === 0 && state === 'idle'
-
-  if (isIdle) {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8">
-          <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center">
-            <FlaskConical size={18} className="text-gray-400" />
-          </div>
-          <div>
-            <p className="text-[13px] font-medium text-gray-500">No simulation run yet</p>
-            <p className="text-[11px] text-gray-400 mt-1">Configure an attack type and click Run Simulation to see results here.</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Failed / error state ─────────────────────────────────────────────────────
-  const isFailed = state === 'error' || (simError && !result && !running && simEvents.length === 0)
-  if (isFailed) {
-    return (
-      <div className="flex flex-col h-full">
-        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
-          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-50 border border-red-200 text-[10px] font-bold text-red-700 shrink-0">
-            Failed
-          </span>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8">
-          <div className="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center">
-            <AlertCircle size={18} className="text-red-400" />
-          </div>
-          <div>
-            <p className="text-[13px] font-medium text-gray-700">Simulation failed</p>
-            <p className="text-[11px] text-gray-400 mt-1">{simError || 'An unexpected error occurred. Check the console for details.'}</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ── Full panel with tabs ─────────────────────────────────────────────────────
-  // Always rendered once we leave the isIdle state.  Tabs are visible from the
-  // moment the simulation starts — Timeline shows live events as they arrive,
-  // and result-dependent tabs (Summary, Decision Trace, etc.) show their content
-  // once the result is built from the terminal WS event.
-
+  // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col h-full overflow-hidden">
 
-      {/* Panel header */}
+      {/* ── Panel header ── */}
       <div className="h-10 px-4 flex items-center justify-between border-b border-gray-100 shrink-0">
         <div className="flex items-center gap-2 min-w-0">
           <Target size={13} className="text-gray-400 shrink-0" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700 shrink-0">Results</span>
+          <span className="text-[12px] font-semibold text-gray-700 shrink-0">
+            Simulation Results
+          </span>
 
-          {/* Verdict chip — only when result exists */}
+          {/* Verdict chip — only once a result is available */}
           {vcfg && (
             <span className={cn(
               'inline-flex items-center gap-1 px-2 py-0.5 rounded-full border text-[10px] font-bold shrink-0',
@@ -580,13 +560,22 @@ export function ResultsPanel({
             </span>
           )}
 
+          {/* Live / Connecting / Stream-ended chip */}
           <StatusChip
-            state={state}
+            status={status}
             connectionStatus={connectionStatus}
             sessionId={sessionId}
             apiError={apiError}
           />
 
+          {/* Step count badge */}
+          {steps.length > 0 && (
+            <span className="text-[9.5px] text-gray-400 font-mono shrink-0">
+              {steps.length} step{steps.length !== 1 ? 's' : ''}
+            </span>
+          )}
+
+          {/* Simulated (API error / mock fallback) badge */}
           {apiError && (
             <span
               title={`API error: ${apiError}`}
@@ -598,15 +587,16 @@ export function ResultsPanel({
           )}
         </div>
 
-        {result && (
-          <div className="flex items-center gap-2 text-[10px] text-gray-400 shrink-0">
+        {/* Duration */}
+        {duration && (
+          <div className="flex items-center gap-1.5 text-[10px] text-gray-400 shrink-0">
             <Clock size={10} strokeWidth={2} />
-            <span className="font-mono">{result.executionMs}ms</span>
+            <span className="font-mono">{duration}</span>
           </div>
         )}
       </div>
 
-      {/* Tab bar — always rendered once we're in the full-panel mode */}
+      {/* ── Tab bar — ALWAYS rendered, regardless of status ── */}
       <div className="flex items-center gap-0 border-b border-gray-100 px-4 shrink-0 overflow-x-auto">
         {RESULT_TABS.map(tab => (
           <button
@@ -621,469 +611,387 @@ export function ResultsPanel({
             )}
           >
             {tab}
-            {tab === 'Timeline' && steps.length > 0 && (
+            {/* Event count pill on Timeline tab */}
+            {tab === 'Timeline' && simEvents.length > 0 && (
               <span className="px-1 py-0.5 rounded text-[9px] bg-blue-100 text-blue-600 font-bold tabular-nums leading-none">
-                {steps.length}
+                {simEvents.length}
               </span>
             )}
           </button>
         ))}
       </div>
 
-      {/* Tab content */}
+      {/* ── Tab content ── */}
       <div className="flex-1 overflow-y-auto">
 
-        {/* ── Timeline: always rendered so events appear live ── */}
-        {activeTab === 'Timeline' && (
-          <TimelineTab
-            simulation={simulation}
-            selectedId={selectedEvent?.id}
-            onSelect={handleSelectEvent}
-            steps={steps}
+        {/* Summary — delegates to Summary.jsx (handles all 4 states) */}
+        {activeTab === 'Summary' && (
+          <Summary
+            simulationState={simulationState}
+            config={config}
           />
         )}
 
-        {/* ── Explainability: always visible so users can read after clicking an event ── */}
+        {/* Timeline — always rendered so events appear live */}
+        {activeTab === 'Timeline' && (
+          <Timeline
+            simulationState={simulationState}
+            mode={mode}
+            selectedId={selectedEvent?.id}
+            onSelect={handleSelectEvent}
+          />
+        )}
+
+        {/* Explainability — renders selected event or empty state */}
         {activeTab === 'Explainability' && (
+          <ExplainabilityTab selectedEvent={selectedEvent} />
+        )}
+
+        {/* ── Decision Trace ── */}
+        {activeTab === 'Decision Trace' && !result && (
+          <TabEmpty
+            label={status === 'running'
+              ? 'Building decision trace…'
+              : 'Decision trace will appear here after a simulation runs.'}
+          />
+        )}
+        {activeTab === 'Decision Trace' && result && (
           <div className="p-4">
-            {selectedEvent
-              ? <ExplainabilityPanel event={selectedEvent} />
-              : <TabEmpty label="Click a timeline event with an explanation to view details." />}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-[11px] text-gray-500">
+                Step-by-step evaluation path through the policy engine.
+              </p>
+              <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
+                <Clock size={10} strokeWidth={2} />
+                <span className="font-mono">{result.executionMs}ms total</span>
+              </div>
+            </div>
+            <DecisionTrace trace={result.decisionTrace ?? []} />
           </div>
         )}
 
-        {/* ── All other tab panels ── */}
-        {/* Timeline and Explainability are rendered above; every other tab handles its own */}
-        {/* running / completed / idle state internally so content is never gated by a    */}
-        {/* global spinner overlay.                                                        */}
-        {activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
-          <>
-
-            {/* ── Summary ── */}
-            {/* Running: spinner + live step feed (progress before finalResults arrive) */}
-            {activeTab === 'Summary' && showSpinner && !result && (
-              <div className="flex flex-col items-center justify-center gap-4 text-center px-8 py-12">
-                <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
-                  <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
+        {/* ── Output ── */}
+        {activeTab === 'Output' && !result && (
+          <TabEmpty
+            label={status === 'running'
+              ? 'Waiting for simulation output…'
+              : 'AI output will appear here after a simulation runs.'}
+          />
+        )}
+        {activeTab === 'Output' && result && (
+          <div className="p-4 space-y-3">
+            {mode === 'garak' ? (
+              <GarakOutputSummary events={simEvents} />
+            ) : result.verdict === 'blocked' ? (
+              /* REQUEST TERMINATED chrome */
+              <div className="rounded-xl border-2 border-red-200 overflow-hidden">
+                <div className="bg-red-600 px-4 py-3 flex items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="w-3 h-3 rounded-full bg-red-400/60" />
+                    <span className="w-3 h-3 rounded-full bg-red-400/40" />
+                    <span className="w-3 h-3 rounded-full bg-red-400/30" />
+                  </div>
+                  <span className="text-[11px] font-bold text-red-100 uppercase tracking-wide flex-1 text-center">
+                    REQUEST TERMINATED
+                  </span>
+                  <XCircle size={14} className="text-red-200" strokeWidth={2} />
                 </div>
-                <div>
-                  <p className="text-[13px] font-semibold text-gray-700">
-                    {state === 'connecting' ? 'Connecting…' : 'Simulating attack…'}
-                  </p>
-                  {steps.length > 0 ? (
-                    <p className="text-[11px] text-gray-400 mt-1">
-                      {steps.length} event{steps.length !== 1 ? 's' : ''} received
+                <div className="bg-red-50 px-5 py-5">
+                  <div className="flex flex-col items-center text-center mb-4">
+                    <div className="w-12 h-12 rounded-full bg-red-100 border-2 border-red-200 flex items-center justify-center mb-3">
+                      <XCircle size={24} className="text-red-500" strokeWidth={1.75} />
+                    </div>
+                    <p className="text-[13px] font-bold text-red-700">Attack Blocked</p>
+                    <p className="text-[10.5px] text-red-500 mt-0.5">No model output was generated</p>
+                  </div>
+                  <div className="bg-white rounded-lg border border-red-200 px-3.5 py-3">
+                    <p className="text-[9.5px] font-bold uppercase tracking-wide text-red-400 mb-1.5">
+                      Safety message returned to user
                     </p>
-                  ) : (
-                    <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
-                  )}
-                </div>
-                {steps.length > 0 && (
-                  <div className="w-full max-w-xs text-left space-y-1.5">
-                    {steps.slice(-5).map(step => (
-                      <div key={step.id} className="flex items-center gap-2 text-[11px] text-gray-600">
-                        <span className={cn(
-                          'w-1.5 h-1.5 rounded-full shrink-0',
-                          step.status === 'done' ? 'bg-emerald-500' : 'bg-blue-400 animate-pulse',
-                        )} />
-                        <span className="truncate">{step.label}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-            {/* Idle: prompt the user */}
-            {activeTab === 'Summary' && !showSpinner && !result && (
-              <TabEmpty label="Run a simulation to see the verdict and risk summary." />
-            )}
-            {/* Completed: full result view */}
-            {activeTab === 'Summary' && result && (
-              <div className="p-4 space-y-4">
-                {/* Verdict hero */}
-                <div className={cn('rounded-xl border-2 p-5', vcfg.bg, vcfg.border)}>
-                  <div className="flex items-center gap-4">
-                    <div className={cn(
-                      'w-12 h-12 rounded-xl flex items-center justify-center shrink-0 border-2',
-                      vcfg.border,
-                      result.verdict === 'blocked'   ? 'bg-red-100'
-                      : result.verdict === 'escalated' ? 'bg-orange-100'
-                      : result.verdict === 'flagged'   ? 'bg-amber-100'
-                      : 'bg-emerald-100',
-                    )}>
-                      <vcfg.icon size={26} className={vcfg.txt} strokeWidth={1.75} />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className={cn('text-[22px] font-black tracking-tight leading-none uppercase', vcfg.txt)}>
-                        {vcfg.label}
-                      </p>
-                      <p className="text-[11.5px] text-gray-600 mt-1.5 leading-snug">
-                        {result.verdict === 'blocked'   && 'Request terminated before reaching the model. No AI output was generated.'}
-                        {result.verdict === 'escalated' && 'Risk exceeded the escalation threshold. The pipeline halted at the policy gate — no model was invoked. Manual approval is required.'}
-                        {result.verdict === 'flagged'   && 'Request processed with restrictions. Security alert raised and audit log updated.'}
-                        {result.verdict === 'allowed'   && 'All policy checks passed. Request processed and response returned normally.'}
-                      </p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <p className={cn('text-[32px] font-black tabular-nums leading-none', vcfg.txt)}>{result.riskScore}</p>
-                      <p className="text-[9.5px] font-bold uppercase tracking-wide text-gray-400 mt-0.5">Risk Score</p>
-                    </div>
+                    <p className="text-[11.5px] text-gray-700 leading-relaxed">
+                      {result.blockedMessage}
+                    </p>
                   </div>
                 </div>
-
-                {/* Stats row */}
-                <div className="grid grid-cols-3 gap-2">
-                  {[
-                    {
-                      label:    'Risk Level',
-                      value:    result.riskLevel,
-                      sub:      `Score: ${result.riskScore}/100`,
-                      accent:   result.riskScore >= 80 ? 'border-l-red-500' : result.riskScore >= 50 ? 'border-l-amber-500' : 'border-l-emerald-500',
-                      valColor: result.riskScore >= 80 ? 'text-red-600 text-[16px]' : result.riskScore >= 50 ? 'text-amber-600 text-[16px]' : 'text-emerald-600 text-[16px]',
-                    },
-                    {
-                      label:    'Policies Hit',
-                      value:    result.policiesTriggered?.length ?? 0,
-                      sub:      (result.policiesTriggered?.length ?? 0) === 0 ? 'None triggered' : `${result.policiesTriggered.length} polic${result.policiesTriggered.length === 1 ? 'y' : 'ies'}`,
-                      accent:   (result.policiesTriggered?.length ?? 0) > 0 ? 'border-l-violet-500' : 'border-l-gray-300',
-                      valColor: 'text-gray-900 text-[22px]',
-                    },
-                    {
-                      label:    'Exec Time',
-                      value:    `${result.executionMs}ms`,
-                      sub:      'Policy chain eval',
-                      accent:   'border-l-blue-400',
-                      valColor: 'text-gray-900 text-[18px]',
-                    },
-                  ].map(stat => (
-                    <div key={stat.label} className={cn('bg-white rounded-lg border border-gray-200 border-l-[3px] px-3 py-2.5', stat.accent)}>
-                      <p className="text-[9.5px] font-bold uppercase tracking-[0.08em] text-gray-400 leading-none mb-1.5">{stat.label}</p>
-                      <p className={cn('font-bold leading-none tabular-nums', stat.valColor)}>{stat.value}</p>
-                      <p className="text-[9.5px] text-gray-400 mt-1">{stat.sub}</p>
-                    </div>
-                  ))}
-                </div>
-
-                {/* Triggered policies */}
-                {(result.policiesTriggered?.length ?? 0) > 0 && (
-                  <div>
-                    <SectionLabel className="mb-2">Policies Triggered</SectionLabel>
-                    <div className="flex flex-wrap gap-1.5">
-                      {result.policiesTriggered.map(p => (
-                        <span key={p} className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold bg-violet-50 text-violet-700 border border-violet-200 px-2.5 py-1 rounded-lg">
-                          <Shield size={9} strokeWidth={2.5} />
-                          {p}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Simulation config detail — secondary, collapsed by default */}
-                {config && (
-                  <details className="group">
-                    <summary className="flex items-center gap-1.5 cursor-pointer list-none text-[10.5px] text-gray-400 hover:text-gray-600 transition-colors select-none">
-                      <ChevronRight size={11} className="group-open:rotate-90 transition-transform" strokeWidth={2} />
-                      Simulation config
-                    </summary>
-                    <div className="mt-2 bg-gray-50/80 rounded-lg border border-gray-100 divide-y divide-gray-100 overflow-hidden">
-                      {[
-                        ['Agent',       config.agent],
-                        ['Model',       config.model],
-                        ['Environment', config.environment],
-                        ['Attack type', config.attackType],
-                        ['Exec mode',   config.execMode],
-                      ].map(([k, v]) => v && (
-                        <div key={k} className="flex items-center justify-between px-3 py-1.5">
-                          <span className="text-[10px] text-gray-400 font-medium">{k}</span>
-                          <span className="text-[10px] text-gray-600 font-semibold text-right truncate ml-3">{v}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </details>
-                )}
               </div>
-            )}
-
-            {/* ── Decision Trace ── */}
-            {activeTab === 'Decision Trace' && !result && (
-              <TabEmpty label={showSpinner ? 'Building decision trace…' : 'Decision trace will appear here after a simulation runs.'} />
-            )}
-            {activeTab === 'Decision Trace' && result && (
-              <div className="p-4">
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-[11px] text-gray-500">Step-by-step evaluation path through the policy engine.</p>
-                  <div className="flex items-center gap-1.5 text-[10px] text-gray-400">
-                    <Clock size={10} strokeWidth={2} />
-                    <span className="font-mono">{result.executionMs}ms total</span>
-                  </div>
-                </div>
-                <DecisionTrace trace={result.decisionTrace ?? []} />
-              </div>
-            )}
-
-            {/* ── Output ── */}
-            {activeTab === 'Output' && !result && (
-              <TabEmpty label={showSpinner ? 'Waiting for simulation output…' : 'AI output will appear here after a simulation runs.'} />
-            )}
-            {activeTab === 'Output' && result && (
-              <div className="p-4 space-y-3">
-                {mode === 'garak' ? (
-                  <GarakOutputSummary events={simEvents} />
-                ) : result.verdict === 'blocked' ? (
-                  /* Restored from bbdff80 — dramatic "REQUEST TERMINATED" terminal */
-                  <div className="rounded-xl border-2 border-red-200 overflow-hidden">
-                    <div className="bg-red-600 px-4 py-3 flex items-center gap-3">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-3 h-3 rounded-full bg-red-400/60" />
-                        <span className="w-3 h-3 rounded-full bg-red-400/40" />
-                        <span className="w-3 h-3 rounded-full bg-red-400/30" />
-                      </div>
-                      <span className="text-[11px] font-bold text-red-100 uppercase tracking-wide flex-1 text-center">REQUEST TERMINATED</span>
-                      <XCircle size={14} className="text-red-200" strokeWidth={2} />
+            ) : (
+              /* Terminal chrome for allowed / flagged */
+              <>
+                <div className="rounded-xl border border-gray-800 overflow-hidden shadow-md">
+                  <div className="bg-gray-800 px-4 py-2.5 flex items-center gap-3">
+                    <div className="flex items-center gap-1.5">
+                      <span className="w-3 h-3 rounded-full bg-red-500" />
+                      <span className="w-3 h-3 rounded-full bg-amber-400" />
+                      <span className="w-3 h-3 rounded-full bg-emerald-500" />
                     </div>
-                    <div className="bg-red-50 px-5 py-5">
-                      <div className="flex flex-col items-center text-center mb-4">
-                        <div className="w-12 h-12 rounded-full bg-red-100 border-2 border-red-200 flex items-center justify-center mb-3">
-                          <XCircle size={24} className="text-red-500" strokeWidth={1.75} />
-                        </div>
-                        <p className="text-[13px] font-bold text-red-700">Attack Blocked</p>
-                        <p className="text-[10.5px] text-red-500 mt-0.5">No model output was generated</p>
-                      </div>
-                      <div className="bg-white rounded-lg border border-red-200 px-3.5 py-3">
-                        <p className="text-[9.5px] font-bold uppercase tracking-wide text-red-400 mb-1.5">Safety message returned to user</p>
-                        <p className="text-[11.5px] text-gray-700 leading-relaxed">{result.blockedMessage}</p>
-                      </div>
+                    <div className="flex-1 text-center">
+                      <span className="text-[10.5px] text-gray-400 font-mono">
+                        {config?.model ?? 'model'}
+                      </span>
                     </div>
-                  </div>
-                ) : (
-                  /* Restored from bbdff80 — terminal chrome with traffic lights */
-                  <>
-                    <div className="rounded-xl border border-gray-800 overflow-hidden shadow-md">
-                      <div className="bg-gray-800 px-4 py-2.5 flex items-center gap-3">
-                        <div className="flex items-center gap-1.5">
-                          <span className="w-3 h-3 rounded-full bg-red-500" />
-                          <span className="w-3 h-3 rounded-full bg-amber-400" />
-                          <span className="w-3 h-3 rounded-full bg-emerald-500" />
-                        </div>
-                        <div className="flex-1 text-center">
-                          <span className="text-[10.5px] text-gray-400 font-mono">{config?.model ?? 'model'}</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          {result.verdict === 'flagged' && (
-                            <span className="text-[9px] font-bold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full">
-                              Restricted
-                            </span>
-                          )}
-                          <button
-                            type="button"
-                            onClick={() => { navigator.clipboard?.writeText(result.output ?? ''); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
-                            className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
-                          >
-                            <Copy size={10} strokeWidth={2} />
-                            {copied ? 'Copied' : 'Copy'}
-                          </button>
-                        </div>
-                      </div>
-                      <div className="bg-gray-950 px-4 py-4">
-                        <div className="flex items-center gap-2 mb-3 text-[10px] text-gray-500">
-                          <span className="text-emerald-500 font-mono">$</span>
-                          <span className="font-mono">model_response --agent {config?.agent ?? 'agent'}</span>
-                        </div>
-                        <pre className="text-[11.5px] font-mono text-gray-200 leading-relaxed whitespace-pre-wrap break-words">
-                          {result.output}
-                        </pre>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-2 text-[10px] text-gray-400">
-                      <CheckCircle2 size={10} className="text-emerald-500" strokeWidth={2} />
-                      <span className="font-mono">{result.output?.length ?? 0} chars</span>
-                      <span>·</span>
-                      <span>~{Math.round((result.output?.length ?? 0) / 4)} tokens</span>
-                      <span>·</span>
-                      <span>{result.executionMs}ms total</span>
-                    </div>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* ── Policy Impact ── */}
-            {activeTab === 'Policy Impact' && !result && (
-              <TabEmpty label={showSpinner ? 'Evaluating policies…' : 'Policy evaluation results will appear here after a simulation runs.'} />
-            )}
-            {activeTab === 'Policy Impact' && result && (
-              <div className="p-4 space-y-3">
-                <p className="text-[11px] text-gray-400">How each policy evaluated this request.</p>
-                {(result.policyImpact?.length ?? 0) === 0 ? (
-                  <div className="text-center py-6 text-[12px] text-gray-400">No policies triggered.</div>
-                ) : (
-                  result.policyImpact.map((pi, i) => {
-                    const acfg = POLICY_ACTION_CFG[pi.action] ?? POLICY_ACTION_CFG.SKIP
-                    return (
-                      <div key={i} className={cn(
-                        'rounded-xl border p-3.5 flex items-start gap-3',
-                        pi.severity === 'critical' ? 'bg-red-50/60 border-red-200'
-                          : pi.severity === 'high' ? 'bg-amber-50/60 border-amber-200'
-                          : 'bg-gray-50 border-gray-200',
-                      )}>
-                        <div className={cn(
-                          'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
-                          pi.severity === 'critical' ? 'bg-red-100' : pi.severity === 'high' ? 'bg-amber-100' : 'bg-gray-100',
-                        )}>
-                          <Shield size={14} className={
-                            pi.severity === 'critical' ? 'text-red-600' : pi.severity === 'high' ? 'text-amber-600' : 'text-gray-500'
-                          } strokeWidth={1.75} />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap mb-1">
-                            <span className="text-[12px] font-semibold text-gray-800">{pi.policy}</span>
-                            <Badge variant={acfg.badge}>{pi.action}</Badge>
-                          </div>
-                          <p className="text-[10.5px] text-gray-500 leading-snug">{pi.trigger}</p>
-                        </div>
-                      </div>
-                    )
-                  })
-                )}
-              </div>
-            )}
-
-            {/* ── Risk Analysis ── */}
-            {activeTab === 'Risk Analysis' && (
-              <div className="p-4 space-y-4">
-                {/* Live risk trend (always shown when events exist) */}
-                {simEvents.length > 0 && (
-                  <div className="bg-white rounded-xl border border-gray-200 p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <SectionLabel>Risk Over Time</SectionLabel>
-                      {state === 'running' && (
-                        <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
-                          Live
+                    <div className="flex items-center gap-2">
+                      {result.verdict === 'flagged' && (
+                        <span className="text-[9px] font-bold uppercase tracking-wide bg-amber-500/20 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-full">
+                          Restricted
                         </span>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard?.writeText(result.output ?? '')
+                          setCopied(true)
+                          setTimeout(() => setCopied(false), 1500)
+                        }}
+                        className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-200 transition-colors"
+                      >
+                        <Copy size={10} strokeWidth={2} />
+                        {copied ? 'Copied' : 'Copy'}
+                      </button>
                     </div>
-                    <RiskTrend events={simEvents} live={state === 'running'} />
                   </div>
-                )}
-
-                {!result?.risk && simEvents.length === 0 && (
-                  <TabEmpty label="Risk analysis will appear after a simulation runs." />
-                )}
-
-                {result?.risk && (
-                  <>
-                    {/* Anomaly score bar */}
-                    <div className="bg-white rounded-xl border border-gray-200 p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <div>
-                          <SectionLabel>Anomaly Score</SectionLabel>
-                          <p className="text-[10px] text-gray-400 mt-0.5">0.85 block threshold · 0.50 flag threshold</p>
-                        </div>
-                        <span className={cn(
-                          'text-[28px] font-black tabular-nums leading-none',
-                          result.risk.anomalyScore >= 0.8 ? 'text-red-600' : result.risk.anomalyScore >= 0.5 ? 'text-amber-600' : 'text-emerald-600',
-                        )}>
-                          {result.risk.anomalyScore.toFixed(2)}
-                        </span>
-                      </div>
-                      <div className="relative h-3 rounded-full overflow-visible bg-gray-100">
-                        <div className="absolute inset-0 rounded-full overflow-hidden"
-                          style={{ background: 'linear-gradient(to right, #10b981 0%, #f59e0b 50%, #ef4444 85%, #dc2626 100%)' }}
-                        >
-                          <div
-                            className="absolute top-0 right-0 bottom-0 bg-gray-100 transition-all duration-700"
-                            style={{ width: `${(1 - result.risk.anomalyScore) * 100}%` }}
-                          />
-                        </div>
-                        <div className="absolute top-[-3px] bottom-[-3px] w-px bg-red-600 z-10" style={{ left: '85%' }}>
-                          <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                            <span className="text-[8px] font-bold text-red-600 bg-white px-0.5">0.85</span>
-                          </div>
-                        </div>
-                        <div className="absolute top-[-3px] bottom-[-3px] w-px bg-amber-500 z-10" style={{ left: '50%' }}>
-                          <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
-                            <span className="text-[8px] font-bold text-amber-600 bg-white px-0.5">0.50</span>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex justify-between text-[9px] text-gray-400 mt-2">
-                        <span className="text-emerald-600 font-medium">Benign</span>
-                        <span className="text-red-600 font-medium">Critical</span>
-                      </div>
+                  <div className="bg-gray-950 px-4 py-4">
+                    <div className="flex items-center gap-2 mb-3 text-[10px] text-gray-500">
+                      <span className="text-emerald-500 font-mono">$</span>
+                      <span className="font-mono">model_response --agent {config?.agent ?? 'agent'}</span>
                     </div>
+                    <pre className="text-[11.5px] font-mono text-gray-200 leading-relaxed whitespace-pre-wrap break-words">
+                      {result.output}
+                    </pre>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 text-[10px] text-gray-400">
+                  <CheckCircle2 size={10} className="text-emerald-500" strokeWidth={2} />
+                  <span className="font-mono">{result.output?.length ?? 0} chars</span>
+                  <span>·</span>
+                  <span>~{Math.round((result.output?.length ?? 0) / 4)} tokens</span>
+                  <span>·</span>
+                  <span>{result.executionMs}ms total</span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
-                    <div className="flex items-center justify-between py-2 px-3 bg-white rounded-lg border border-gray-200">
-                      <span className="text-[11.5px] font-medium text-gray-700">Injection Detected</span>
-                      {result.risk.injectionDetected
-                        ? <Badge variant="critical">Yes</Badge>
-                        : <Badge variant="success">No</Badge>}
-                    </div>
-
-                    {result.risk.techniques?.length > 0 && (
-                      <div>
-                        <SectionLabel className="mb-2">Techniques Identified</SectionLabel>
-                        <div className="space-y-1.5">
-                          {result.risk.techniques.map((t, i) => (
-                            <div key={i} className="flex items-center gap-2 text-[11px] text-gray-700 bg-red-50/60 border border-red-100 rounded-lg px-3 py-1.5">
-                              <AlertTriangle size={10} className="text-red-500 shrink-0" strokeWidth={2} />
-                              {t}
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-
-                    <div>
-                      <SectionLabel className="mb-2">Analyst Explanation</SectionLabel>
-                      <div className="bg-blue-50/60 border border-blue-100 rounded-xl px-3.5 py-3">
-                        <div className="flex items-start gap-2">
-                          <Info size={12} className="text-blue-500 shrink-0 mt-0.5" strokeWidth={2} />
-                          <p className="text-[11.5px] text-gray-700 leading-relaxed">{result.risk.explanation}</p>
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
+        {/* ── Policy Impact ── */}
+        {activeTab === 'Policy Impact' && !result && (
+          <TabEmpty
+            label={status === 'running'
+              ? 'Evaluating policies…'
+              : 'Policy evaluation results will appear here after a simulation runs.'}
+          />
+        )}
+        {activeTab === 'Policy Impact' && result && (
+          <div className="p-4 space-y-3">
+            <p className="text-[11px] text-gray-400">How each policy evaluated this request.</p>
+            {(result.policyImpact?.length ?? 0) === 0 ? (
+              <div className="text-center py-6 text-[12px] text-gray-400">
+                No policies triggered.
               </div>
-            )}
-
-            {/* ── Recommendations ── */}
-            {activeTab === 'Recommendations' && !result && (
-              <TabEmpty label={showSpinner ? 'Analyzing results for recommendations…' : 'Recommendations will appear here after a simulation runs.'} />
-            )}
-            {activeTab === 'Recommendations' && result && (
-              <div className="p-4 space-y-3">
-                <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
-                {(result.recommendations?.length ?? 0) === 0 ? (
-                  <div className="text-center py-6 text-[12px] text-gray-400">No recommendations.</div>
-                ) : result.recommendations.map((rec, i) => (
-                  <div key={i} className="bg-white rounded-xl border border-gray-200 p-3.5 flex items-start gap-3">
-                    <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
-                      <rec.icon size={14} className="text-gray-600" strokeWidth={1.75} />
+            ) : (
+              result.policyImpact.map((pi, i) => {
+                const acfg = POLICY_ACTION_CFG[pi.action] ?? POLICY_ACTION_CFG.SKIP
+                return (
+                  <div
+                    key={i}
+                    className={cn(
+                      'rounded-xl border p-3.5 flex items-start gap-3',
+                      pi.severity === 'critical' ? 'bg-red-50/60 border-red-200'
+                        : pi.severity === 'high' ? 'bg-amber-50/60 border-amber-200'
+                        : 'bg-gray-50 border-gray-200',
+                    )}
+                  >
+                    <div className={cn(
+                      'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
+                      pi.severity === 'critical' ? 'bg-red-100'
+                        : pi.severity === 'high' ? 'bg-amber-100'
+                        : 'bg-gray-100',
+                    )}>
+                      <Shield
+                        size={14}
+                        className={
+                          pi.severity === 'critical' ? 'text-red-600'
+                          : pi.severity === 'high' ? 'text-amber-600'
+                          : 'text-gray-500'
+                        }
+                        strokeWidth={1.75}
+                      />
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-[12px] font-semibold text-gray-800">{rec.label}</p>
-                      <p className="text-[10.5px] text-gray-500 mt-0.5 leading-snug">{rec.desc}</p>
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className="text-[12px] font-semibold text-gray-800">{pi.policy}</span>
+                        <Badge variant={acfg.badge}>{pi.action}</Badge>
+                      </div>
+                      <p className="text-[10.5px] text-gray-500 leading-snug">{pi.trigger}</p>
                     </div>
-                    {rec.action && (
-                      <Button variant="outline" size="sm" className="shrink-0 text-[10.5px] h-7 px-2.5">
-                        {rec.action}
-                      </Button>
-                    )}
                   </div>
-                ))}
+                )
+              })
+            )}
+          </div>
+        )}
+
+        {/* ── Risk Analysis ── */}
+        {activeTab === 'Risk Analysis' && (
+          <div className="p-4 space-y-4">
+
+            {/* Live risk trend — always shown when events exist, even during run */}
+            {simEvents.length > 0 && (
+              <div className="bg-white rounded-xl border border-gray-200 p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <SectionLabel>Risk Over Time</SectionLabel>
+                  {status === 'running' && (
+                    <span className="text-[10px] text-emerald-600 font-semibold flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse inline-block" />
+                      Live
+                    </span>
+                  )}
+                </div>
+                <RiskTrend events={simEvents} live={status === 'running'} />
               </div>
             )}
 
-            {/* ── Probe Results (Garak only) ── */}
-            {activeTab === 'Probe Results' && <ProbeResultsTab events={simEvents} state={state} />}
+            {!result?.risk && simEvents.length === 0 && (
+              <TabEmpty label="Risk analysis will appear after a simulation runs." />
+            )}
 
-            {/* ── Coverage (Garak only) ── */}
-            {activeTab === 'Coverage' && <CoverageTab events={simEvents} state={state} />}
+            {result?.risk && (
+              <>
+                {/* Anomaly score bar */}
+                <div className="bg-white rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <div>
+                      <SectionLabel>Anomaly Score</SectionLabel>
+                      <p className="text-[10px] text-gray-400 mt-0.5">
+                        0.85 block threshold · 0.50 flag threshold
+                      </p>
+                    </div>
+                    <span className={cn(
+                      'text-[28px] font-black tabular-nums leading-none',
+                      result.risk.anomalyScore >= 0.8 ? 'text-red-600'
+                        : result.risk.anomalyScore >= 0.5 ? 'text-amber-600'
+                        : 'text-emerald-600',
+                    )}>
+                      {result.risk.anomalyScore.toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="relative h-3 rounded-full overflow-visible bg-gray-100">
+                    <div
+                      className="absolute inset-0 rounded-full overflow-hidden"
+                      style={{ background: 'linear-gradient(to right, #10b981 0%, #f59e0b 50%, #ef4444 85%, #dc2626 100%)' }}
+                    >
+                      <div
+                        className="absolute top-0 right-0 bottom-0 bg-gray-100 transition-all duration-700"
+                        style={{ width: `${(1 - result.risk.anomalyScore) * 100}%` }}
+                      />
+                    </div>
+                    <div
+                      className="absolute top-[-3px] bottom-[-3px] w-px bg-red-600 z-10"
+                      style={{ left: '85%' }}
+                    >
+                      <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
+                        <span className="text-[8px] font-bold text-red-600 bg-white px-0.5">0.85</span>
+                      </div>
+                    </div>
+                    <div
+                      className="absolute top-[-3px] bottom-[-3px] w-px bg-amber-500 z-10"
+                      style={{ left: '50%' }}
+                    >
+                      <div className="absolute -top-5 left-1/2 -translate-x-1/2 whitespace-nowrap">
+                        <span className="text-[8px] font-bold text-amber-600 bg-white px-0.5">0.50</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex justify-between text-[9px] text-gray-400 mt-2">
+                    <span className="text-emerald-600 font-medium">Benign</span>
+                    <span className="text-red-600 font-medium">Critical</span>
+                  </div>
+                </div>
 
-          </>
+                <div className="flex items-center justify-between py-2 px-3 bg-white rounded-lg border border-gray-200">
+                  <span className="text-[11.5px] font-medium text-gray-700">Injection Detected</span>
+                  {result.risk.injectionDetected
+                    ? <Badge variant="critical">Yes</Badge>
+                    : <Badge variant="success">No</Badge>}
+                </div>
+
+                {result.risk.techniques?.length > 0 && (
+                  <div>
+                    <SectionLabel className="mb-2">Techniques Identified</SectionLabel>
+                    <div className="space-y-1.5">
+                      {result.risk.techniques.map((t, i) => (
+                        <div
+                          key={i}
+                          className="flex items-center gap-2 text-[11px] text-gray-700 bg-red-50/60 border border-red-100 rounded-lg px-3 py-1.5"
+                        >
+                          <AlertTriangle size={10} className="text-red-500 shrink-0" strokeWidth={2} />
+                          {t}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <SectionLabel className="mb-2">Analyst Explanation</SectionLabel>
+                  <div className="bg-blue-50/60 border border-blue-100 rounded-xl px-3.5 py-3">
+                    <div className="flex items-start gap-2">
+                      <Info size={12} className="text-blue-500 shrink-0 mt-0.5" strokeWidth={2} />
+                      <p className="text-[11.5px] text-gray-700 leading-relaxed">
+                        {result.risk.explanation}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* ── Recommendations ── */}
+        {activeTab === 'Recommendations' && !result && (
+          <TabEmpty
+            label={status === 'running'
+              ? 'Analyzing results for recommendations…'
+              : 'Recommendations will appear here after a simulation runs.'}
+          />
+        )}
+        {activeTab === 'Recommendations' && result && (
+          <div className="p-4 space-y-3">
+            <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
+            {(result.recommendations?.length ?? 0) === 0 ? (
+              <div className="text-center py-6 text-[12px] text-gray-400">No recommendations.</div>
+            ) : (
+              result.recommendations.map((rec, i) => (
+                <div
+                  key={i}
+                  className="bg-white rounded-xl border border-gray-200 p-3.5 flex items-start gap-3"
+                >
+                  <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
+                    <rec.icon size={14} className="text-gray-600" strokeWidth={1.75} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-[12px] font-semibold text-gray-800">{rec.label}</p>
+                    <p className="text-[10.5px] text-gray-500 mt-0.5 leading-snug">{rec.desc}</p>
+                  </div>
+                  {rec.action && (
+                    <Button variant="outline" size="sm" className="shrink-0 text-[10.5px] h-7 px-2.5">
+                      {rec.action}
+                    </Button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {/* ── Probe Results (Garak only) ── */}
+        {activeTab === 'Probe Results' && (
+          <ProbeResultsTab events={simEvents} status={status} />
+        )}
+
+        {/* ── Coverage (Garak only) ── */}
+        {activeTab === 'Coverage' && (
+          <CoverageTab events={simEvents} status={status} />
         )}
 
       </div>

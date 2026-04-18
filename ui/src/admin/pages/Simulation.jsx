@@ -1077,6 +1077,26 @@ function deriveSimState(connectionStatus, running) {
   return 'idle'
 }
 
+/**
+ * Build a minimal SimulationState for compare-mode panels that display a
+ * frozen result snapshot (before/after policy change).  These panels are
+ * read-only — no live stream, no steps, just the completed result.
+ */
+function makeFrozenSimState(result) {
+  return {
+    status:          'completed',
+    steps:           [],
+    partialResults:  [],
+    finalResults:    result,
+    error:           undefined,
+    startedAt:       undefined,
+    completedAt:     undefined,
+    sessionId:       null,
+    simEvents:       [],
+    connectionStatus:'closed',
+  }
+}
+
 export default function Simulation() {
   const [config,      setConfig]     = useState(DEFAULT_CONFIG)
   // apiError: non-null string means the live call failed and we fell back to mock
@@ -1100,20 +1120,13 @@ export default function Simulation() {
     connectionStatus,
   } = simState
 
-  // Convenience alias used by disabled-button logic and legacy prop
+  // Convenience alias used by disabled-button logic
   const running = simStatus === 'running'
 
-  // Construct simulation prop for ResultsPanel
-  const simulation = {
-    state:          deriveSimState(connectionStatus, running),
-    events:         simEvents,
-    mode:           config.attackType === 'custom' && config.customMode === 'garak' ? 'garak' : 'single',
-    steps:          simSteps,
-    partialResults,
-    startedAt,
-    completedAt,
-    simError,
-  }
+  // Mode derived from config — used by ResultsPanel and the disabled-button check
+  const simMode = config.attackType === 'custom' && config.customMode === 'garak'
+    ? 'garak'
+    : 'single'
 
   // ── Config change handler ───────────────────────────────────────────────────
   const handleChange = (key, val) => setConfig(c => ({ ...c, [key]: val }))
@@ -1225,10 +1238,22 @@ export default function Simulation() {
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
-              <ResultsPanel result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
+              <ResultsPanel
+                simulationState={makeFrozenSimState(resultA)}
+                mode={simMode}
+                attackType={config.attackType}
+                config={config}
+                apiError={apiError}
+              />
             </>
           ) : (
-            <ResultsPanel result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
+            <ResultsPanel
+              simulationState={simState}
+              mode={simMode}
+              attackType={config.attackType}
+              config={config}
+              apiError={apiError}
+            />
           )}
         </div>
 
@@ -1243,7 +1268,13 @@ export default function Simulation() {
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />
             </div>
-            <ResultsPanel result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simulation={simulation} />
+            <ResultsPanel
+                simulationState={makeFrozenSimState(resultB)}
+                mode={simMode}
+                attackType={config.attackType}
+                config={config}
+                apiError={apiError}
+              />
           </div>
         )}
       </div>

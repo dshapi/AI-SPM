@@ -1,35 +1,46 @@
 /**
  * ResultsPanel.test.jsx
  * ─────────────────────
- * Regression tests for the Simulation Results panel.
+ * Regression tests for the rebuilt Simulation Results panel.
  *
- * Covers:
- *   1. Idle empty state renders correctly (no tabs, FlaskConical icon)
- *   2. Spinner state renders with animated steps (no tabs)
- *   3. Tab bar is visible once a result or events exist
- *   4. Tab switching works and active state is preserved
- *   5. No tabs disappear unexpectedly after rendering
- *   6. Summary tab renders with result data
- *   7. Decision Trace tab renders connector-style trace
- *   8. Output tab shows REQUEST TERMINATED for blocked verdict
- *   9. Output tab shows terminal chrome for allowed/flagged verdict
- *  10. Policy Impact tab renders with severity-based styling
- *  11. Timeline tab renders events during streaming
- *  12. Risk Analysis tab renders RiskTrend when events exist
- *  13. Explainability tab renders with no selected event
- *  14. Garak tabs appear only for garak mode
- *  15. Auto-switch to Decision Trace when result arrives
- *  16. Auto-switch to Timeline only for Garak runs
- *  17. Empty state panel is shown (not tab bar) in idle state
+ * Key contract changes vs. prior version
+ * ───────────────────────────────────────
+ * • Component accepts simulationState (from useSimulationState) + mode prop.
+ *   Old separate props (simulation, result, running, sessionId, connectionStatus)
+ *   have been consolidated into simulationState.
+ * • Tabs are ALWAYS visible — even in idle state — so the tab bar is never
+ *   conditionally hidden. The Summary tab handles each status internally.
+ *
+ * Coverage
+ * ────────
+ *   1.  Idle: tab bar visible, Summary shows empty state (not a standalone panel)
+ *   2.  Running: tab bar visible, Summary shows spinner inline
+ *   3.  Completed: tab bar visible, Summary shows full result
+ *   4.  Failed: tab bar visible, Summary shows error panel
+ *   5.  Tab switching and active state preservation
+ *   6.  No tabs disappear after switching
+ *   7.  Summary tab — completed result rendering
+ *   8.  Decision Trace tab — connector layout
+ *   9.  Output tab — REQUEST TERMINATED (blocked)
+ *  10.  Output tab — terminal chrome (allowed)
+ *  11.  Policy Impact tab — severity-based styling
+ *  12.  Timeline tab — live events during streaming
+ *  13.  Risk Analysis tab — RiskTrend + anomaly bar
+ *  14.  Explainability tab — empty state when no event selected
+ *  15.  Garak tabs appear only for garak mode
+ *  16.  Auto-switch to Summary on result arrival (single-prompt)
+ *  17.  Auto-switch to Decision Trace on result arrival (garak)
+ *  18.  Auto-switch to Timeline when Garak run starts
+ *  19.  Edge cases and graceful rendering
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, act } from '@testing-library/react'
-import { ResultsPanel } from '../ResultsPanel.jsx'
+import { render, screen, fireEvent }             from '@testing-library/react'
+import { ResultsPanel }                          from '../ResultsPanel.jsx'
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
-// Lightweight mock for ExplainabilityPanel
+// ExplainabilityPanel is used inside Explainability.jsx which re-imports it
 vi.mock('../../ExplainabilityPanel.jsx', () => ({
   ExplainabilityPanel: ({ event }) => (
     <div data-testid="explainability-panel">
@@ -38,33 +49,41 @@ vi.mock('../../ExplainabilityPanel.jsx', () => ({
   ),
 }))
 
-// Lightweight mock for RiskTrend
 vi.mock('../RiskTrend.jsx', () => ({
   RiskTrend: ({ events }) => (
     <div data-testid="risk-trend">{events.length} events</div>
   ),
 }))
 
-// Lightweight mock for PhaseSection
 vi.mock('../PhaseSection.jsx', () => ({
   PhaseSection: ({ phase, events }) => (
     <div data-testid={`phase-${phase}`}>{events.length} events in {phase}</div>
   ),
 }))
 
-// Lightweight mock for phaseGrouping
 vi.mock('../../../lib/phaseGrouping.js', () => ({
-  groupByPhase: (events) => ({
-    System: events,
-  }),
-  groupByPhaseAndProbe: (events) => ({
-    System: events,
-  }),
+  groupByPhase:         (events) => ({ System: events }),
+  groupByPhaseAndProbe: (events) => ({ System: events }),
 }))
 
-// ── Test fixtures ─────────────────────────────────────────────────────────────
+// ── Fixtures ──────────────────────────────────────────────────────────────────
 
-const IDLE_SIMULATION = { state: 'idle', events: [], mode: 'single' }
+/** Build a SimulationState matching the useSimulationState contract. */
+function makeSimState(overrides = {}) {
+  return {
+    status:          'idle',
+    steps:           [],
+    partialResults:  [],
+    finalResults:    null,
+    error:           undefined,
+    startedAt:       undefined,
+    completedAt:     undefined,
+    sessionId:       null,
+    simEvents:       [],
+    connectionStatus:'idle',
+    ...overrides,
+  }
+}
 
 const MOCK_RESULT = {
   verdict:           'blocked',
@@ -129,14 +148,11 @@ const MOCK_EVENTS = [
 
 function renderPanel(props = {}) {
   const defaults = {
-    simulation:        IDLE_SIMULATION,
-    result:            null,
-    attackType:        'injection',
-    config:            MOCK_CONFIG,
-    running:           false,
-    apiError:          null,
-    sessionId:         null,
-    connectionStatus:  'idle',
+    simulationState: makeSimState(),
+    mode:            'single',
+    attackType:      'injection',
+    config:          MOCK_CONFIG,
+    apiError:        null,
   }
   return render(<ResultsPanel {...defaults} {...props} />)
 }
@@ -144,127 +160,185 @@ function renderPanel(props = {}) {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('ResultsPanel — idle state', () => {
-  it('shows empty state panel with FlaskConical icon text', () => {
+  it('renders the tab bar even in idle state', () => {
     renderPanel()
+    // Tabs are always visible — idle state does NOT hide the tab bar
+    expect(screen.getByRole('button', { name: 'Summary' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Timeline/ })).toBeInTheDocument()
+  })
+
+  it('shows "No simulation run yet" inside the Summary tab when idle', () => {
+    renderPanel()
+    // Summary is the default active tab — its empty state is rendered inline
     expect(screen.getByText(/No simulation run yet/i)).toBeInTheDocument()
     expect(screen.getByText(/Configure an attack type/i)).toBeInTheDocument()
   })
 
-  it('does NOT show the tab bar in idle state', () => {
+  it('renders the "Simulation Results" header', () => {
     renderPanel()
-    expect(screen.queryByRole('button', { name: 'Summary' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Decision Trace' })).not.toBeInTheDocument()
+    expect(screen.getByText('Simulation Results')).toBeInTheDocument()
   })
 
-  it('renders the Results header in idle state', () => {
+  it('switches to Timeline tab and shows idle message', () => {
     renderPanel()
-    expect(screen.getByText('Results')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
+    expect(screen.getByText(/Run a simulation to see events here/i)).toBeInTheDocument()
   })
 })
 
-describe('ResultsPanel — spinner state', () => {
-  it('shows spinner with animated steps when running with no events', () => {
+describe('ResultsPanel — running state', () => {
+  it('tab bar is visible while simulation is running', () => {
     renderPanel({
-      running:    true,
-      simulation: { state: 'connecting', events: [], mode: 'single' },
+      simulationState: makeSimState({
+        status:          'running',
+        connectionStatus:'connecting',
+      }),
     })
+    expect(screen.getByRole('button', { name: 'Summary' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Timeline/ })).toBeInTheDocument()
+  })
+
+  it('Summary tab shows spinner when running with no result', () => {
+    renderPanel({
+      simulationState: makeSimState({
+        status:          'running',
+        connectionStatus:'connecting',
+      }),
+    })
+    // Summary is active by default for single-prompt runs
     expect(screen.getByText(/Simulating attack|Connecting/i)).toBeInTheDocument()
-    expect(screen.getByText(/Assembling context/i)).toBeInTheDocument()
-    expect(screen.getByText(/Evaluating policy chain/i)).toBeInTheDocument()
   })
 
-  it('does NOT show tab bar during spinner state (no events)', () => {
+  it('shows step count in spinner when steps have arrived', () => {
+    const steps = [
+      { id: 's1', label: 'Simulation started', status: 'done',    timestamp: Date.now() },
+      { id: 's2', label: 'Policy evaluation',  status: 'running', timestamp: Date.now() },
+    ]
     renderPanel({
-      running:    true,
-      simulation: { state: 'connecting', events: [], mode: 'single' },
+      simulationState: makeSimState({
+        status:          'running',
+        connectionStatus:'connected',
+        steps,
+      }),
     })
-    expect(screen.queryByRole('button', { name: 'Summary' })).not.toBeInTheDocument()
+    expect(screen.getByText(/2 events received/i)).toBeInTheDocument()
   })
 
-  it('shows tab bar (not spinner) once events start streaming', () => {
+  it('Timeline tab shows LIVE label when running', () => {
     renderPanel({
-      running:    true,
-      simulation: { state: 'running', events: MOCK_EVENTS, mode: 'single' },
+      simulationState: makeSimState({
+        status:          'running',
+        connectionStatus:'connected',
+        simEvents:       MOCK_EVENTS,
+      }),
     })
-    // Tab bar must be visible
-    expect(screen.getByRole('button', { name: 'Timeline' })).toBeInTheDocument()
-    // Spinner steps should NOT appear since tabs are now rendered
-    expect(screen.queryByText(/Assembling context/i)).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
+    expect(screen.getByText('LIVE')).toBeInTheDocument()
+  })
+})
+
+describe('ResultsPanel — failed state', () => {
+  it('tab bar is visible even when simulation failed', () => {
+    renderPanel({
+      simulationState: makeSimState({
+        status: 'failed',
+        error:  'Simulation timeout.',
+      }),
+    })
+    expect(screen.getByRole('button', { name: 'Summary' })).toBeInTheDocument()
+  })
+
+  it('Summary tab shows error panel when failed', () => {
+    renderPanel({
+      simulationState: makeSimState({
+        status: 'failed',
+        error:  'Simulation timeout — no response received.',
+      }),
+    })
+    expect(screen.getByText('Simulation failed')).toBeInTheDocument()
+    expect(screen.getByText(/Simulation timeout/i)).toBeInTheDocument()
+  })
+
+  it('shows generic error when no error message provided', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'failed' }),
+    })
+    expect(screen.getByText('Simulation failed')).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — tab bar', () => {
-  it('shows all standard tabs when result exists', () => {
-    renderPanel({ result: MOCK_RESULT })
-    const standardTabs = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability']
+  it('shows all 8 standard tabs when completed with a result', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    const standardTabs = [
+      'Summary', 'Decision Trace', 'Output', 'Policy Impact',
+      'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability',
+    ]
     for (const tab of standardTabs) {
       expect(screen.getByRole('button', { name: tab })).toBeInTheDocument()
     }
   })
 
   it('does NOT show Garak tabs for single-prompt mode', () => {
-    renderPanel({ result: MOCK_RESULT, simulation: { state: 'completed', events: [], mode: 'single' } })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+      mode:            'single',
+    })
     expect(screen.queryByRole('button', { name: 'Probe Results' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Coverage' })).not.toBeInTheDocument()
   })
 
-  it('shows Garak tabs for garak mode', () => {
+  it('shows Garak tabs when mode === "garak"', () => {
     renderPanel({
-      result:     MOCK_RESULT,
-      simulation: { state: 'completed', events: MOCK_EVENTS, mode: 'garak' },
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT, simEvents: MOCK_EVENTS }),
+      mode:            'garak',
     })
     expect(screen.getByRole('button', { name: 'Probe Results' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Coverage' })).toBeInTheDocument()
   })
 
   it('switches active tab on click', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     const outputTab = screen.getByRole('button', { name: 'Output' })
     fireEvent.click(outputTab)
-    // Now Output tab should be active (border-blue-600 class)
     expect(outputTab.className).toMatch(/border-blue-600/)
-    // Summary should no longer be active
     expect(screen.getByRole('button', { name: 'Summary' }).className).toMatch(/border-transparent/)
   })
 
-  it('preserves active tab state after re-render with same result', () => {
-    const { rerender } = renderPanel({ result: MOCK_RESULT })
-    const policyTab = screen.getByRole('button', { name: 'Policy Impact' })
-    fireEvent.click(policyTab)
-    // Simulate a parent re-render that doesn't change result
-    rerender(
-      <ResultsPanel
-        simulation={IDLE_SIMULATION}
-        result={MOCK_RESULT}
-        attackType="injection"
-        config={MOCK_CONFIG}
-        running={false}
-        apiError={null}
-        sessionId={null}
-        connectionStatus="closed"
-      />
-    )
-    // Policy Impact should still be active (no auto-switch since result hasn't changed)
-    expect(screen.getByRole('button', { name: 'Policy Impact' }).className).toMatch(/border-blue-600/)
-  })
-
-  it('no tabs disappear — all 8 base tabs remain visible after switching', () => {
-    renderPanel({ result: MOCK_RESULT })
-    const tabs = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability']
-    // Click through a few tabs
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+  it('all 8 base tabs remain visible after switching between them', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    const tabs = [
+      'Summary', 'Decision Trace', 'Output', 'Policy Impact',
+      'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability',
+    ]
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Output' }))
-    // All tabs must still exist
     for (const tab of tabs) {
       expect(screen.getByRole('button', { name: tab })).toBeInTheDocument()
     }
+  })
+
+  it('shows event count pill on Timeline tab when events exist', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'running', simEvents: MOCK_EVENTS, connectionStatus: 'connected' }),
+    })
+    // The pill shows the event count next to the Timeline tab label
+    expect(screen.getByText('2')).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — Summary tab', () => {
   beforeEach(() => {
-    renderPanel({ result: MOCK_RESULT })
-    // Switch to Decision Trace (auto-switched) → go back to Summary manually
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    // Default tab after result arrives (single-prompt) is Summary
     fireEvent.click(screen.getByRole('button', { name: 'Summary' }))
   })
 
@@ -293,41 +367,55 @@ describe('ResultsPanel — Summary tab', () => {
 })
 
 describe('ResultsPanel — Decision Trace tab', () => {
-  it('shows empty state when no result', () => {
-    renderPanel()
-    // In idle state, we see the "no simulation run yet" panel
-    // Navigate to a state where we have tab bar but no result
+  it('shows empty state text when no result', () => {
     renderPanel({
-      simulation: { state: 'completed', events: MOCK_EVENTS, mode: 'single' },
-      result:     null,
-      running:    false,
+      simulationState: makeSimState({ status: 'completed', simEvents: MOCK_EVENTS }),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Decision Trace' }))
     expect(screen.getByText(/Decision trace will appear here/i)).toBeInTheDocument()
   })
 
+  it('shows "Building decision trace…" while running', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Decision Trace' }))
+    expect(screen.getByText(/Building decision trace/i)).toBeInTheDocument()
+  })
+
   it('renders trace steps with connector-style layout when result exists', () => {
-    renderPanel({ result: MOCK_RESULT })
-    // Auto-switched to Decision Trace since result was just provided
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    // Default: Summary tab active for single-prompt result — switch to Decision Trace
+    fireEvent.click(screen.getByRole('button', { name: 'Decision Trace' }))
     expect(screen.getByText('Prompt received')).toBeInTheDocument()
     expect(screen.getByText('Policy decision')).toBeInTheDocument()
   })
 
-  it('shows step numbers in trace', () => {
-    renderPanel({ result: MOCK_RESULT })
+  it('shows padded step numbers in Decision Trace', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Decision Trace' }))
     expect(screen.getByText('01')).toBeInTheDocument()
     expect(screen.getByText('02')).toBeInTheDocument()
   })
 
   it('shows timing info in Decision Trace', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Decision Trace' }))
     expect(screen.getByText('38ms total')).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — Output tab', () => {
   it('shows REQUEST TERMINATED chrome for blocked verdict', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Output' }))
     expect(screen.getByText('REQUEST TERMINATED')).toBeInTheDocument()
     expect(screen.getByText('Attack Blocked')).toBeInTheDocument()
@@ -336,20 +424,18 @@ describe('ResultsPanel — Output tab', () => {
   })
 
   it('shows terminal chrome (traffic lights + model name) for allowed verdict', () => {
-    renderPanel({ result: ALLOWED_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: ALLOWED_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Output' }))
-    // Terminal header shows model name
     expect(screen.getByText('gpt-4o')).toBeInTheDocument()
-    // Output text is shown
     expect(screen.getByText('Hello, how can I help?')).toBeInTheDocument()
-    // Footer shows char count
     expect(screen.getByText(/chars/)).toBeInTheDocument()
   })
 
   it('shows empty state when no result', () => {
     renderPanel({
-      simulation: { state: 'completed', events: MOCK_EVENTS, mode: 'single' },
-      result:     null,
+      simulationState: makeSimState({ status: 'completed', simEvents: MOCK_EVENTS }),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Output' }))
     expect(screen.getByText(/AI output will appear here/i)).toBeInTheDocument()
@@ -358,88 +444,94 @@ describe('ResultsPanel — Output tab', () => {
 
 describe('ResultsPanel — Policy Impact tab', () => {
   it('renders policies with severity-based styling', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Policy Impact' }))
     expect(screen.getByText('Prompt-Guard v3')).toBeInTheDocument()
     expect(screen.getByText('Injection pattern 0.97')).toBeInTheDocument()
   })
 
   it('shows "No policies triggered" when policyImpact is empty', () => {
-    renderPanel({ result: { ...MOCK_RESULT, policyImpact: [] } })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: { ...MOCK_RESULT, policyImpact: [] } }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Policy Impact' }))
     expect(screen.getByText(/No policies triggered/i)).toBeInTheDocument()
   })
 
   it('renders BLOCK badge for BLOCK action policies', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Policy Impact' }))
     expect(screen.getByText('BLOCK')).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — Timeline tab', () => {
-  it('shows idle message when no events', () => {
+  it('shows idle message in Timeline when no events (completed with no events)', () => {
     renderPanel({
-      simulation: { state: 'idle', events: [], mode: 'single' },
-      result:     null,
+      simulationState: makeSimState({ status: 'completed' }),
     })
-    // We need tab bar to be visible — put some events or a result
-    // Actually in idle state we see empty state panel. Let's use completed+no events.
-    renderPanel({
-      simulation:       { state: 'completed', events: [], mode: 'single' },
-      result:           null,
-      connectionStatus: 'closed',
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByText(/Run a simulation to see events here|No events yet/i)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
+    expect(screen.getByText(/No events recorded|Run a simulation to see events/i)).toBeInTheDocument()
   })
 
   it('renders phase sections when events exist', () => {
     renderPanel({
-      simulation: { state: 'running', events: MOCK_EVENTS, mode: 'single' },
-      running:    true,
+      simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
     expect(screen.getByTestId('phase-System')).toBeInTheDocument()
   })
 
   it('shows LIVE status label when running', () => {
     renderPanel({
-      simulation: { state: 'running', events: MOCK_EVENTS, mode: 'single' },
-      running:    true,
+      simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
     expect(screen.getByText('LIVE')).toBeInTheDocument()
+  })
+
+  it('shows Completed label when status is completed', () => {
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT, simEvents: MOCK_EVENTS }),
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
+    expect(screen.getByText('Completed')).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — Risk Analysis tab', () => {
   it('shows RiskTrend component when sim events exist', () => {
     renderPanel({
-      simulation: { state: 'completed', events: MOCK_EVENTS, mode: 'single' },
-      result:     MOCK_RESULT,
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT, simEvents: MOCK_EVENTS }),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Risk Analysis' }))
     expect(screen.getByTestId('risk-trend')).toBeInTheDocument()
   })
 
   it('shows anomaly score bar when result.risk exists', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Risk Analysis' }))
     expect(screen.getByText('Anomaly Score')).toBeInTheDocument()
     expect(screen.getByText('0.94')).toBeInTheDocument()
   })
 
   it('shows techniques when present', () => {
-    renderPanel({ result: MOCK_RESULT })
+    renderPanel({
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Risk Analysis' }))
     expect(screen.getByText('Instruction override')).toBeInTheDocument()
   })
 
   it('shows empty state message when no events and no result', () => {
     renderPanel({
-      simulation: { state: 'completed', events: [], mode: 'single' },
-      result:     null,
+      simulationState: makeSimState({ status: 'completed' }),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Risk Analysis' }))
     expect(screen.getByText(/Risk analysis will appear after/i)).toBeInTheDocument()
@@ -449,128 +541,131 @@ describe('ResultsPanel — Risk Analysis tab', () => {
 describe('ResultsPanel — Explainability tab', () => {
   it('shows hint text when no event is selected', () => {
     renderPanel({
-      simulation: { state: 'completed', events: MOCK_EVENTS, mode: 'single' },
-      result:     null,
+      simulationState: makeSimState({ status: 'completed', simEvents: MOCK_EVENTS }),
     })
     fireEvent.click(screen.getByRole('button', { name: 'Explainability' }))
-    expect(screen.getByText(/Click a timeline event/i)).toBeInTheDocument()
+    expect(screen.getByText(/No event selected/i)).toBeInTheDocument()
+    expect(screen.getByText(/Click a Timeline event/i)).toBeInTheDocument()
   })
 })
 
 describe('ResultsPanel — auto-switch behaviour', () => {
-  it('auto-switches to Decision Trace when a result arrives', () => {
+  it('auto-switches to Summary when single-prompt result arrives', () => {
     const { rerender } = renderPanel({
-      simulation:       { state: 'completed', events: MOCK_EVENTS, mode: 'single' },
-      result:           null,
-      connectionStatus: 'closed',
+      simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
     })
-    // Manually switch to Timeline
-    fireEvent.click(screen.getByRole('button', { name: 'Timeline' }))
-    expect(screen.getByRole('button', { name: 'Timeline' }).className).toMatch(/border-blue-600/)
+    // Manually switch away from Summary
+    fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
+    expect(screen.getByRole('button', { name: /^Timeline/ }).className).toMatch(/border-blue-600/)
 
-    // Now a result arrives
+    // Result arrives — single-prompt: Summary is active
     rerender(
       <ResultsPanel
-        simulation={{ state: 'completed', events: MOCK_EVENTS, mode: 'single' }}
-        result={MOCK_RESULT}
+        simulationState={makeSimState({ status: 'completed', finalResults: MOCK_RESULT, simEvents: MOCK_EVENTS })}
+        mode="single"
         attackType="injection"
         config={MOCK_CONFIG}
-        running={false}
         apiError={null}
-        sessionId={null}
-        connectionStatus="closed"
       />
     )
-    // Should have switched to Decision Trace
+    expect(screen.getByRole('button', { name: 'Summary' }).className).toMatch(/border-blue-600/)
+  })
+
+  it('auto-switches to Decision Trace when Garak result arrives', () => {
+    const { rerender } = renderPanel({
+      simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
+      mode:            'garak',
+    })
+    // Garak auto-switches to Timeline while running
+    expect(screen.getByRole('button', { name: /^Timeline/ }).className).toMatch(/border-blue-600/)
+
+    // Garak result arrives
+    rerender(
+      <ResultsPanel
+        simulationState={makeSimState({ status: 'completed', finalResults: MOCK_RESULT, simEvents: MOCK_EVENTS })}
+        mode="garak"
+        attackType="custom"
+        config={MOCK_CONFIG}
+        apiError={null}
+      />
+    )
     expect(screen.getByRole('button', { name: 'Decision Trace' }).className).toMatch(/border-blue-600/)
+  })
+
+  it('auto-switches to Timeline when Garak run starts', () => {
+    const { rerender } = renderPanel({
+      simulationState: makeSimState(),   // idle
+      mode:            'garak',
+    })
+    // Start Garak simulation
+    rerender(
+      <ResultsPanel
+        simulationState={makeSimState({
+          status:          'running',
+          connectionStatus:'connected',
+          simEvents:       MOCK_EVENTS,
+        })}
+        mode="garak"
+        attackType="custom"
+        config={MOCK_CONFIG}
+        apiError={null}
+      />
+    )
+    expect(screen.getByRole('button', { name: /^Timeline/ }).className).toMatch(/border-blue-600/)
   })
 
   it('does NOT auto-switch to Timeline for single-prompt runs', () => {
     const { rerender } = renderPanel({
-      simulation:       { state: 'idle', events: [], mode: 'single' },
-      result:           MOCK_RESULT,        // result exists → active = Decision Trace
-      connectionStatus: 'closed',
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+      mode:            'single',
     })
-    // Currently on Decision Trace (auto-switched on result)
-    expect(screen.getByRole('button', { name: 'Decision Trace' }).className).toMatch(/border-blue-600/)
+    // Summary is active (result present, single mode)
+    expect(screen.getByRole('button', { name: 'Summary' }).className).toMatch(/border-blue-600/)
 
-    // Simulation transitions to running (single-prompt mode)
+    // Simulation starts again — single-prompt mode: stays on Summary
     rerender(
       <ResultsPanel
-        simulation={{ state: 'running', events: MOCK_EVENTS, mode: 'single' }}
-        result={MOCK_RESULT}
+        simulationState={makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS })}
+        mode="single"
         attackType="injection"
         config={MOCK_CONFIG}
-        running={true}
         apiError={null}
-        sessionId="sid-1"
-        connectionStatus="connected"
       />
     )
-    // Should NOT have switched to Timeline for single-prompt mode
-    expect(screen.getByRole('button', { name: 'Decision Trace' }).className).toMatch(/border-blue-600/)
-  })
-
-  it('DOES auto-switch to Timeline for Garak runs', () => {
-    const { rerender } = renderPanel({
-      simulation:       { state: 'idle', events: [], mode: 'garak' },
-      result:           MOCK_RESULT,
-      connectionStatus: 'closed',
-    })
-    // Currently on Decision Trace
-
-    // Garak run starts
-    rerender(
-      <ResultsPanel
-        simulation={{ state: 'connecting', events: [], mode: 'garak' }}
-        result={null}
-        attackType="custom"
-        config={{ ...MOCK_CONFIG, customMode: 'garak' }}
-        running={true}
-        apiError={null}
-        sessionId="sid-garak"
-        connectionStatus="connecting"
-      />
-    )
-    // Should have switched to Timeline for Garak mode
-    // (Tab bar visible because it's in spinner-with-events or garak mode triggers)
-    // Note: in garak mode with state=connecting, spinner shows since no events yet
-    // The auto-switch fires, but spinner hides tabs — once events arrive tabs show Timeline active
-    // We can't easily test the hidden spinner case, so let's confirm via events
-    rerender(
-      <ResultsPanel
-        simulation={{ state: 'running', events: MOCK_EVENTS, mode: 'garak' }}
-        result={null}
-        attackType="custom"
-        config={{ ...MOCK_CONFIG, customMode: 'garak' }}
-        running={true}
-        apiError={null}
-        sessionId="sid-garak"
-        connectionStatus="connected"
-      />
-    )
-    // Timeline tab should be active
-    expect(screen.getByRole('button', { name: 'Timeline' }).className).toMatch(/border-blue-600/)
+    // Should switch to Summary (single-prompt auto-switch), not Timeline
+    expect(screen.getByRole('button', { name: 'Summary' }).className).toMatch(/border-blue-600/)
   })
 })
 
 describe('ResultsPanel — error / edge cases', () => {
   it('shows apiError "Simulated" badge when apiError is set', () => {
     renderPanel({
-      result:    MOCK_RESULT,
-      apiError:  'Connection refused',
-      sessionId: 'sid-1',
+      simulationState: makeSimState({ status: 'completed', finalResults: MOCK_RESULT }),
+      apiError:        'Connection refused',
     })
     expect(screen.getByText('Simulated')).toBeInTheDocument()
   })
 
-  it('renders with no result and no simulation state gracefully (fully idle)', () => {
-    // Should not throw
+  it('renders without crashing when simulationState is null', () => {
+    expect(() =>
+      render(
+        <ResultsPanel
+          simulationState={null}
+          mode="single"
+          attackType="injection"
+          config={MOCK_CONFIG}
+          apiError={null}
+        />
+      )
+    ).not.toThrow()
+  })
+
+  it('renders gracefully in fully idle default state', () => {
     expect(() => renderPanel()).not.toThrow()
     expect(screen.getByText(/No simulation run yet/i)).toBeInTheDocument()
   })
 
-  it('handles result with undefined optional fields', () => {
+  it('handles result with undefined optional fields without crashing', () => {
     const minimalResult = {
       verdict:           'allowed',
       riskScore:         10,
@@ -584,7 +679,24 @@ describe('ResultsPanel — error / edge cases', () => {
       risk:              undefined,
       recommendations:   undefined,
     }
-    // Should not throw
-    expect(() => renderPanel({ result: minimalResult })).not.toThrow()
+    expect(() =>
+      renderPanel({
+        simulationState: makeSimState({ status: 'completed', finalResults: minimalResult }),
+      })
+    ).not.toThrow()
+  })
+
+  it('shows duration in header when startedAt and completedAt are set', () => {
+    const now = Date.now()
+    renderPanel({
+      simulationState: makeSimState({
+        status:      'completed',
+        finalResults: MOCK_RESULT,
+        startedAt:   now - 1500,
+        completedAt: now,
+      }),
+    })
+    // Duration should show something like "1.5s"
+    expect(screen.getByText(/\d+(\.\d+)?s/)).toBeInTheDocument()
   })
 })

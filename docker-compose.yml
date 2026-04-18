@@ -159,6 +159,12 @@ services:
       LLM_MODEL_ID: ${LLM_MODEL_ID:-}
     volumes: *key-vol
     ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     depends_on:
       <<: *depends-platform
       guard-model:
