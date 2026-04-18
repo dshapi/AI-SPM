@@ -31,6 +31,14 @@ function getRiskScore(event) {
   return STAGE_RISK[event?.stage] ?? 50
 }
 
+function TabEmpty({ label = 'No data yet' }) {
+  return (
+    <div className="flex items-center justify-center py-16 px-8 text-center">
+      <p className="text-[12px] text-gray-400">{label}</p>
+    </div>
+  )
+}
+
 function SectionLabel({ children, className }) {
   return (
     <p className={cn('text-[10.5px] font-bold uppercase tracking-wider text-gray-400', className)}>
@@ -313,27 +321,12 @@ export function ResultsPanel({
           </div>
         )}
 
-        {!showSpinner && !result && simEvents.length === 0 && (
-          <div className="flex flex-col items-center justify-center gap-3 text-center px-8 py-16">
-            <div className="w-10 h-10 rounded-xl bg-gray-100 flex items-center justify-center">
-              <FlaskConical size={18} className="text-gray-400" />
-            </div>
-            <div>
-              <p className="text-[13px] font-medium text-gray-500">
-                Run a simulation to see results here.
-              </p>
-              <p className="text-[11px] text-gray-400 mt-1">
-                Configure an attack type and click Run Simulation.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Only render tab panels when there's something to show */}
-        {!showSpinner && (result || simEvents.length > 0) && (
+        {/* Tab panels — always rendered (each tab owns its empty state) */}
+        {!showSpinner && (
 
           <>
             {/* ── Summary ── */}
+            {activeTab === 'Summary' && !result && <TabEmpty label="Run a simulation to see the verdict and risk summary." />}
             {activeTab === 'Summary' && result && (
               <div className="p-4 space-y-4">
                 {/* Verdict hero */}
@@ -415,6 +408,7 @@ export function ResultsPanel({
             )}
 
             {/* ── Decision Trace ── */}
+            {activeTab === 'Decision Trace' && !result && <TabEmpty label="Decision trace will appear here after a simulation runs." />}
             {activeTab === 'Decision Trace' && result && (
               <div className="p-4">
                 <div className="space-y-2">
@@ -443,6 +437,7 @@ export function ResultsPanel({
             )}
 
             {/* ── Output ── */}
+            {activeTab === 'Output' && !result && <TabEmpty label="AI output will appear here after a simulation runs." />}
             {activeTab === 'Output' && result && (
               <div className="p-4">
                 {mode === 'garak' ? (
@@ -474,6 +469,7 @@ export function ResultsPanel({
             )}
 
             {/* ── Policy Impact ── */}
+            {activeTab === 'Policy Impact' && !result && <TabEmpty label="Policy evaluation results will appear here after a simulation runs." />}
             {activeTab === 'Policy Impact' && result && (
               <div className="p-4 space-y-2">
                 <p className="text-[11px] text-gray-400 mb-3">Policy evaluation results for this simulation.</p>
@@ -597,6 +593,7 @@ export function ResultsPanel({
             )}
 
             {/* ── Recommendations ── */}
+            {activeTab === 'Recommendations' && !result && <TabEmpty label="Recommendations will appear here after a simulation runs." />}
             {activeTab === 'Recommendations' && result && (
               <div className="p-4 space-y-3">
                 <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
