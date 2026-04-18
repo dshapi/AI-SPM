@@ -470,15 +470,16 @@ export function ResultsPanel({
   const isGarak    = mode === 'garak'
   const RESULT_TABS = isGarak ? [...BASE_TABS, ...GARAK_TABS] : BASE_TABS
 
-  // ── Auto-switch logic (restored from bbdff80 + a201106 garak gate) ──────────
-  // Auto-switch to Timeline only for Garak runs (multi-probe, event-heavy).
-  // Single-prompt runs stay on the current tab — result effect below will
-  // switch to Decision Trace once the result arrives.
+  // ── Auto-switch logic ────────────────────────────────────────────────────────
+  // Switch to Timeline as soon as a simulation stream opens — both single-prompt
+  // and Garak.  This gives the user live event visibility from the very first
+  // event instead of staring at an empty Summary tab or a full-screen spinner.
+  // The result effect below then switches to Decision Trace once results arrive.
   useEffect(() => {
-    if (isGarak && (state === 'connecting' || state === 'running')) {
+    if (state === 'connecting' || state === 'running') {
       setActiveTab('Timeline')
     }
-  }, [state, isGarak])
+  }, [state])
 
   // Auto-switch to Decision Trace when a static result arrives.
   useEffect(() => {
@@ -526,40 +527,11 @@ export function ResultsPanel({
     )
   }
 
-  // ── Spinner state (running, no result yet, not in Timeline/Explainability) ───
-  // Restored from bbdff80: show full spinner with animated steps list.
-  // Exception: if there are live events, show the tab bar so Timeline is accessible.
-  if (showSpinner && simEvents.length === 0) {
-    const streamMsg = !running && isConnecting ? 'Opening live stream…' : 'Simulating attack…'
-    return (
-      <div className="flex flex-col h-full">
-        <div className="h-10 px-4 flex items-center gap-2 border-b border-gray-100 shrink-0">
-          <Target size={13} className="text-gray-400" strokeWidth={1.75} />
-          <span className="text-[12px] font-semibold text-gray-700">Results</span>
-        </div>
-        <div className="flex-1 flex flex-col items-center justify-center gap-4 text-center px-8">
-          <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
-            <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
-          </div>
-          <div>
-            <p className="text-[13px] font-semibold text-gray-700">{streamMsg}</p>
-            <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
-          </div>
-          <div className="flex flex-col items-center gap-1.5 text-[11px] text-gray-400">
-            {['Assembling context…', 'Scanning with Prompt-Guard v3…', 'Evaluating policy chain…'].map((s, i) => (
-              <span key={i} className="flex items-center gap-1.5">
-                <RefreshCw size={9} className="animate-spin text-blue-400" />
-                {s}
-              </span>
-            ))}
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   // ── Full panel with tabs ─────────────────────────────────────────────────────
-  // Rendered when: result exists, OR events are streaming in, OR error state.
+  // Always rendered once we leave the isIdle state.  Tabs are visible from the
+  // moment the simulation starts — Timeline shows live events as they arrive,
+  // and result-dependent tabs (Summary, Decision Trace, etc.) show their content
+  // once the result is built from the terminal WS event.
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
@@ -647,8 +619,10 @@ export function ResultsPanel({
           </div>
         )}
 
-        {/* ── Spinner overlay for all other tabs while running (no events yet) ── */}
-        {showSpinner && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
+        {/* ── Spinner overlay — only for result-dependent tabs while running with no result ── */}
+        {/* Tabs that have live data from simEvents (Risk Analysis, Probe Results, Coverage) */}
+        {/* are never blocked — they render their content progressively as events arrive.    */}
+        {showSpinner && !result && !['Timeline', 'Explainability', 'Risk Analysis', 'Probe Results', 'Coverage'].includes(activeTab) && (
           <div className="flex flex-col items-center justify-center gap-4 text-center px-8 py-16">
             <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
               <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
@@ -662,8 +636,9 @@ export function ResultsPanel({
           </div>
         )}
 
-        {/* ── All other tab panels — rendered after spinner clears ── */}
-        {!showSpinner && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
+        {/* ── All other tab panels ── */}
+        {/* Render when: not blocked by spinner, and not Timeline/Explainability (those render above) */}
+        {!(showSpinner && !result && !['Timeline', 'Explainability', 'Risk Analysis', 'Probe Results', 'Coverage'].includes(activeTab)) && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
           <>
 
             {/* ── Summary ── */}

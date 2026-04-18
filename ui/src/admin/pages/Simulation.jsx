@@ -1147,12 +1147,21 @@ const DEFAULT_CONFIG = {
   garakConfig:        { ...GARAK_DEFAULT_CONFIG },
 }
 
-/** Derive simulation state from connectionStatus + running flag */
+/**
+ * Derive simulation state from connectionStatus + running flag.
+ *
+ * Bug fix: the WS connection stays 'connected' for the 30-second heartbeat
+ * window after a simulation finishes.  The old code only returned 'completed'
+ * when connectionStatus === 'closed', so a finished run with a live WS fell
+ * through to 'idle', losing the "Completed" status label in the Timeline and
+ * keeping the live-indicator on the Risk Analysis chart.  Now any !running
+ * state that is not 'error'/'connecting'/'reconnecting' returns 'completed'.
+ */
 function deriveSimState(connectionStatus, running) {
   if (connectionStatus === 'error') return 'error'
   if (running && (connectionStatus === 'connecting' || connectionStatus === 'reconnecting')) return 'connecting'
   if (running && connectionStatus === 'connected') return 'running'
-  if (!running && connectionStatus === 'closed') return 'completed'
+  if (!running && (connectionStatus === 'closed' || connectionStatus === 'connected')) return 'completed'
   return 'idle'
 }
 
