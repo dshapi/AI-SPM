@@ -471,20 +471,22 @@ export function ResultsPanel({
   const RESULT_TABS = isGarak ? [...BASE_TABS, ...GARAK_TABS] : BASE_TABS
 
   // ── Auto-switch logic ────────────────────────────────────────────────────────
-  // Switch to Timeline as soon as a simulation stream opens — both single-prompt
-  // and Garak.  This gives the user live event visibility from the very first
-  // event instead of staring at an empty Summary tab or a full-screen spinner.
-  // The result effect below then switches to Decision Trace once results arrive.
+  // Garak: switch to Timeline when the stream opens (many live probe events).
+  // Built-in (single-prompt): stay on Summary — it's the most useful landing tab.
   useEffect(() => {
     if (state === 'connecting' || state === 'running') {
-      setActiveTab('Timeline')
+      if (isGarak) setActiveTab('Timeline')
+      else setActiveTab('Summary')
     }
-  }, [state])
+  }, [state, isGarak])
 
-  // Auto-switch to Decision Trace when a static result arrives.
+  // When results arrive: Garak → Decision Trace; single-prompt → Summary.
   useEffect(() => {
-    if (result) setActiveTab('Decision Trace')
-  }, [result])
+    if (result) {
+      if (isGarak) setActiveTab('Decision Trace')
+      else setActiveTab('Summary')
+    }
+  }, [result, isGarak])
 
   // Clear selected event on new run.
   useEffect(() => {
