@@ -219,3 +219,59 @@ export async function fetchAllSessions(agentIds, limit = 200) {
     .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
     .filter(s => { if (seen.has(s.session_id)) return false; seen.add(s.session_id); return true })
 }
+
+// ── runSinglePromptSimulation ─────────────────────────────────────────────────
+
+/**
+ * Start a single-prompt simulation.
+ * Connects to POST /api/simulate/single.
+ * Returns { session_id, status }.
+ *
+ * @param {Object}  params
+ * @param {string}  params.prompt         The prompt to simulate
+ * @param {string}  params.sessionId      Session identifier
+ * @param {string}  [params.executionMode='live'] Execution mode (e.g. 'live', 'sandbox')
+ * @param {string}  [params.attackType='custom'] Attack type for simulation
+ * @returns {Promise<{ session_id: string, status: string }>}
+ */
+export async function runSinglePromptSimulation({ prompt, sessionId, executionMode = 'live', attackType = 'custom' }) {
+  const res = await fetch('/api/simulate/single', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      prompt,
+      session_id: sessionId,
+      execution_mode: executionMode,
+      attack_type: attackType,
+    }),
+  })
+  if (!res.ok) throw new Error(`simulate/single failed: ${res.status}`)
+  return res.json()
+}
+
+// ── runGarakSimulation ────────────────────────────────────────────────────────
+
+/**
+ * Start a Garak simulation.
+ * Connects to POST /api/simulate/garak.
+ * Returns { session_id, status }.
+ *
+ * @param {Object} params
+ * @param {Object} params.garakConfig    Garak configuration object
+ * @param {string} params.sessionId      Session identifier
+ * @param {string} [params.executionMode='live'] Execution mode (e.g. 'live', 'sandbox')
+ * @returns {Promise<{ session_id: string, status: string }>}
+ */
+export async function runGarakSimulation({ garakConfig, sessionId, executionMode = 'live' }) {
+  const res = await fetch('/api/simulate/garak', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      session_id: sessionId,
+      execution_mode: executionMode,
+      garak_config: garakConfig,
+    }),
+  })
+  if (!res.ok) throw new Error(`simulate/garak failed: ${res.status}`)
+  return res.json()
+}
