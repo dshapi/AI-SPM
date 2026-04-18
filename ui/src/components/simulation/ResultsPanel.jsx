@@ -652,30 +652,52 @@ export function ResultsPanel({
           </div>
         )}
 
-        {/* ── Spinner overlay — only for result-dependent tabs while running with no result ── */}
-        {/* Tabs that have live data from simEvents (Risk Analysis, Probe Results, Coverage) */}
-        {/* are never blocked — they render their content progressively as events arrive.    */}
-        {showSpinner && !result && !['Timeline', 'Explainability', 'Risk Analysis', 'Probe Results', 'Coverage'].includes(activeTab) && (
-          <div className="flex flex-col items-center justify-center gap-4 text-center px-8 py-16">
-            <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
-              <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
-            </div>
-            <div>
-              <p className="text-[13px] font-semibold text-gray-700">
-                {state === 'connecting' ? 'Connecting…' : 'Simulating attack…'}
-              </p>
-              <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
-            </div>
-          </div>
-        )}
-
         {/* ── All other tab panels ── */}
-        {/* Render when: not blocked by spinner, and not Timeline/Explainability (those render above) */}
-        {!(showSpinner && !result && !['Timeline', 'Explainability', 'Risk Analysis', 'Probe Results', 'Coverage'].includes(activeTab)) && activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
+        {/* Timeline and Explainability are rendered above; every other tab handles its own */}
+        {/* running / completed / idle state internally so content is never gated by a    */}
+        {/* global spinner overlay.                                                        */}
+        {activeTab !== 'Timeline' && activeTab !== 'Explainability' && (
           <>
 
             {/* ── Summary ── */}
-            {activeTab === 'Summary' && !result && <TabEmpty label="Run a simulation to see the verdict and risk summary." />}
+            {/* Running: spinner + live step feed (progress before finalResults arrive) */}
+            {activeTab === 'Summary' && showSpinner && !result && (
+              <div className="flex flex-col items-center justify-center gap-4 text-center px-8 py-12">
+                <div className="w-12 h-12 rounded-full bg-blue-50 border border-blue-100 flex items-center justify-center">
+                  <RefreshCw size={20} className="text-blue-500 animate-spin" strokeWidth={1.5} />
+                </div>
+                <div>
+                  <p className="text-[13px] font-semibold text-gray-700">
+                    {state === 'connecting' ? 'Connecting…' : 'Simulating attack…'}
+                  </p>
+                  {steps.length > 0 ? (
+                    <p className="text-[11px] text-gray-400 mt-1">
+                      {steps.length} event{steps.length !== 1 ? 's' : ''} received
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-gray-400 mt-1">Evaluating policies and tracing decisions</p>
+                  )}
+                </div>
+                {steps.length > 0 && (
+                  <div className="w-full max-w-xs text-left space-y-1.5">
+                    {steps.slice(-5).map(step => (
+                      <div key={step.id} className="flex items-center gap-2 text-[11px] text-gray-600">
+                        <span className={cn(
+                          'w-1.5 h-1.5 rounded-full shrink-0',
+                          step.status === 'done' ? 'bg-emerald-500' : 'bg-blue-400 animate-pulse',
+                        )} />
+                        <span className="truncate">{step.label}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Idle: prompt the user */}
+            {activeTab === 'Summary' && !showSpinner && !result && (
+              <TabEmpty label="Run a simulation to see the verdict and risk summary." />
+            )}
+            {/* Completed: full result view */}
             {activeTab === 'Summary' && result && (
               <div className="p-4 space-y-4">
                 {/* Verdict hero */}
@@ -784,7 +806,9 @@ export function ResultsPanel({
             )}
 
             {/* ── Decision Trace ── */}
-            {activeTab === 'Decision Trace' && !result && <TabEmpty label="Decision trace will appear here after a simulation runs." />}
+            {activeTab === 'Decision Trace' && !result && (
+              <TabEmpty label={showSpinner ? 'Building decision trace…' : 'Decision trace will appear here after a simulation runs.'} />
+            )}
             {activeTab === 'Decision Trace' && result && (
               <div className="p-4">
                 <div className="flex items-center justify-between mb-4">
@@ -799,7 +823,9 @@ export function ResultsPanel({
             )}
 
             {/* ── Output ── */}
-            {activeTab === 'Output' && !result && <TabEmpty label="AI output will appear here after a simulation runs." />}
+            {activeTab === 'Output' && !result && (
+              <TabEmpty label={showSpinner ? 'Waiting for simulation output…' : 'AI output will appear here after a simulation runs.'} />
+            )}
             {activeTab === 'Output' && result && (
               <div className="p-4 space-y-3">
                 {mode === 'garak' ? (
@@ -883,7 +909,9 @@ export function ResultsPanel({
             )}
 
             {/* ── Policy Impact ── */}
-            {activeTab === 'Policy Impact' && !result && <TabEmpty label="Policy evaluation results will appear here after a simulation runs." />}
+            {activeTab === 'Policy Impact' && !result && (
+              <TabEmpty label={showSpinner ? 'Evaluating policies…' : 'Policy evaluation results will appear here after a simulation runs.'} />
+            )}
             {activeTab === 'Policy Impact' && result && (
               <div className="p-4 space-y-3">
                 <p className="text-[11px] text-gray-400">How each policy evaluated this request.</p>
@@ -1022,7 +1050,9 @@ export function ResultsPanel({
             )}
 
             {/* ── Recommendations ── */}
-            {activeTab === 'Recommendations' && !result && <TabEmpty label="Recommendations will appear here after a simulation runs." />}
+            {activeTab === 'Recommendations' && !result && (
+              <TabEmpty label={showSpinner ? 'Analyzing results for recommendations…' : 'Recommendations will appear here after a simulation runs.'} />
+            )}
             {activeTab === 'Recommendations' && result && (
               <div className="p-4 space-y-3">
                 <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
