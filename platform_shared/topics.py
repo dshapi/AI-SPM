@@ -21,6 +21,7 @@ class TenantTopics:
     audit: str
     approval_request: str
     approval_result: str
+    simulation_events: str
 
     def all_topics(self) -> list[str]:
         return [
@@ -29,6 +30,7 @@ class TenantTopics:
             self.tool_request, self.tool_result, self.tool_observation,
             self.final_response, self.freeze_control, self.audit,
             self.approval_request, self.approval_result,
+            self.simulation_events,
         ]
 
 
@@ -49,6 +51,7 @@ def topics_for_tenant(tenant_id: str) -> TenantTopics:
         audit=f"{p}.audit",
         approval_request=f"{p}.approval_request",
         approval_result=f"{p}.approval_result",
+        simulation_events=f"{p}.simulation.events",
     )
 
 
