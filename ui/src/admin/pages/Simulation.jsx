@@ -611,15 +611,120 @@ const POLICY_ACTION_CFG = {
   SKIP:     { badge: 'neutral',  icon: ArrowRight    },
 }
 
+// ── Garak constants ────────────────────────────────────────────────────────────
+
+const GARAK_PROFILES = ['Quick Scan', 'Standard', 'Full Kill Chain']
+
+const GARAK_PROBES = [
+  { id: 'promptinject', label: 'Prompt Injection' },
+  { id: 'dataexfil',    label: 'Data Exfiltration' },
+  { id: 'tooluse',      label: 'Tool Abuse' },
+  { id: 'encoding',     label: 'Encoding' },
+  { id: 'multiturn',    label: 'Multi-turn' },
+]
+
+const GARAK_DEFAULT_CONFIG = {
+  profile: 'Standard',
+  probes:  GARAK_PROBES.map(p => p.id),
+}
+
+// ── SegmentedControl ───────────────────────────────────────────────────────────
+
+function SegmentedControl({ value, onChange, options }) {
+  return (
+    <div className="flex items-center gap-0 p-0.5 bg-gray-100 rounded-lg">
+      {options.map(opt => (
+        <button
+          key={opt.value}
+          onClick={() => onChange(opt.value)}
+          className={cn(
+            'flex-1 flex items-center justify-center gap-1.5 h-7 px-3 rounded-md',
+            'text-[11px] font-semibold transition-all duration-150 select-none',
+            value === opt.value
+              ? 'bg-white text-gray-900 shadow-sm'
+              : 'text-gray-500 hover:text-gray-700',
+          )}
+        >
+          {opt.icon && <opt.icon size={10} strokeWidth={2.5} />}
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── GarakConfigPanel ───────────────────────────────────────────────────────────
+
+function GarakConfigPanel({ config, onChange }) {
+  return (
+    <div className="space-y-3">
+      <div>
+        <FieldLabel>Profile</FieldLabel>
+        <Select
+          value={config.profile}
+          onChange={v => onChange('profile', v)}
+          options={GARAK_PROFILES}
+        />
+      </div>
+      <div>
+        <FieldLabel>Probes</FieldLabel>
+        <div className="space-y-1.5">
+          {GARAK_PROBES.map(probe => (
+            <label key={probe.id} className="flex items-center gap-2.5 cursor-pointer group">
+              <input
+                type="checkbox"
+                checked={config.probes.includes(probe.id)}
+                onChange={e => {
+                  const next = e.target.checked
+                    ? [...config.probes, probe.id]
+                    : config.probes.filter(p => p !== probe.id)
+                  onChange('probes', next)
+                }}
+                className="w-3.5 h-3.5 rounded border-gray-300 text-blue-600 accent-blue-600"
+              />
+              <span className="text-[11.5px] font-medium text-gray-700 group-hover:text-gray-900 transition-colors">
+                {probe.label}
+              </span>
+            </label>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── SimulationBuilder ──────────────────────────────────────────────────────────
+
+const CUSTOM_MODE_OPTIONS = [
+  { value: 'single', label: 'Single Prompt', icon: Terminal },
+  { value: 'garak',  label: 'Garak',         icon: FlaskConical },
+]
 
 function SimulationBuilder({
   config, onChange, onRun, running,
 }) {
   const { agent, model, environment, attackType, prompt, useCurrentPolicies,
-          selectedPolicies, execMode } = config
+          selectedPolicies, execMode, customMode, garakConfig } = config
 
   const examples = EXAMPLE_PROMPTS[attackType] ?? []
+
+  // Switch between Single / Garak — clear cross-mode state on transition
+  const handleModeChange = (newMode) => {
+    onChange('customMode', newMode)
+    if (newMode === 'garak') {
+      onChange('prompt', '')
+    } else {
+      onChange('garakConfig', { ...GARAK_DEFAULT_CONFIG })
+    }
+  }
+
+  // Bubble up a single garakConfig field change
+  const handleGarakChange = (key, value) => {
+    onChange('garakConfig', { ...garakConfig, [key]: value })
+  }
+
+  const isGarak    = attackType === 'custom' && customMode === 'garak'
+  const canRun     = isGarak ? !running : (!running && prompt.trim().length > 0)
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -683,53 +788,82 @@ function SimulationBuilder({
           </div>
         </div>
 
-        {/* ── Section 3: Input Prompt ── */}
+        {/* ── Section 3: Input / Attack Config ── */}
         <div className="px-4 pt-4 pb-3 border-b border-gray-50">
-          <BuilderSectionLabel number="03">Input Prompt</BuilderSectionLabel>
+          {/* Dynamic section label */}
+          <BuilderSectionLabel number="03">
+            {attackType === 'custom'
+              ? (customMode === 'garak' ? 'Automated Attack (Garak)' : 'Custom Input')
+              : 'Input Prompt'}
+          </BuilderSectionLabel>
 
-          {/* Example selector */}
-          {examples.length > 0 && (
-            <div className="mb-2 space-y-1">
-              {examples.map((ex, i) => (
-                <button
-                  key={i}
-                  onClick={() => onChange('prompt', ex)}
-                  className={cn(
-                    'w-full text-left px-2.5 py-1.5 rounded-lg border text-[10.5px] leading-snug transition-colors',
-                    prompt === ex
-                      ? 'bg-blue-50 border-blue-200 text-blue-700 font-medium'
-                      : 'bg-gray-50 border-gray-100 text-gray-500 hover:bg-gray-100 hover:text-gray-700',
-                  )}
-                >
-                  <span className="text-[9px] font-bold uppercase tracking-wide text-gray-300 mr-1.5">EG {i+1}</span>
-                  {ex.length > 72 ? ex.slice(0, 72) + '…' : ex}
-                </button>
-              ))}
+          {/* Segmented control — only for Custom Input */}
+          {attackType === 'custom' && (
+            <div className="mb-3">
+              <SegmentedControl
+                value={customMode}
+                onChange={handleModeChange}
+                options={CUSTOM_MODE_OPTIONS}
+              />
             </div>
           )}
 
-          <textarea
-            value={prompt}
-            onChange={e => onChange('prompt', e.target.value)}
-            placeholder="Enter your test payload…"
-            rows={4}
-            className={cn(
-              'w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white',
-              'text-[11.5px] text-gray-800 font-mono leading-relaxed resize-none',
-              'placeholder:text-gray-300 placeholder:font-sans',
-              'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1',
-              'hover:border-gray-300 transition-colors',
-            )}
-          />
-          <div className="flex items-center justify-between mt-1.5">
-            <span className="text-[9.5px] text-gray-400">{prompt.length} chars</span>
-            <button
-              onClick={() => onChange('prompt', '')}
-              className="text-[9.5px] text-gray-400 hover:text-gray-600 transition-colors"
-            >
-              Clear
-            </button>
-          </div>
+          {/* ── Single Prompt (default for all types, or custom+single) ── */}
+          {!(attackType === 'custom' && customMode === 'garak') && (
+            <div>
+              {/* Example selector */}
+              {examples.length > 0 && (
+                <div className="mb-2 space-y-1">
+                  {examples.map((ex, i) => (
+                    <button
+                      key={i}
+                      onClick={() => onChange('prompt', ex)}
+                      className={cn(
+                        'w-full text-left px-2.5 py-1.5 rounded-lg border text-[10.5px] leading-snug transition-colors',
+                        prompt === ex
+                          ? 'bg-blue-50 border-blue-200 text-blue-700 font-medium'
+                          : 'bg-gray-50 border-gray-100 text-gray-500 hover:bg-gray-100 hover:text-gray-700',
+                      )}
+                    >
+                      <span className="text-[9px] font-bold uppercase tracking-wide text-gray-300 mr-1.5">EG {i+1}</span>
+                      {ex.length > 72 ? ex.slice(0, 72) + '…' : ex}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <textarea
+                value={prompt}
+                onChange={e => onChange('prompt', e.target.value)}
+                placeholder="Enter your test payload…"
+                rows={4}
+                className={cn(
+                  'w-full px-3 py-2.5 rounded-lg border border-gray-200 bg-white',
+                  'text-[11.5px] text-gray-800 font-mono leading-relaxed resize-none',
+                  'placeholder:text-gray-300 placeholder:font-sans',
+                  'focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-1',
+                  'hover:border-gray-300 transition-colors',
+                )}
+              />
+              <div className="flex items-center justify-between mt-1.5">
+                <span className="text-[9.5px] text-gray-400">{prompt.length} chars</span>
+                <button
+                  onClick={() => onChange('prompt', '')}
+                  className="text-[9.5px] text-gray-400 hover:text-gray-600 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ── Garak automated attack config ── */}
+          {attackType === 'custom' && customMode === 'garak' && (
+            <GarakConfigPanel
+              config={garakConfig}
+              onChange={handleGarakChange}
+            />
+          )}
         </div>
 
         {/* ── Section 4: Policy Context ── */}
@@ -769,27 +903,41 @@ function SimulationBuilder({
         <div className="px-4 pt-4 pb-4">
           <BuilderSectionLabel number="05">Execution Mode</BuilderSectionLabel>
           <div className="space-y-1.5">
-            {EXEC_MODES.map(em => (
-              <button
-                key={em.id}
-                onClick={() => onChange('execMode', em.id)}
-                className={cn(
-                  'w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-left transition-all duration-100',
-                  execMode === em.id
-                    ? 'bg-blue-50 border-blue-200 ring-1 ring-blue-200'
-                    : 'bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50',
-                )}
-              >
-                <em.icon size={13} className={execMode === em.id ? 'text-blue-600' : 'text-gray-400'} strokeWidth={1.75} />
-                <div className="flex-1 min-w-0">
-                  <p className={cn('text-[11.5px] font-semibold leading-none', execMode === em.id ? 'text-blue-700' : 'text-gray-700')}>{em.label}</p>
-                  <p className="text-[10px] text-gray-400 mt-0.5">{em.desc}</p>
-                </div>
-                {execMode === em.id && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />
-                )}
-              </button>
-            ))}
+            {EXEC_MODES.map(em => {
+              const disabled = em.id === 'replay' || em.id === 'hypothetical'
+              const active   = !disabled && execMode === em.id
+              return (
+                <button
+                  key={em.id}
+                  onClick={() => !disabled && onChange('execMode', em.id)}
+                  title={disabled ? 'Coming soon' : undefined}
+                  className={cn(
+                    'w-full flex items-center gap-3 px-3 py-2 rounded-lg border text-left transition-all duration-100',
+                    disabled
+                      ? 'opacity-40 cursor-not-allowed bg-gray-50 border-gray-200'
+                      : active
+                        ? 'bg-blue-50 border-blue-200 ring-1 ring-blue-200'
+                        : 'bg-white border-gray-200 hover:border-gray-300 hover:bg-gray-50',
+                  )}
+                >
+                  <em.icon size={13} className={active ? 'text-blue-600' : 'text-gray-400'} strokeWidth={1.75} />
+                  <div className="flex-1 min-w-0">
+                    <p className={cn('text-[11.5px] font-semibold leading-none', active ? 'text-blue-700' : 'text-gray-700')}>
+                      {em.label}
+                    </p>
+                    <p className="text-[10px] text-gray-400 mt-0.5">
+                      {disabled ? 'Coming soon' : em.desc}
+                    </p>
+                  </div>
+                  {active && <span className="w-1.5 h-1.5 rounded-full bg-blue-500 shrink-0" />}
+                  {disabled && (
+                    <span className="text-[9px] font-semibold text-gray-400 bg-gray-100 border border-gray-200 px-1.5 py-0.5 rounded shrink-0">
+                      Soon
+                    </span>
+                  )}
+                </button>
+              )
+            })}
           </div>
         </div>
       </div>
@@ -801,7 +949,7 @@ function SimulationBuilder({
           size="md"
           className="w-full gap-2 relative overflow-hidden"
           onClick={onRun}
-          disabled={running || !prompt.trim()}
+          disabled={!canRun}
         >
           {running ? (
             <>
@@ -899,7 +1047,9 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
   const [activeTab, setActiveTab] = useState('Summary')
   const [copied, setCopied] = useState(false)
 
-  useEffect(() => { setActiveTab('Summary') }, [result])
+  // Auto-switch to Decision Trace (most informative tab) on each new result.
+  // Spec: prefer Timeline if it exists, otherwise Decision Trace; never Summary.
+  useEffect(() => { setActiveTab('Decision Trace') }, [result])
 
   // Show spinner while the HTTP round-trip is in progress OR while we're
   // waiting for the first WS event to arrive (no result yet + socket pending)
@@ -1430,6 +1580,9 @@ const DEFAULT_CONFIG = {
   useCurrentPolicies: true,
   selectedPolicies:   [],
   execMode:           'live',
+  // Custom-Input mode: 'single' (textarea) | 'garak' (automated attack)
+  customMode:         'single',
+  garakConfig:        { ...GARAK_DEFAULT_CONFIG },
 }
 
 export default function Simulation() {
@@ -1475,6 +1628,42 @@ export default function Simulation() {
     setApiError(null)
     setSessionId(null)
     disconnectWs()   // tear down any prior WS connection
+
+    // ── Garak automated-attack path ─────────────────────────────────────────
+    if (config.attackType === 'custom' && config.customMode === 'garak') {
+      try {
+        const resp = await fetch('/api/simulate/garak', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            profile: config.garakConfig.profile.toLowerCase().replace(/ /g, '_'),
+            probes:  config.garakConfig.probes,
+            target:  config.agent,
+            model:   config.model,
+          }),
+        })
+        if (!resp.ok) throw new Error(`Garak API ${resp.status}`)
+        const data = await resp.json()
+        const r = _adaptBackendResults(data)
+        setResult(r)
+        if (compareMode) {
+          if (!resultA) setResultA(r)
+          else          setResultB(r)
+        }
+      } catch (err) {
+        console.warn('[SimLab] Garak API unavailable — showing mock:', err.message)
+        const r = MOCK_RESULTS.custom
+        setApiError(err.message)
+        setResult(r)
+        if (compareMode) {
+          if (!resultA) setResultA(r)
+          else          setResultB(r)
+        }
+      } finally {
+        setRunning(false)
+      }
+      return
+    }
 
     try {
       // ── Step 1: Submit prompt to agent-orchestrator ───────────────────────
@@ -1567,7 +1756,9 @@ export default function Simulation() {
               <Save size={13} strokeWidth={2} />
               Save Scenario
             </Button>
-            <Button variant="default" size="sm" className="gap-1.5" onClick={handleRun} disabled={running || !config.prompt.trim()}>
+            <Button variant="default" size="sm" className="gap-1.5" onClick={handleRun}
+              disabled={running || (!(config.attackType === 'custom' && config.customMode === 'garak') && !config.prompt.trim())}
+            >
               <Play size={13} strokeWidth={2} />
               Run Simulation
             </Button>
