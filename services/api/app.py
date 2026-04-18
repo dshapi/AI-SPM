@@ -53,6 +53,9 @@ from ws.session_ws import init_ws_layer, router as ws_router
 from consumers.session_event_consumer import SessionEventConsumer
 from consumers.topic_resolver import resolve_topics, configured_tenants
 
+# ── API routes ────────────────────────────────────────────────────────────────
+from routes.simulation import router as simulation_router
+
 log = logging.getLogger("api")
 settings = get_settings()
 _start_time = time.time()
@@ -427,6 +430,9 @@ app.add_middleware(
 
 # WebSocket endpoint: /ws/sessions/{session_id}
 app.include_router(ws_router)
+
+# Simulation endpoints: /api/simulate/single, /api/simulate/garak
+app.include_router(simulation_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
