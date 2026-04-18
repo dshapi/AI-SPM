@@ -8,7 +8,7 @@ import { useState } from 'react'
  * Props
  * ─────
  *   event       SimulationEvent | null — the selected timeline event
- *   explanation object | null — from event.details.explanation
+ *               explanation is derived from event.details.explanation
  */
 
 const RISK_CFG = {
@@ -57,7 +57,8 @@ function Section({ label, children }) {
   )
 }
 
-export function ExplainabilityPanel({ event, explanation }) {
+export function ExplainabilityPanel({ event }) {
+  const explanation = event?.details?.explanation ?? null
   const [detailsOpen, setDetailsOpen] = useState(false)
 
   if (!event && !explanation) {
