@@ -597,14 +597,6 @@ const TRACE_CFG = {
   flagged:  { dot: 'bg-amber-400',   line: 'bg-amber-200',   txt: 'text-amber-700',   label: 'Flagged'  },
 }
 
-const POLICY_ACTION_CFG = {
-  BLOCK:    { badge: 'critical', icon: XCircle       },
-  ESCALATE: { badge: 'high',     icon: AlertTriangle },
-  FLAG:     { badge: 'high',     icon: AlertTriangle },
-  ALLOW:    { badge: 'success',  icon: CheckCircle2  },
-  SKIP:     { badge: 'neutral',  icon: ArrowRight    },
-}
-
 // ── Garak constants ────────────────────────────────────────────────────────────
 
 const GARAK_PROFILES = ['Quick Scan', 'Standard', 'Full Kill Chain']
