@@ -15,7 +15,6 @@ import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { ResultsPanel }  from '../../components/simulation/ResultsPanel.jsx'
 import { createSession, fetchSessionEvents, fetchSessionResults, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
-import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
 import { useSimulationStream } from '../../hooks/useSimulationStream.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
@@ -1079,7 +1078,6 @@ export default function Simulation() {
   const [resultB,     setResultB]    = useState(null)   // after
 
   // ── WebSocket live streaming ────────────────────────────────────────────────
-  const { connectionStatus: wsConnectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
   const { connectionStatus, simEvents, startStream, stopStream } = useSimulationStream()
 
   // Construct simulation prop for ResultsPanel
@@ -1121,6 +1119,14 @@ export default function Simulation() {
 
   // ── Run simulation ──────────────────────────────────────────────────────────
   const handleRun = useCallback(async () => {
+    // Compare mode: capture the outgoing result before clearing it.
+    // First run  → save into resultA (the "Before" slot).
+    // Second run → save into resultB (the "After" slot).
+    if (compareMode && result) {
+      if (!resultA) setResultA(result)
+      else if (!resultB) setResultB(result)
+    }
+
     const sid = crypto.randomUUID()
     setSessionId(sid)
     setRunning(true)
@@ -1149,11 +1155,12 @@ export default function Simulation() {
       console.error('[SimLab] run error:', err)
       setRunning(false)
     }
-  }, [config, startStream])
+  }, [config, startStream, compareMode, result, resultA, resultB])
 
   // ── Reset ───────────────────────────────────────────────────────────────────
   const handleReset = () => {
-    disconnectWs()
+    stopStream()       // close the active simulation WS stream (Instance 2)
+    setRunning(false)
     setResult(null)
     setResultA(null)
     setResultB(null)
