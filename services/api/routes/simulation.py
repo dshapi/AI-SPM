@@ -173,6 +173,7 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
         result = await pss.evaluate(prompt, ctx)
 
         correlation_id = str(uuid.uuid4())
+        _eval_start = datetime.datetime.utcnow()
 
         # Build explanation for blocked events
         _policy_event = {
@@ -212,9 +213,11 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                                 response_preview="",
                                 correlation_id=correlation_id)
 
+        _eval_ms = int((datetime.datetime.utcnow() - _eval_start).total_seconds() * 1000)
         completed_summary = {
-            "result":     "blocked" if result.is_blocked else "allowed",
-            "categories": result.categories,
+            "result":      "blocked" if result.is_blocked else "allowed",
+            "categories":  result.categories,
+            "duration_ms": _eval_ms,
         }
         await _ws_emit(session_id, "simulation.completed", {"summary": completed_summary})
         if producer:

@@ -532,10 +532,17 @@ function _buildResultFromSimEvents(simEvents) {
 
   if (!terminal && !completedEv) return null   // no useful data yet
 
-  const isBlocked  = !!blockedEv
+  const summary    = completedEv?.details?.summary || {}
+
+  // If terminal event was dropped by the WS race condition, fall back to the
+  // verdict recorded in simulation.completed summary (always emitted last).
+  const isBlocked  = blockedEv
+    ? true
+    : allowedEv
+      ? false
+      : summary.result === 'blocked'    // completedEv-only fallback
   const verdict    = isBlocked ? 'blocked' : 'allowed'
   const d          = (terminal || completedEv).details || {}
-  const summary    = completedEv?.details?.summary || {}
 
   // Decision trace — one entry per sim event
   const decisionTrace = simEvents.map((e, idx) => {
@@ -579,7 +586,7 @@ function _buildResultFromSimEvents(simEvents) {
     verdict,
     riskScore:         isBlocked ? 85 : 20,
     riskLevel:         isBlocked ? 'High' : 'Low',
-    executionMs:       0,
+    executionMs:       summary.duration_ms ?? 0,
     policiesTriggered,
     decisionTrace,
     output:            outputText,
