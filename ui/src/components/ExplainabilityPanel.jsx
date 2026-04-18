@@ -3,7 +3,7 @@ import { useState } from 'react'
 /**
  * ExplainabilityPanel.jsx
  * ────────────────────────
- * Stateless panel that renders a structured policy explanation.
+ * Renders structured policy explanation with collapsible technical details.
  *
  * Props
  * ─────
@@ -140,6 +140,7 @@ export function ExplainabilityPanel({ event, explanation }) {
       {explanation.technical_details && (
         <Section label="">
           <button
+            type="button"
             onClick={() => setDetailsOpen(o => !o)}
             style={{
               background: 'none',

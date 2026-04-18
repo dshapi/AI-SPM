@@ -1626,7 +1626,7 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
         )}
 
         {activeTab === 'Explainability' && (
-          <div style={{ padding: '4px 0' }}>
+          <div style={{ padding: '16px 0' }}>
             <ExplainabilityPanel
               event={selectedEvent}
               explanation={selectedEvent?.details?.explanation ?? null}
