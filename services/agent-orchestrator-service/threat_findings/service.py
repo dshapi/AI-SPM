@@ -4,13 +4,16 @@ import logging
 import hashlib
 from datetime import datetime, timezone
 from uuid import uuid4
-from typing import Optional, List
+from typing import TYPE_CHECKING, Optional, List
 
 from cases.schemas import CaseRecord
 from models.cases import CaseRepository
 from threat_findings.schemas import CreateFindingRequest, FindingRecord, FindingFilter
 from threat_findings.models import ThreatFindingRepository
 from threat_findings.prioritization.engine import PrioritizationEngine
+
+if TYPE_CHECKING:
+    from events.publisher import EventPublisher
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +47,7 @@ class ThreatFindingsService:
         req: CreateFindingRequest,
         repo: ThreatFindingRepository,
         case_repo: CaseRepository,
+        publisher: Optional["EventPublisher"] = None,
     ) -> FindingRecord:
         existing = await repo.get_by_batch_hash(req.batch_hash)
         if existing:
@@ -114,6 +118,26 @@ class ThreatFindingsService:
                 case.case_id, rec.id,
             )
 
+        # ── Publish finding.created event to Kafka ────────────────────────────
+        if publisher is not None:
+            try:
+                await publisher.emit_finding_created(
+                    finding_id=rec.id,
+                    tenant_id=rec.tenant_id,
+                    severity=rec.severity,
+                    title=rec.title,
+                    risk_score=rec.risk_score,
+                    confidence=rec.confidence,
+                    asset=rec.asset,
+                    source=rec.source or "api",
+                    priority_score=rec.priority_score,
+                    should_open_case=req.should_open_case,
+                    case_id=rec.case_id,
+                )
+            except Exception as pub_exc:
+                # Never let event publishing failure break the finding creation path
+                logger.warning("emit_finding_created failed (non-fatal): %s", pub_exc)
+
         return rec
 
     async def persist_finding_from_dict(
@@ -122,6 +146,7 @@ class ThreatFindingsService:
         tenant_id: str,
         repo: ThreatFindingRepository,
         case_repo: Optional[CaseRepository] = None,
+        publisher: Optional["EventPublisher"] = None,
     ) -> FindingRecord:
         """
         Persist a Finding dict (from run_hunt).
@@ -214,6 +239,25 @@ class ThreatFindingsService:
                 case.case_id, rec.id,
             )
 
+        # ── Publish finding.created event to Kafka ────────────────────────────
+        if publisher is not None:
+            try:
+                await publisher.emit_finding_created(
+                    finding_id=rec.id,
+                    tenant_id=rec.tenant_id,
+                    severity=rec.severity,
+                    title=rec.title,
+                    risk_score=rec.risk_score,
+                    confidence=rec.confidence,
+                    asset=rec.asset,
+                    source=rec.source or "threat-hunting-agent",
+                    priority_score=rec.priority_score,
+                    should_open_case=rec.should_open_case or False,
+                    case_id=rec.case_id,
+                )
+            except Exception as pub_exc:
+                logger.warning("emit_finding_created failed (non-fatal): %s", pub_exc)
+
         return rec
 
     async def link_case(
@@ -231,12 +275,30 @@ class ThreatFindingsService:
         finding_id: str,
         new_status: str,
         repo: ThreatFindingRepository,
+        *,
+        publisher: Optional["EventPublisher"] = None,
+        tenant_id: str = "t1",
+        changed_by: Optional[str] = None,
+        old_status: Optional[str] = None,
     ) -> None:
         """Transition finding to open | investigating | resolved."""
         assert new_status in ("open", "investigating", "resolved"), \
             f"Invalid status: {new_status}"
         await repo.update_status(finding_id, new_status)
         logger.info("Finding %s -> status=%s", finding_id, new_status)
+
+        # ── Publish finding.status_changed event to Kafka ─────────────────────
+        if publisher is not None:
+            try:
+                await publisher.emit_finding_status_changed(
+                    finding_id=finding_id,
+                    tenant_id=tenant_id,
+                    new_status=new_status,
+                    old_status=old_status,
+                    changed_by=changed_by,
+                )
+            except Exception as pub_exc:
+                logger.warning("emit_finding_status_changed failed (non-fatal): %s", pub_exc)
 
     async def get_finding_by_id(
         self,

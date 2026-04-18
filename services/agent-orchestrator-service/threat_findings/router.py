@@ -1,11 +1,14 @@
 from __future__ import annotations
 import logging
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from dependencies.auth import IdentityContext
 from dependencies.rbac import require_session_override
+from events.publisher import EventPublisher
 from models.cases import CaseRepository
 from schemas.session import ErrorDetail, ErrorResponse
 from threat_findings.models import ThreatFindingRepository
@@ -20,6 +23,11 @@ router = APIRouter(prefix="/api/v1/threat-findings", tags=["ThreatFindings"])
 
 def get_findings_service(request: Request) -> ThreatFindingsService:
     return request.app.state.threat_findings_service
+
+
+def get_publisher(request: Request) -> Optional[EventPublisher]:
+    """Return the EventPublisher if available; None otherwise (degrades gracefully)."""
+    return getattr(request.app.state, "event_publisher", None)
 
 
 async def get_async_db(request: Request):
@@ -70,6 +78,7 @@ async def create_finding(
     repo:      ThreatFindingRepository     = Depends(get_finding_repo),
     case_repo: CaseRepository              = Depends(get_case_repo),
     svc:       ThreatFindingsService       = Depends(get_findings_service),
+    publisher: Optional[EventPublisher]    = Depends(get_publisher),
 ) -> FindingResponse:
     trace_id = getattr(request.state, "trace_id", "")
     logger.info(
@@ -77,7 +86,7 @@ async def create_finding(
         body.tenant_id, identity.user_id, trace_id,
     )
     try:
-        rec = await svc.create_finding(body, repo, case_repo)
+        rec = await svc.create_finding(body, repo, case_repo, publisher=publisher)
         if rec.deduplicated:
             response.status_code = status.HTTP_200_OK
         return FindingResponse.from_record(rec)

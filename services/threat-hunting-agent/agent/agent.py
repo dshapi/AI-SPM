@@ -214,22 +214,28 @@ def _build_tools() -> list:
 # Agent factory
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_agent(groq_api_key: str, model: str = "llama-3.3-70b-versatile") -> Any:
+def build_agent(
+    groq_api_key: str,
+    model: str = "llama-3.3-70b-versatile",
+    base_url: str = "https://api.groq.com/openai/v1",
+) -> Any:
     """
     Build and return the LLM client.
 
-    Uses Groq (OpenAI-compatible endpoint) — very fast inference, free tier
-    with generous daily token limits.  Default model is Llama 3.3 70B Versatile
-    (128k context).  run_hunt() calls the LLM directly without bind_tools()
-    to avoid the nameless-function-call 400 error.
+    By default uses the Groq cloud API.  Pass base_url="http://llm:8080/v1"
+    (and any non-empty api_key) to route to a local llama.cpp server instead —
+    no registration, no rate limits, no token quotas.
+    run_hunt() calls the LLM directly without bind_tools() to avoid the
+    nameless-function-call 400 error on some Groq-hosted models.
     """
     llm = ChatOpenAI(
         api_key=groq_api_key,
-        base_url="https://api.groq.com/openai/v1",
+        base_url=base_url,
         model=model,
         temperature=0,
     )
-    logger.info("LangChain agent built: model=%s via Groq", model)
+    backend = "llama.cpp (local)" if "groq.com" not in base_url else "Groq cloud"
+    logger.info("LangChain agent built: model=%s backend=%s", model, backend)
     return llm
 
 

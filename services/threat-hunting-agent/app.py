@@ -124,9 +124,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     agent = build_agent(
         groq_api_key=settings.groq_api_key,
         model=settings.hunt_model,
+        base_url=settings.groq_base_url,
     )
     app.state.agent = agent
-    logger.info("LangChain agent built: model=%s", settings.hunt_model)
+    logger.info("LangChain agent built: model=%s base_url=%s", settings.hunt_model, settings.groq_base_url)
 
     # -- FindingsService ---------------------------------------------------------
     findings_svc = FindingsService(
@@ -160,7 +161,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         settings.hunt_batch_window_sec,
     )
 
-    # -- Kafka consumer (reactive, kept as secondary feed) -----------------------
+    # -- Kafka consumer (reactive, secondary feed — non-fatal if unavailable) ----
+    # The SessionPoller is the primary findings path. Kafka adds reactive
+    # event-driven triggers but the service runs correctly without it.
     consumer = ThreatHuntConsumer(
         kafka_bootstrap=settings.kafka_bootstrap_servers,
         hunt_agent=_hunt,
@@ -168,12 +171,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         queue_max=settings.hunt_queue_max,
         persist_fn=_persist,
     )
-    consumer.start()
+    try:
+        consumer.start()
+        logger.info(
+            "Kafka consumer started: tenant=t1 window=%ds",
+            settings.hunt_batch_window_sec,
+        )
+    except Exception as kafka_exc:
+        logger.warning(
+            "Kafka consumer failed to start (non-fatal — SessionPoller is primary): %s",
+            kafka_exc,
+        )
     app.state.consumer = consumer
-    logger.info(
-        "Kafka consumer started: tenant=t1 window=%ds",
-        settings.hunt_batch_window_sec,
-    )
 
     # -- ThreatHunting AI scheduler (continuous proactive scans) ----------------
     threathunting_ai_scheduler = ThreatHuntingAIScheduler(

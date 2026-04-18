@@ -104,6 +104,9 @@ class ThreatHuntConsumer:
             heartbeat_interval_ms=10000,
             max_poll_records=100,
             consumer_timeout_ms=1000,  # so the poll loop can check stop_event
+            # Skip the blocking check_version() DNS call at construction time.
+            # The consumer will reconnect lazily when the broker becomes available.
+            api_version=(2, 0, 0),
         )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────

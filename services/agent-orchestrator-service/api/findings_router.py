@@ -15,6 +15,7 @@ from api.findings_schemas import (
 )
 from dependencies.auth import IdentityContext
 from dependencies.rbac import require_session_override, require_session_read
+from events.publisher import EventPublisher
 from schemas.session import ErrorDetail, ErrorResponse
 from threat_findings.models import ThreatFindingRepository
 from threat_findings.schemas import FindingFilter
@@ -30,6 +31,11 @@ _MAX_LIMIT = 200
 
 def get_findings_service(request: Request) -> ThreatFindingsService:
     return request.app.state.threat_findings_service
+
+
+def get_publisher(request: Request) -> Optional[EventPublisher]:
+    """Return the EventPublisher if available; None otherwise (degrades gracefully)."""
+    return getattr(request.app.state, "event_publisher", None)
 
 
 async def get_async_db(request: Request):
@@ -87,7 +93,7 @@ async def list_findings(
     from_time:      Optional[str]   = Query(None),
     to_time:        Optional[str]   = Query(None),
     min_risk_score: Optional[float] = Query(None, ge=0.0, le=1.0),
-    sort_by:        Optional[str]   = Query(None, pattern="^(risk_score|timestamp)$"),
+    sort_by:        Optional[str]   = Query(None, pattern="^(risk_score|timestamp|created_at)$"),
     limit:          int             = Query(50, ge=1, le=_MAX_LIMIT),
     offset:         int             = Query(0, ge=0),
     identity:       IdentityContext         = Depends(require_session_read),
@@ -217,9 +223,10 @@ async def update_status(
     body:       UpdateStatusRequest,
     request:    Request,
     response:   Response,
-    identity:   IdentityContext         = Depends(require_session_override),
-    repo:       ThreatFindingRepository = Depends(get_finding_repo),
-    svc:        ThreatFindingsService   = Depends(get_findings_service),
+    identity:   IdentityContext             = Depends(require_session_override),
+    repo:       ThreatFindingRepository     = Depends(get_finding_repo),
+    svc:        ThreatFindingsService       = Depends(get_findings_service),
+    publisher:  Optional[EventPublisher]    = Depends(get_publisher),
 ) -> FindingDetailResponse:
     trace_id = getattr(request.state, "trace_id", "")
     logger.info(
@@ -227,9 +234,16 @@ async def update_status(
         finding_id, identity.user_id, body.status, trace_id,
     )
     try:
-        # Verify finding exists first
-        await _get_or_404(finding_id, svc, repo, trace_id)
-        await svc.mark_status(finding_id, body.status, repo)
+        # Capture current status before update so we can emit old_status
+        existing = await _get_or_404(finding_id, svc, repo, trace_id)
+        old_status = existing.status.lower() if existing.status else None
+        await svc.mark_status(
+            finding_id, body.status, repo,
+            publisher=publisher,
+            tenant_id=getattr(identity, "tenant_id", "t1"),
+            changed_by=identity.user_id,
+            old_status=old_status,
+        )
         # Re-fetch updated record
         detail = await _get_or_404(finding_id, svc, repo, trace_id)
         response.headers["X-Trace-ID"] = trace_id

@@ -11,14 +11,22 @@ class Settings(BaseSettings):
     # Kafka
     kafka_bootstrap_servers: str = "kafka-broker:9092"
 
-    # Groq / LLM — GROQ_API_KEY is REQUIRED; service will refuse to start if missing
-    groq_api_key: str = Field(..., min_length=1)
+    # Groq / LLM — set GROQ_API_KEY to your Groq key for cloud inference.
+    # When using a local llama.cpp backend (GROQ_BASE_URL=http://llm:8080/v1)
+    # the key is ignored by the server; any non-empty string works.
+    groq_api_key: str = Field(default="local", min_length=1)
     hunt_model:   str = "llama-3.3-70b-versatile"
 
     # Hunt tuning
     hunt_batch_window_sec: int = 30
     hunt_queue_max:        int = 20
     threathunting_ai_interval_sec: int = 300
+
+    # LLM backend
+    # Set GROQ_BASE_URL=http://llm:8080/v1 to use the local llama.cpp server
+    # instead of the Groq cloud API.  GROQ_API_KEY is still required by the
+    # OpenAI SDK but is ignored by llama.cpp (any non-empty string works).
+    groq_base_url: str = "https://api.groq.com/openai/v1"
 
     # Downstream services
     orchestrator_url:  str = "http://agent-orchestrator:8094"

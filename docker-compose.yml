@@ -380,7 +380,7 @@ services:
     container_name: cpm-threat-hunting-agent
     environment:
       <<: *common-env
-      GROQ_API_KEY: ${GROQ_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY:-local}
       HUNT_MODEL: ${HUNT_MODEL:-llama-3.3-70b-versatile}
       TENANTS: ${TENANTS:-t1}
       ORCHESTRATOR_URL: http://agent-orchestrator:8094
@@ -393,6 +393,8 @@ services:
       HUNT_BATCH_WINDOW_SEC: ${HUNT_BATCH_WINDOW_SEC:-30}
       HUNT_QUEUE_MAX: ${HUNT_QUEUE_MAX:-20}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # LLM backend — defaults to Groq cloud; set GROQ_BASE_URL to use local llm.cpp
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-https://api.groq.com/openai/v1}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8095/health', timeout=4)"]
       interval: 15s
@@ -410,6 +412,66 @@ services:
         condition: service_healthy
       spm-db:
         condition: service_healthy
+      api:
+        condition: service_healthy
+      llm:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Local LLM (llama.cpp server) ─────────────────────────────────────────
+  # One-time model download: runs once, exits, stores GGUF in llm-models volume.
+  # Skipped automatically on subsequent restarts if the file already exists.
+  llm-model-init:
+    image: python:3.12-slim
+    container_name: cpm-llm-model-init
+    volumes:
+      - llm-models:/models
+    command:
+      - sh
+      - -c
+      - |
+        if [ -f /models/model.gguf ]; then
+          echo 'Model already downloaded, skipping.'
+        else
+          echo 'Downloading llama-3.1-8b-instruct Q4_K_M (~4.9 GB)...'
+          pip install -q 'huggingface_hub>=0.23'
+          python -c "from huggingface_hub import hf_hub_download; import shutil; p = hf_hub_download(repo_id='bartowski/Meta-Llama-3.1-8B-Instruct-GGUF', filename='Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf', local_dir='/models', local_dir_use_symlinks=False); shutil.move(p, '/models/model.gguf'); print('Download complete.')"
+        fi
+    restart: "no"
+
+  # llama-cpp-python HTTP server — OpenAI-compatible /v1/chat/completions.
+  # NOTE: runs on CPU inside Docker's Linux VM on Mac (no Metal passthrough).
+  # llama-3.1-8b on M4 CPU: ~15-25s per hunt call — fine for background work.
+  # First `docker compose build llm` compiles llama-cpp-python (~3 min once).
+  llm:
+    build:
+      context: .
+      dockerfile: services/llm/Dockerfile
+    container_name: cpm-llm
+    volumes:
+      - llm-models:/models
+    command:
+      - --model
+      - /models/model.gguf
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8080"
+      - --n_ctx
+      - "4096"
+      - --n_batch
+      - "512"
+      - --n_threads
+      - "8"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/v1/models || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 180s
+    depends_on:
+      llm-model-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   ui:
@@ -426,3 +488,4 @@ volumes:
   spm-db-data:
   grafana-data:
   agent-orchestrator-data:
+  llm-models:

@@ -101,6 +101,28 @@ class ConnectionManager:
 
     # ── Observability ─────────────────────────────────────────────────────────
 
+    async def broadcast(self, session_id: str, event: dict) -> None:
+        """
+        Put *event* directly into all queues registered for *session_id*.
+
+        Used by in-process background tasks (e.g. simulation runner) that
+        want to stream events to the browser without going through Kafka.
+        Safe to call from any coroutine running in the same event loop.
+        """
+        async with self._lock:
+            entries = set(self._connections.get(session_id, set()))
+        for _, _, queue in entries:
+            if queue.qsize() < QUEUE_MAX_SIZE:
+                await queue.put(event)
+            else:
+                log.warning(
+                    "ws_broadcast_queue_full session_id=%s event_type=%s — dropping",
+                    session_id,
+                    event.get("event_type", "?"),
+                )
+
+    # ── Observability ─────────────────────────────────────────────────────────
+
     @property
     def active_session_ids(self) -> Set[str]:
         """Set of session_ids that currently have at least one live connection."""

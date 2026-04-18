@@ -67,20 +67,23 @@ def _utcnow() -> datetime:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class EventType(str, Enum):
-    PROMPT_RECEIVED  = "prompt.received"
-    RISK_CALCULATED  = "risk.calculated"
-    POLICY_DECISION  = "policy.decision"
-    SESSION_CREATED  = "session.created"
-    SESSION_BLOCKED  = "session.blocked"
-    SESSION_COMPLETED = "session.completed"
-    LLM_RESPONSE     = "llm.response"
-    OUTPUT_SCANNED   = "output.scanned"
-    TOOL_REQUEST     = "tool.request"
-    TOOL_OBSERVATION = "tool.observation"
-    MEMORY_REQUEST   = "memory.request"
-    MEMORY_RESULT    = "memory.result"
-    FINAL_RESPONSE   = "final.response"
-    UNKNOWN          = "unknown"
+    PROMPT_RECEIVED         = "prompt.received"
+    RISK_CALCULATED         = "risk.calculated"
+    POLICY_DECISION         = "policy.decision"
+    SESSION_CREATED         = "session.created"
+    SESSION_BLOCKED         = "session.blocked"
+    SESSION_COMPLETED       = "session.completed"
+    LLM_RESPONSE            = "llm.response"
+    OUTPUT_SCANNED          = "output.scanned"
+    TOOL_REQUEST            = "tool.request"
+    TOOL_OBSERVATION        = "tool.observation"
+    MEMORY_REQUEST          = "memory.request"
+    MEMORY_RESULT           = "memory.result"
+    FINAL_RESPONSE          = "final.response"
+    # ── Threat-finding events ──────────────────────────────────────────────
+    FINDING_CREATED         = "finding.created"
+    FINDING_STATUS_CHANGED  = "finding.status_changed"
+    UNKNOWN                 = "unknown"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -260,3 +263,45 @@ class SessionTimelineEntry(BaseModel):
     status:     str
     summary:    str
     timestamp:  datetime
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain payload: finding.created  (threat-hunting-agent → orchestrator)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FindingCreatedPayload(BaseModel):
+    """
+    Emitted to Kafka when a new threat finding is persisted by the orchestrator.
+
+    Enables downstream consumers (dashboards, SIEM connectors, alerting rules)
+    to react to new threat-hunting findings in real time without polling the DB.
+    """
+    finding_id:     str
+    tenant_id:      str
+    severity:       str                 # low | medium | high | critical
+    title:          str
+    risk_score:     Optional[float]     = None
+    confidence:     Optional[float]     = None
+    asset:          Optional[str]       = None
+    source:         str                 = "threat-hunting-agent"
+    priority_score: Optional[float]     = None
+    should_open_case: bool              = False
+    case_id:        Optional[str]       = None
+    created_at:     datetime            = Field(default_factory=_utcnow)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Domain payload: finding.status_changed  (analyst workflow events)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class FindingStatusChangedPayload(BaseModel):
+    """
+    Emitted to Kafka when a finding's status transitions (open → investigating
+    → resolved).  Enables audit trails and downstream workflow automation.
+    """
+    finding_id:  str
+    tenant_id:   str
+    old_status:  Optional[str]  = None   # None when status is unknown before transition
+    new_status:  str                     # open | investigating | resolved
+    changed_by:  Optional[str]  = None   # user_id of the analyst, if available
+    changed_at:  datetime               = Field(default_factory=_utcnow)

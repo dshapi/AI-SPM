@@ -25,6 +25,8 @@ from events.store import EventStore
 from schemas.events import (
     EventEnvelope,
     EventType,
+    FindingCreatedPayload,
+    FindingStatusChangedPayload,
     LLMResponsePayload,
     OutputScannedPayload,
     PolicyDecisionPayload,
@@ -44,14 +46,17 @@ logger = logging.getLogger(__name__)
 
 _TENANT = os.getenv("TENANTS", "t1").split(",")[0].strip()  # single-tenant: always t1
 
-TOPIC_PROMPT_RECEIVED    = os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",   f"cpm.{_TENANT}.sessions.prompt_received")
-TOPIC_RISK_CALCULATED    = os.getenv("KAFKA_TOPIC_RISK_CALCULATED",   f"cpm.{_TENANT}.sessions.risk_calculated")
-TOPIC_POLICY_DECISION    = os.getenv("KAFKA_TOPIC_POLICY_DECISION",   f"cpm.{_TENANT}.sessions.policy_decision")
-TOPIC_SESSION_CREATED    = os.getenv("KAFKA_TOPIC_SESSION_CREATED",   f"cpm.{_TENANT}.sessions.created")
-TOPIC_SESSION_BLOCKED    = os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",   f"cpm.{_TENANT}.sessions.blocked")
-TOPIC_SESSION_COMPLETED  = os.getenv("KAFKA_TOPIC_SESSION_COMPLETED", f"cpm.{_TENANT}.sessions.completed")
-TOPIC_LLM_RESPONSE       = os.getenv("KAFKA_TOPIC_LLM_RESPONSE",      f"cpm.{_TENANT}.sessions.llm_response")
-TOPIC_OUTPUT_SCANNED     = os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",    f"cpm.{_TENANT}.sessions.output_scanned")
+TOPIC_PROMPT_RECEIVED    = os.getenv("KAFKA_TOPIC_PROMPT_RECEIVED",    f"cpm.{_TENANT}.sessions.prompt_received")
+TOPIC_RISK_CALCULATED    = os.getenv("KAFKA_TOPIC_RISK_CALCULATED",    f"cpm.{_TENANT}.sessions.risk_calculated")
+TOPIC_POLICY_DECISION    = os.getenv("KAFKA_TOPIC_POLICY_DECISION",    f"cpm.{_TENANT}.sessions.policy_decision")
+TOPIC_SESSION_CREATED    = os.getenv("KAFKA_TOPIC_SESSION_CREATED",    f"cpm.{_TENANT}.sessions.created")
+TOPIC_SESSION_BLOCKED    = os.getenv("KAFKA_TOPIC_SESSION_BLOCKED",    f"cpm.{_TENANT}.sessions.blocked")
+TOPIC_SESSION_COMPLETED  = os.getenv("KAFKA_TOPIC_SESSION_COMPLETED",  f"cpm.{_TENANT}.sessions.completed")
+TOPIC_LLM_RESPONSE       = os.getenv("KAFKA_TOPIC_LLM_RESPONSE",       f"cpm.{_TENANT}.sessions.llm_response")
+TOPIC_OUTPUT_SCANNED     = os.getenv("KAFKA_TOPIC_OUTPUT_SCANNED",     f"cpm.{_TENANT}.sessions.output_scanned")
+# ── Threat-finding topics ──────────────────────────────────────────────────────
+TOPIC_FINDING_CREATED        = os.getenv("KAFKA_TOPIC_FINDING_CREATED",        f"cpm.{_TENANT}.findings.created")
+TOPIC_FINDING_STATUS_CHANGED = os.getenv("KAFKA_TOPIC_FINDING_STATUS_CHANGED", f"cpm.{_TENANT}.findings.status_changed")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -378,4 +383,112 @@ class EventPublisher:
                 f"{payload.event_count} events emitted"
             ),
             payload=payload,
+        )
+
+    # ── Threat-finding events ──────────────────────────────────────────────
+
+    async def emit_finding_created(
+        self,
+        finding_id: str,
+        tenant_id: str,
+        severity: str,
+        title: str,
+        *,
+        risk_score: Optional[float] = None,
+        confidence: Optional[float] = None,
+        asset: Optional[str] = None,
+        source: str = "threat-hunting-agent",
+        priority_score: Optional[float] = None,
+        should_open_case: bool = False,
+        case_id: Optional[str] = None,
+    ) -> SessionLifecycleEvent:
+        """
+        Emit a finding.created event to Kafka and the in-memory store.
+
+        Called after a new ThreatFinding is persisted and prioritized.
+        Downstream consumers (SIEM connectors, dashboards, alerting rules)
+        subscribe to ``cpm.<tenant>.findings.created`` to receive real-time
+        notifications without polling the findings REST API.
+        """
+        from uuid import UUID as _UUID
+        payload = FindingCreatedPayload(
+            finding_id=finding_id,
+            tenant_id=tenant_id,
+            severity=severity,
+            title=title,
+            risk_score=risk_score,
+            confidence=confidence,
+            asset=asset,
+            source=source,
+            priority_score=priority_score,
+            should_open_case=should_open_case,
+            case_id=case_id,
+        )
+        # Use the finding_id UUID as the "session_id" for lifecycle-event storage.
+        # Findings are not session-scoped, so we repurpose this field as the
+        # finding's own identifier.  The event is still queryable by finding_id
+        # via the payload field.
+        try:
+            sid = _UUID(finding_id)
+        except ValueError:
+            sid = uuid4()
+
+        return await self._emit(
+            event_type=EventType.FINDING_CREATED,
+            topic=TOPIC_FINDING_CREATED,
+            session_id=sid,
+            correlation_id=str(uuid4()),
+            step=1,
+            status="created",
+            summary=(
+                f"Finding created: [{severity.upper()}] {title}"
+                + (f" — case auto-opened" if case_id else "")
+            ),
+            payload=payload,
+            tenant_id=tenant_id,
+        )
+
+    async def emit_finding_status_changed(
+        self,
+        finding_id: str,
+        tenant_id: str,
+        new_status: str,
+        *,
+        old_status: Optional[str] = None,
+        changed_by: Optional[str] = None,
+    ) -> SessionLifecycleEvent:
+        """
+        Emit a finding.status_changed event to Kafka and the in-memory store.
+
+        Called after an analyst transitions a finding's status
+        (open → investigating → resolved).  Enables audit trails and
+        downstream workflow automation.
+        """
+        from uuid import UUID as _UUID
+        payload = FindingStatusChangedPayload(
+            finding_id=finding_id,
+            tenant_id=tenant_id,
+            old_status=old_status,
+            new_status=new_status,
+            changed_by=changed_by,
+        )
+        try:
+            sid = _UUID(finding_id)
+        except ValueError:
+            sid = uuid4()
+
+        return await self._emit(
+            event_type=EventType.FINDING_STATUS_CHANGED,
+            topic=TOPIC_FINDING_STATUS_CHANGED,
+            session_id=sid,
+            correlation_id=str(uuid4()),
+            step=2,
+            status=new_status,
+            summary=(
+                f"Finding status → {new_status.upper()}"
+                + (f" (was {old_status})" if old_status else "")
+                + (f" by {changed_by}" if changed_by else "")
+            ),
+            payload=payload,
+            tenant_id=tenant_id,
         )

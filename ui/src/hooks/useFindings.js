@@ -3,11 +3,11 @@
  * ──────────────
  * React hooks for loading, filtering, and mutating Findings.
  *
- * useFindings(filters) — paginated list with filter state
- * useFinding(id)       — single finding detail (for detail panel or breadcrumb)
+ * useFindings(filters, opts) — paginated list with filter state + background polling
+ * useFinding(id)              — single finding detail (for detail panel or breadcrumb)
  */
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import {
   listFindings,
   getFinding,
@@ -15,12 +15,28 @@ import {
   linkFindingCase,
 } from '../api/findingsApi.js'
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+
+/**
+ * Default background-poll interval (ms).
+ * Matches the pattern used by Cases and Runtime pages (30 s).
+ * New findings from the threat-hunting-agent appear within one interval.
+ */
+const DEFAULT_POLL_INTERVAL_MS = 30_000
+
 // ── useFindings ───────────────────────────────────────────────────────────────
 
 /**
  * Load a paginated, filtered list of findings.
  *
- * @param {object} filters   - severity, status, asset, min_risk_score, …
+ * Findings are automatically re-fetched in the background every
+ * `pollIntervalMs` milliseconds so the table stays live without a manual
+ * refresh.  The background poll is silent — it never sets loading=true, so
+ * the spinner only shows on the initial mount and explicit filter changes.
+ *
+ * @param {object} filters          - severity, status, asset, min_risk_score, …
+ * @param {object} [opts]
+ * @param {number} [opts.pollIntervalMs=30000]  - Background-poll interval in ms (0 to disable)
  * @returns {{
  *   findings: object[],
  *   total: number,
@@ -31,7 +47,7 @@ import {
  *   attachCase: (id, caseId) => Promise<void>,
  * }}
  */
-export function useFindings(filters = {}) {
+export function useFindings(filters = {}, { pollIntervalMs = DEFAULT_POLL_INTERVAL_MS } = {}) {
   const [findings, setFindings] = useState([])
   const [total,    setTotal]    = useState(0)
   const [loading,  setLoading]  = useState(true)
@@ -41,8 +57,11 @@ export function useFindings(filters = {}) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const filterKey = JSON.stringify(filters)
 
-  const fetchFindings = useCallback(async () => {
-    setLoading(true)
+  // Track whether this is a background poll (suppresses the loading spinner)
+  const isBackgroundRef = useRef(false)
+
+  const fetchFindings = useCallback(async ({ background = false } = {}) => {
+    if (!background) setLoading(true)
     setError(null)
     try {
       const data = await listFindings(filters)
@@ -53,13 +72,29 @@ export function useFindings(filters = {}) {
       setError(e.message || 'Failed to load findings')
       // Keep previous data visible — don't wipe the table on transient errors
     } finally {
-      setLoading(false)
+      if (!background) setLoading(false)
     }
   // filterKey is the stable dep; individual filter props are captured by closure
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filterKey])
 
-  useEffect(() => { fetchFindings() }, [fetchFindings])
+  // Initial load (with loading spinner) whenever filters change
+  useEffect(() => {
+    isBackgroundRef.current = false
+    fetchFindings({ background: false })
+  }, [fetchFindings])
+
+  // Background poll — silently re-fetches findings at fixed intervals so the
+  // table reflects findings published by the threat-hunting-agent without the
+  // user having to click "Refresh ↺".
+  useEffect(() => {
+    if (!pollIntervalMs || pollIntervalMs <= 0) return
+    const timer = setInterval(() => {
+      console.debug('[useFindings] background poll')
+      fetchFindings({ background: true })
+    }, pollIntervalMs)
+    return () => clearInterval(timer)
+  }, [fetchFindings, pollIntervalMs])
 
   // ── Mutations ─────────────────────────────────────────────────────────────
 
@@ -109,7 +144,10 @@ export function useFindings(filters = {}) {
     }
   }, [])
 
-  return { findings, total, loading, error, refetch: fetchFindings, markStatus, attachCase }
+  // Public refetch is always foreground (shows loading spinner)
+  const refetch = useCallback(() => fetchFindings({ background: false }), [fetchFindings])
+
+  return { findings, total, loading, error, refetch, markStatus, attachCase }
 }
 
 // ── useFinding (single-item fetch) ────────────────────────────────────────────
