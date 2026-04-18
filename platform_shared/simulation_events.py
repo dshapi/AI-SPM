@@ -10,7 +10,7 @@ browser connected on that session_id.
 Wire format (payload fields):
   simulation.started    prompt, attack_type, execution_mode
   simulation.progress   step, total, message, probe_name (optional)
-  simulation.blocked    categories, decision_reason, correlation_id
+  simulation.blocked    categories, decision_reason, correlation_id, explanation (optional)
   simulation.allowed    response_preview, correlation_id
   simulation.completed  summary dict
   simulation.error      error_message
