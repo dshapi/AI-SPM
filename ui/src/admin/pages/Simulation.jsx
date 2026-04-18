@@ -14,7 +14,7 @@ import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { ResultsPanel }  from '../../components/simulation/ResultsPanel.jsx'
-import { createSession, fetchSessionEvents, fetchSessionResults, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
+import { createSession, fetchSessionEvents, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
 import { useSimulationStream } from '../../hooks/useSimulationStream.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
@@ -505,6 +505,97 @@ function _adaptBackendResults(sr) {
   }
 }
 
+
+/**
+ * _buildResultFromSimEvents(simEvents) → MOCK_RESULTS-compatible object
+ *
+ * Constructs the result object directly from the WS simulation events.
+ * Used instead of fetchSessionResults because simulation sessions live on
+ * api:8080 (/simulate/single|garak) and have no corresponding record in
+ * the agent-orchestrator (/api/v1/sessions).  Calling fetchSessionResults
+ * always returned 404 silently, leaving `result` permanently null.
+ *
+ * Information extracted:
+ *   simulation.blocked  → verdict, categories, decision_reason, explanation
+ *   simulation.allowed  → verdict, response_preview
+ *   simulation.completed → summary (probes_run for Garak)
+ *   All events          → decision trace timeline
+ */
+function _buildResultFromSimEvents(simEvents) {
+  if (!simEvents || simEvents.length === 0) return null
+
+  // Find terminal event
+  const blockedEv  = simEvents.find(e => e.stage === 'blocked')
+  const allowedEv  = simEvents.find(e => e.stage === 'allowed')
+  const completedEv = simEvents.find(e => e.stage === 'completed')
+  const terminal   = blockedEv || allowedEv
+
+  if (!terminal && !completedEv) return null   // no useful data yet
+
+  const isBlocked  = !!blockedEv
+  const verdict    = isBlocked ? 'blocked' : 'allowed'
+  const d          = (terminal || completedEv).details || {}
+  const summary    = completedEv?.details?.summary || {}
+
+  // Decision trace — one entry per sim event
+  const decisionTrace = simEvents.map((e, idx) => {
+    const rawLabel = (e.event_type || '')
+      .split('.').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+    const ts = e.timestamp
+      ? (() => { try { return new Date(e.timestamp).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }) } catch { return '' } })()
+      : ''
+    return { step: idx + 1, label: rawLabel, status: e.status, detail: e.details?.message || rawLabel, ts }
+  })
+
+  // Policy impact — derive from categories on blocked event
+  const categories = d.categories || summary.categories || []
+  const policyAction = isBlocked ? 'BLOCK' : 'ALLOW'
+  const policyImpact = categories.map(cat => ({
+    policy:   cat.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+    action:   policyAction,
+    trigger:  d.decision_reason || cat,
+    severity: isBlocked ? 'critical' : 'ok',
+  }))
+  if (policyImpact.length === 0) {
+    policyImpact.push({
+      policy:   'Policy Engine v1',
+      action:   policyAction,
+      trigger:  d.decision_reason || (isBlocked ? 'Blocked by policy engine' : 'Allowed through policy gate'),
+      severity: isBlocked ? 'critical' : 'ok',
+    })
+  }
+
+  const policiesTriggered = categories.length > 0 ? categories : ['Policy Engine v1']
+
+  // Garak summary info
+  const probesRun  = summary.probes_run
+  const outputText = isBlocked
+    ? null
+    : probesRun
+      ? `[Garak scan completed — ${probesRun} probe${probesRun !== 1 ? 's' : ''} run, profile: ${summary.profile || 'default'}]`
+      : (d.response_preview || '[Session allowed through policy gate]')
+
+  return {
+    verdict,
+    riskScore:         isBlocked ? 85 : 20,
+    riskLevel:         isBlocked ? 'High' : 'Low',
+    executionMs:       0,
+    policiesTriggered,
+    decisionTrace,
+    output:            outputText,
+    blockedMessage:    isBlocked
+      ? `Your request was terminated by the policy engine. ${d.decision_reason || ''} This event has been logged for security review.`.trim()
+      : null,
+    policyImpact,
+    risk: {
+      injectionDetected: categories.some(c => c.includes('injection')),
+      anomalyScore:      isBlocked ? 0.85 : 0.2,
+      techniques:        categories.map(c => c.replace(/_/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase())),
+      explanation:       d.decision_reason || (isBlocked ? 'Blocked by policy engine.' : 'No elevated risk signals detected.'),
+    },
+    recommendations: [],
+  }
+}
 
 // ── Small primitives ───────────────────────────────────────────────────────────
 
@@ -1088,22 +1179,28 @@ export default function Simulation() {
   }
 
   /**
-   * Fetch structured results from backend whenever a WS event arrives.
+   * Build result from simEvents whenever a terminal stage event arrives.
    *
-   * Each WS event triggers a GET /api/v1/sessions/{id}/results call
-   * to retrieve the latest structured results built by the backend.
-   * A thin adapter maps backend shape → legacy UI shape.
+   * Replaces the previous fetchSessionResults() call which targeted
+   * ORCHESTRATOR_BASE/sessions/{id}/results — the agent-orchestrator.
+   * Simulation sessions (run via /api/simulate/single|garak on api:8080)
+   * have NO record in the orchestrator, so that call always returned 404
+   * and `result` was permanently null, leaving the Summary/Output/Policy
+   * Impact tabs empty even after a successful run.
    *
-   * Only fires when we have a live session (not the mock-fallback path).
+   * We now derive the result purely from the WS events that the backend
+   * already emits: simulation.blocked, simulation.allowed, simulation.completed.
+   * fetchSessionResults / _adaptBackendResults are kept for the Runtime page
+   * (agent-orchestrator sessions) but are not used here.
    */
   useEffect(() => {
-    if (!sessionId || apiError || simEvents.length === 0) return
-
-    // WS event arrived → pull fresh structured results from backend
-    fetchSessionResults(sessionId)
-      .then(sr => setResult(_adaptBackendResults(sr)))
-      .catch(err => console.warn('[SimLab] Results refresh failed:', err.message))
-  }, [simEvents, sessionId, apiError])
+    if (simEvents.length === 0) return
+    const last = simEvents[simEvents.length - 1]
+    // Only materialise result on a terminal event — avoids premature renders
+    if (!['completed', 'error', 'blocked', 'allowed'].includes(last.stage)) return
+    const built = _buildResultFromSimEvents(simEvents)
+    if (built) setResult(built)
+  }, [simEvents])
 
   // Stop running when simulation reaches a terminal stage via stream events.
   // Terminal stages from the real backend pipeline:

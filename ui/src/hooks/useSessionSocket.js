@@ -110,11 +110,13 @@ export function useSessionSocket() {
       // Skip control frames
       if (msg.type === 'ping' || msg.type === 'connected') return
 
-      // Deduplicate: each pipeline step fires exactly once, so event_type is
-      // a good key. For services that could emit the same type twice, we append
-      // the truncated timestamp.
+      // Deduplicate using event_type + correlation_id + timestamp so that
+      // Garak multi-probe runs (which emit the same event_type for every probe,
+      // each with a distinct correlation_id) are all passed through.
+      // Using event_type alone was the bug: the 2nd+ simulation.allowed /
+      // simulation.progress events per run were silently dropped.
       const dedup = msg.event_type
-        ? `${msg.event_type}`
+        ? `${msg.event_type}:${msg.correlation_id || ''}:${msg.timestamp || ''}`
         : `${msg.source_service}:${msg.timestamp}`
       if (seenRef.current.has(dedup)) return
       seenRef.current.add(dedup)
