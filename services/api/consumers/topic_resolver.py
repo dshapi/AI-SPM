@@ -51,7 +51,7 @@ EXTRA_TOPICS_ENV = os.getenv("KAFKA_WS_EXTRA_TOPICS", "")
 INCLUDE_ORCHESTRATOR_TOPICS = os.getenv("KAFKA_WS_INCLUDE_ORCHESTRATOR", "true").lower() != "false"
 
 # Subset of legacy platform topics relevant to live session monitoring
-_RELEVANT_PLATFORM_TOPICS = ("raw", "posture_enriched", "decision", "audit")
+_RELEVANT_PLATFORM_TOPICS = ("raw", "posture_enriched", "decision", "audit", "simulation_events")
 
 # Flat-format equivalents (legacy / single-tenant)
 _FLAT_TOPICS = [
