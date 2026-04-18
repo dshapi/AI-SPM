@@ -1105,11 +1105,16 @@ export default function Simulation() {
       .catch(err => console.warn('[SimLab] Results refresh failed:', err.message))
   }, [simEvents, sessionId, apiError])
 
-  // Stop running when simulation completes or errors via stream events
+  // Stop running when simulation reaches a terminal stage via stream events.
+  // Terminal stages from the real backend pipeline:
+  //   blocked  — policy.decision with decision=block
+  //   allowed  — policy.decision with decision=allow
+  //   error    — any error event
+  //   completed — future/legacy simulation.completed event
   useEffect(() => {
     const last = simEvents[simEvents.length - 1]
     if (!last) return
-    if (last.stage === 'completed' || last.stage === 'error') {
+    if (['completed', 'error', 'blocked', 'allowed'].includes(last.stage)) {
       setRunning(false)
     }
   }, [simEvents])
