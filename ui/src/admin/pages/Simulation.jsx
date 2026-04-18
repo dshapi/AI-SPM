@@ -13,8 +13,9 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
-import { createSession, fetchSessionEvents, fetchSessionResults } from '../../api/simulationApi.js'
+import { createSession, fetchSessionEvents, fetchSessionResults, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
 import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
+import { useSimulationStream } from '../../hooks/useSimulationStream.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -1041,15 +1042,22 @@ function DecisionTrace({ trace }) {
 
 // ── SimulationResult ───────────────────────────────────────────────────────────
 
-const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations']
+const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline']
 
-function SimulationResult({ result, attackType, config, running, apiError, sessionId, connectionStatus }) {
+function SimulationResult({ result, attackType, config, running, apiError, sessionId, connectionStatus, simEvents = [] }) {
   const [activeTab, setActiveTab] = useState('Summary')
   const [copied, setCopied] = useState(false)
 
   // Auto-switch to Decision Trace (most informative tab) on each new result.
   // Spec: prefer Timeline if it exists, otherwise Decision Trace; never Summary.
   useEffect(() => { setActiveTab('Decision Trace') }, [result])
+
+  // Switch to Timeline tab when a run starts (events arriving)
+  useEffect(() => {
+    if (simEvents.length === 0 && connectionStatus === 'connecting') {
+      setActiveTab('Timeline')
+    }
+  }, [simEvents, connectionStatus])
 
   // Show spinner while the HTTP round-trip is in progress OR while we're
   // waiting for the first WS event to arrive (no result yet + socket pending)
@@ -1548,6 +1556,56 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
           </div>
         )}
 
+        {/* ── Timeline ── */}
+        {activeTab === 'Timeline' && (
+          <div style={{ padding: '16px 0' }}>
+            <div style={{ marginBottom: 8, fontSize: 12, color: '#6b7280' }}>
+              {connectionStatus === 'connected' ? '● Live' : connectionStatus}
+            </div>
+            {simEvents.length === 0 ? (
+              <p style={{ color: '#9ca3af', fontSize: 13 }}>No events yet.</p>
+            ) : (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {simEvents.map(ev => (
+                  <div key={ev.id} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 12,
+                    padding: '8px 12px',
+                    background: ev.stage === 'blocked' ? '#fef2f2'
+                              : ev.stage === 'allowed' ? '#f0fdf4'
+                              : ev.stage === 'error'   ? '#fff7ed'
+                              : '#f9fafb',
+                    borderRadius: 6,
+                    borderLeft: `3px solid ${
+                      ev.stage === 'blocked' ? '#ef4444'
+                    : ev.stage === 'allowed' ? '#22c55e'
+                    : ev.stage === 'error'   ? '#f97316'
+                    : '#d1d5db'}`,
+                  }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontWeight: 500, fontSize: 13 }}>
+                        {ev.event_type}
+                      </div>
+                      {ev.details?.message && (
+                        <div style={{ fontSize: 12, color: '#6b7280', marginTop: 2 }}>
+                          {ev.details.message}
+                        </div>
+                      )}
+                      {ev.details?.categories?.length > 0 && (
+                        <div style={{ fontSize: 12, color: '#ef4444', marginTop: 2 }}>
+                          Categories: {ev.details.categories.join(', ')}
+                        </div>
+                      )}
+                    </div>
+                    <div style={{ fontSize: 11, color: '#9ca3af', whiteSpace: 'nowrap' }}>
+                      {ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString() : ''}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
       </div>
     </div>
   )
@@ -1598,7 +1656,8 @@ export default function Simulation() {
   const [resultB,     setResultB]    = useState(null)   // after
 
   // ── WebSocket live streaming ────────────────────────────────────────────────
-  const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
+  const { connectionStatus: wsConnectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
+  const { connectionStatus, simEvents, startStream, stopStream } = useSimulationStream()
 
   /**
    * Fetch structured results from backend whenever a WS event arrives.
@@ -1618,109 +1677,49 @@ export default function Simulation() {
       .catch(err => console.warn('[SimLab] Results refresh failed:', err.message))
   }, [liveEvents, sessionId, apiError])
 
+  // Stop running when simulation completes or errors via stream events
+  useEffect(() => {
+    const last = simEvents[simEvents.length - 1]
+    if (!last) return
+    if (last.stage === 'completed' || last.stage === 'error') {
+      setRunning(false)
+    }
+  }, [simEvents])
+
   // ── Config change handler ───────────────────────────────────────────────────
   const handleChange = (key, val) => setConfig(c => ({ ...c, [key]: val }))
 
   // ── Run simulation ──────────────────────────────────────────────────────────
   const handleRun = useCallback(async () => {
+    const sid = crypto.randomUUID()
+    setSessionId(sid)
     setRunning(true)
     setResult(null)
     setApiError(null)
-    setSessionId(null)
-    disconnectWs()   // tear down any prior WS connection
 
-    // ── Garak automated-attack path ─────────────────────────────────────────
-    if (config.attackType === 'custom' && config.customMode === 'garak') {
-      try {
-        const resp = await fetch('/api/simulate/garak', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({
-            profile: config.garakConfig.profile.toLowerCase().replace(/ /g, '_'),
-            probes:  config.garakConfig.probes,
-            target:  config.agent,
-            model:   config.model,
-          }),
-        })
-        if (!resp.ok) throw new Error(`Garak API ${resp.status}`)
-        const data = await resp.json()
-        const r = _adaptBackendResults(data)
-        setResult(r)
-        if (compareMode) {
-          if (!resultA) setResultA(r)
-          else          setResultB(r)
-        }
-      } catch (err) {
-        console.warn('[SimLab] Garak API unavailable — showing mock:', err.message)
-        const r = MOCK_RESULTS.custom
-        setApiError(err.message)
-        setResult(r)
-        if (compareMode) {
-          if (!resultA) setResultA(r)
-          else          setResultB(r)
-        }
-      } finally {
-        setRunning(false)
-      }
-      return
-    }
+    // Connect WS *before* POST so no events are missed
+    startStream(sid)
 
     try {
-      // ── Step 1: Submit prompt to agent-orchestrator ───────────────────────
-      // The user's selected policies / useCurrentPolicies toggle are included
-      // in the context so they're traceable in the session record, even though
-      // the default PolicyClient currently evaluates all policies it knows
-      // about rather than filtering by this selection.
-      const sessionData = await createSession({
-        agentId: config.agent,
-        prompt:  config.prompt,
-        tools:   [],
-        context: {
-          model:                config.model,
-          environment:          config.environment,
-          attack_type:          config.attackType,
-          exec_mode:            config.execMode,
-          use_current_policies: config.useCurrentPolicies,
-          selected_policies:    config.selectedPolicies,
-        },
-      })
-
-      const sid = String(sessionData.session_id)
-      setSessionId(sid)
-
-      // ── Step 2: REST hydration — fetch structured results from backend ─────
-      // This handles pipelines that complete before the WS connection is ready.
-      try {
-        const sr = await fetchSessionResults(sid)
-        const r  = _adaptBackendResults(sr)
-        setResult(r)
-        if (compareMode) {
-          if (!resultA) setResultA(r)
-          else          setResultB(r)
-        }
-      } catch (evtErr) {
-        // Results endpoint unavailable — WS refresh path will hydrate on first event
-        console.warn('[SimLab] Results fetch failed (WS will hydrate):', evtErr.message)
+      if (config.attackType === 'custom' && config.customMode === 'garak') {
+        await runGarakSimulation({
+          garakConfig: config.garakConfig,
+          sessionId: sid,
+          executionMode: config.execMode,
+        })
+      } else {
+        await runSinglePromptSimulation({
+          prompt: config.prompt,
+          sessionId: sid,
+          executionMode: config.execMode,
+          attackType: config.attackType,
+        })
       }
-
-      // ── Step 3: Open WebSocket for real-time incremental updates ──────────
-      // The live-update useEffect above will re-derive result on each WS event.
-      connectWs(sid)
-
     } catch (err) {
-      // POST /sessions failed — graceful degradation to deterministic mock
-      console.warn('[SimLab] Live API unavailable — showing simulated results:', err.message)
-      const r = MOCK_RESULTS[config.attackType] ?? MOCK_RESULTS.exfiltration
-      setApiError(err.message)
-      setResult(r)
-      if (compareMode) {
-        if (!resultA) setResultA(r)
-        else          setResultB(r)
-      }
-    } finally {
+      console.error('[SimLab] run error:', err)
       setRunning(false)
     }
-  }, [config, compareMode, resultA, connectWs, disconnectWs])
+  }, [config, startStream])
 
   // ── Reset ───────────────────────────────────────────────────────────────────
   const handleReset = () => {
@@ -1817,10 +1816,10 @@ export default function Simulation() {
                 </Badge>
                 <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultA.riskScore}</span>
               </div>
-              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
+              <SimulationResult result={resultA} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
             </>
           ) : (
-            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
+            <SimulationResult result={result} attackType={config.attackType} config={config} running={running} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
           )}
         </div>
 
@@ -1835,7 +1834,7 @@ export default function Simulation() {
               <span className="text-[10px] text-gray-400 ml-auto font-mono">Score: {resultB.riskScore}</span>
               <CompareBadge a={resultA} b={resultB} />
             </div>
-            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} />
+            <SimulationResult result={resultB} attackType={config.attackType} config={config} running={false} apiError={apiError} sessionId={sessionId} connectionStatus={connectionStatus} simEvents={simEvents} />
           </div>
         )}
       </div>
