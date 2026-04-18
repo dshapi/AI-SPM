@@ -103,11 +103,16 @@ def publish_blocked(
     decision_reason: str,
     correlation_id: str = "",
     tenant_id: str = "t1",
+    explanation: dict[str, Any] | None = None,
 ) -> None:
-    _emit(producer, tenant_id, session_id, "simulation.blocked", {
+    payload: dict[str, Any] = {
         "categories": categories,
         "decision_reason": decision_reason,
-    }, correlation_id=correlation_id)
+    }
+    if explanation is not None:
+        payload["explanation"] = explanation
+    _emit(producer, tenant_id, session_id, "simulation.blocked",
+          payload, correlation_id=correlation_id)
 
 
 def publish_allowed(

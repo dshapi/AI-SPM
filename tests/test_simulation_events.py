@@ -59,3 +59,32 @@ def test_sim_payload_model_dump_returns_payload():
     from platform_shared.simulation_events import _SimPayload
     sp = _SimPayload({"key": "value"})
     assert sp.model_dump() == {"key": "value"}
+
+def test_publish_blocked_passes_explanation_in_payload():
+    producer = _make_producer()
+    explanation = {
+        "title": "Prompt Injection Attempt Detected",
+        "reason": "The input contains a known instruction override pattern.",
+        "matched_signal": "ignore all previous",
+        "risk_level": "high",
+        "impact": "Prevents unauthorized override.",
+        "technical_details": {"blocked_by": "lexical", "categories": ["S15"]},
+    }
+    with patch("platform_shared.simulation_events.send_event") as mock_send:
+        sim_events.publish_blocked(
+            producer, session_id="sess-1", categories=["S15"],
+            correlation_id="corr-1", decision_reason="lexical block",
+            explanation=explanation,
+        )
+    payload = mock_send.call_args[0][2].model_dump()
+    assert payload["explanation"] == explanation
+
+def test_publish_blocked_no_explanation_still_works():
+    producer = _make_producer()
+    with patch("platform_shared.simulation_events.send_event") as mock_send:
+        sim_events.publish_blocked(
+            producer, session_id="sess-1", categories=["S9"],
+            decision_reason="guard block",
+        )
+    payload = mock_send.call_args[0][2].model_dump()
+    assert "explanation" not in payload or payload.get("explanation") is None
