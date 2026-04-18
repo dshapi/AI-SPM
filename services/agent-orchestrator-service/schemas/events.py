@@ -18,10 +18,44 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# KafkaSafe mixin
+# ─────────────────────────────────────────────────────────────────────────────
+
+class KafkaSafe(BaseModel):
+    """
+    Mixin for payload models that contain PII fields which must not be
+    published to Kafka topics.
+
+    Subclasses declare which fields are PII-only by overriding
+    ``_kafka_pii_fields``.  Those fields are still included in the full
+    ``model_dump()`` output (used by the in-memory store → admin UI), but are
+    stripped from ``model_dump_kafka()`` (used by ``_make_envelope`` →
+    Kafka wire format).
+
+    Usage::
+
+        class MyPayload(KafkaSafe):
+            _kafka_pii_fields: ClassVar[FrozenSet[str]] = frozenset({"email", "name"})
+            email: Optional[str] = None
+            name:  Optional[str] = None
+    """
+
+    _kafka_pii_fields: ClassVar[FrozenSet[str]] = frozenset()
+
+    def model_dump_kafka(self, **kwargs) -> Dict[str, Any]:
+        """model_dump() with PII fields excluded for Kafka serialization."""
+        return self.model_dump(
+            mode="json",
+            exclude=self._kafka_pii_fields or None,
+            **kwargs,
+        )
 
 
 def _utcnow() -> datetime:
@@ -94,12 +128,15 @@ class SessionLifecycleEvent(BaseModel):
 # Domain payload: prompt.received  (step 1)
 # ─────────────────────────────────────────────────────────────────────────────
 
-class PromptReceivedPayload(BaseModel):
+class PromptReceivedPayload(KafkaSafe):
+    # PII fields: present in in-memory store (admin UI) but stripped from Kafka.
+    _kafka_pii_fields: ClassVar[FrozenSet[str]] = frozenset({"user_email", "user_name"})
+
     session_id:   UUID
     agent_id:     str
     user_id:      str
-    user_email:   Optional[str]     = None  # Extracted from JWT email claim
-    user_name:    Optional[str]     = None  # Extracted from JWT name claim
+    user_email:   Optional[str]     = None  # Extracted from JWT email claim — UI only, not Kafka
+    user_name:    Optional[str]     = None  # Extracted from JWT name claim  — UI only, not Kafka
     tenant_id:    Optional[str]     = None
     prompt_hash:  str               = ""    # SHA-256
     prompt_len:   int               = 0     # Character count

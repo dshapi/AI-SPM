@@ -69,11 +69,16 @@ def _make_envelope(
     payload: Any,
     tenant_id: Optional[str] = None,
 ) -> bytes:
-    data: Dict[str, Any] = (
-        payload.model_dump(mode="json")
-        if hasattr(payload, "model_dump")
-        else payload
-    )
+    # Use model_dump_kafka() if the payload declares PII fields to strip;
+    # otherwise fall back to standard model_dump().  This keeps PII out of
+    # Kafka while the in-memory store (and admin UI) still receives the full
+    # payload via the separate payload_dict path in _emit().
+    if hasattr(payload, "model_dump_kafka"):
+        data: Dict[str, Any] = payload.model_dump_kafka()
+    elif hasattr(payload, "model_dump"):
+        data = payload.model_dump(mode="json")
+    else:
+        data = payload
     envelope = EventEnvelope(
         event_type=event_type,
         correlation_id=correlation_id,

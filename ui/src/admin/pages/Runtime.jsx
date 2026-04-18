@@ -69,6 +69,18 @@ const RISK_TIER_MAP = {
   unacceptable: 'Critical',
 }
 
+// Fallback: derive a risk tier from the numeric score when the backend
+// omits `risk_tier`. Without this fallback, every session silently defaulted
+// to 'Medium' regardless of score, so the "High Risk Sessions" KPI was
+// stuck at 0 even when sessions with score 1.00 / status Blocked existed.
+function _deriveTierFromScore(score) {
+  const s = score ?? 0
+  if (s >= 0.80) return 'Critical'
+  if (s >= 0.60) return 'High'
+  if (s >= 0.30) return 'Medium'
+  return 'Low'
+}
+
 const STATUS_MAP = {
   started:   'Active',
   blocked:   'Blocked',
@@ -88,7 +100,10 @@ function _relativeTime(isoString) {
 }
 
 function _adaptSession(s) {
-  const riskTier = RISK_TIER_MAP[s.risk_tier] ?? 'Medium'
+  // Prefer explicit backend tier; fall back to score-derived tier so sessions
+  // with high scores but missing risk_tier are still classified correctly
+  // (previously every such session silently became 'Medium').
+  const riskTier = RISK_TIER_MAP[s.risk_tier] ?? _deriveTierFromScore(s.risk_score)
   const riskScore = Math.round((s.risk_score ?? 0) * 100)
   return {
     id:           s.session_id,
@@ -810,7 +825,13 @@ export default function Runtime() {
 
   const activeSessions   = sessions.filter(s => s.status === 'Active').length
   const highRiskSessions = sessions.filter(s => s.risk === 'Critical' || s.risk === 'High').length
-  const blockedCount     = events.filter(e => e.type === 'blocked').length
+  // BUGFIX: `events.filter(e => e.type === 'blocked')` never matched because the
+  // event stream emits types like 'prompt.received', 'risk.calculated',
+  // 'policy.evaluated' — never 'blocked'. Blocked state is attached to the
+  // session (s.status === 'Blocked'), not to individual events. Count sessions
+  // whose status is Blocked instead, which matches the "Blocked" badge visible
+  // in the session list.
+  const blockedCount     = sessions.filter(s => s.status === 'Blocked').length
   const eventsPerSec     = wsStatus === 'connected' ? '~live' : '—'
 
   const filteredEvents = events.filter(e => {

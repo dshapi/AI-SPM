@@ -42,8 +42,11 @@ class LexicalScanner:
         blocked : bool
             True if either screen fired.
         label : str | None
-            Composite label "screen:underlying_label", e.g.
-            "obfuscation:base64_payload" or "lexical:lexical_injection_pattern".
+            Composite label "screen:category", e.g.
+            "obfuscation:base64_payload" or "lexical:prompt_injection",
+            "lexical:jailbreak_attempt", "lexical:exfiltration", etc.
+            Category names align with PROMPT_PATTERNS keys in
+            platform_shared/lexical_patterns.py.
             None when not blocked.
         """
         if not text or not text.strip():
