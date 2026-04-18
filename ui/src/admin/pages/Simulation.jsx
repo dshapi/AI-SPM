@@ -13,6 +13,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { ExplainabilityPanel } from '../../components/ExplainabilityPanel.jsx'
 import { createSession, fetchSessionEvents, fetchSessionResults, runSinglePromptSimulation, runGarakSimulation } from '../../api/simulationApi.js'
 import { useSessionSocket }                  from '../../hooks/useSessionSocket.js'
 import { useSimulationStream } from '../../hooks/useSimulationStream.js'
@@ -1042,11 +1043,12 @@ function DecisionTrace({ trace }) {
 
 // ── SimulationResult ───────────────────────────────────────────────────────────
 
-const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline']
+const RESULT_TABS = ['Summary', 'Decision Trace', 'Output', 'Policy Impact', 'Risk Analysis', 'Recommendations', 'Timeline', 'Explainability']
 
 function SimulationResult({ result, attackType, config, running, apiError, sessionId, connectionStatus, simEvents = [] }) {
   const [activeTab, setActiveTab] = useState('Summary')
   const [copied, setCopied] = useState(false)
+  const [selectedEvent, setSelectedEvent] = useState(null)
 
   // Auto-switch to Decision Trace (most informative tab) on each new result.
   // Spec: prefer Timeline if it exists, otherwise Decision Trace; never Summary.
@@ -1058,6 +1060,11 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
       setActiveTab('Timeline')
     }
   }, [simEvents, connectionStatus])
+
+  // Clear selected event when simEvents list becomes empty
+  useEffect(() => {
+    if (simEvents.length === 0) setSelectedEvent(null)
+  }, [simEvents])
 
   // Show spinner while the HTTP round-trip is in progress OR while we're
   // waiting for the first WS event to arrive (no result yet + socket pending)
@@ -1567,20 +1574,32 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {simEvents.map(ev => (
-                  <div key={ev.id} style={{
-                    display: 'flex', alignItems: 'flex-start', gap: 12,
-                    padding: '8px 12px',
-                    background: ev.stage === 'blocked' ? '#fef2f2'
-                              : ev.stage === 'allowed' ? '#f0fdf4'
-                              : ev.stage === 'error'   ? '#fff7ed'
-                              : '#f9fafb',
-                    borderRadius: 6,
-                    borderLeft: `3px solid ${
-                      ev.stage === 'blocked' ? '#ef4444'
-                    : ev.stage === 'allowed' ? '#22c55e'
-                    : ev.stage === 'error'   ? '#f97316'
-                    : '#d1d5db'}`,
-                  }}>
+                  <div
+                    key={ev.id}
+                    onClick={() => {
+                      setSelectedEvent(ev)
+                      if (ev.details?.explanation) setActiveTab('Explainability')
+                    }}
+                    title={ev.details?.explanation?.title || ev.event_type}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 12,
+                      padding: '8px 12px',
+                      cursor: 'pointer',
+                      background: ev.stage === 'blocked' ? '#fef2f2'
+                                : ev.stage === 'allowed' ? '#f0fdf4'
+                                : ev.stage === 'error'   ? '#fff7ed'
+                                : '#f9fafb',
+                      borderRadius: 6,
+                      borderLeft: `3px solid ${
+                        ev.stage === 'blocked' ? '#ef4444'
+                      : ev.stage === 'allowed' ? '#22c55e'
+                      : ev.stage === 'error'   ? '#f97316'
+                      : '#d1d5db'}`,
+                      outline: selectedEvent?.id === ev.id ? '2px solid #6366f1' : 'none',
+                      outlineOffset: 1,
+                      transition: 'outline 0.1s',
+                    }}
+                  >
                     <div style={{ flex: 1 }}>
                       <div style={{ fontWeight: 500, fontSize: 13 }}>
                         {ev.event_type}
@@ -1603,6 +1622,15 @@ function SimulationResult({ result, attackType, config, running, apiError, sessi
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {activeTab === 'Explainability' && (
+          <div style={{ padding: '4px 0' }}>
+            <ExplainabilityPanel
+              event={selectedEvent}
+              explanation={selectedEvent?.details?.explanation ?? null}
+            />
           </div>
         )}
 
