@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import {
   Target, RefreshCw, FlaskConical, Clock, Info,
-  AlertTriangle, Shield, TrendingUp, XCircle,
+  AlertTriangle, XCircle,
   CheckCircle2, AlertCircle, Copy,
 } from 'lucide-react'
 import { cn }                    from '../../lib/utils.js'
@@ -458,7 +458,7 @@ export function ResultsPanel({
                       <SectionLabel>AI Output</SectionLabel>
                       <button
                         type="button"
-                        onClick={() => { navigator.clipboard?.copyText(result.output ?? ''); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
+                        onClick={() => { navigator.clipboard?.writeText(result.output ?? ''); setCopied(true); setTimeout(() => setCopied(false), 1500) }}
                         className="flex items-center gap-1 text-[10px] text-gray-400 hover:text-gray-600"
                       >
                         <Copy size={10} strokeWidth={2} />
