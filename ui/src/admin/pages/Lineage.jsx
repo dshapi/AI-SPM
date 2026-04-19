@@ -3,10 +3,10 @@ import { useLocation } from 'react-router-dom'
 import {
   MessageSquare, Layers, FileText, Cpu, Wrench,
   Shield, CheckCircle2,
-  Search, ChevronDown, Play, Download, RotateCcw,
+  Play, Download, RotateCcw,
   AlertTriangle, Clock, ChevronRight, Tag,
   Database, Globe, Terminal, Lock,
-  AlertCircle, Info, Users, Zap,
+  AlertCircle, Info, Zap,
   ArrowRight, Code2, FileSearch, GitBranch,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
@@ -461,90 +461,6 @@ function Breadcrumb({ nodeId, nodes }) {
   )
 }
 
-// ── Session selector ────────────────────────────────────────────────────────────
-
-function SessionSelector({ selected, onSelect, open, setOpen }) {
-  const riskVariant = selected.risk === 'High' || selected.risk === 'Critical' ? 'high'
-    : selected.risk === 'Medium' ? 'medium' : 'low'
-
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 px-3 py-2 flex items-center gap-2 min-w-0">
-
-      {/* Search */}
-      <div className="relative shrink-0">
-        <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-        <input
-          type="text"
-          placeholder="Search sessions…"
-          className="w-44 h-7 pl-8 pr-3 rounded-lg border border-gray-200 bg-gray-50 text-[11.5px] text-gray-700 placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
-          readOnly
-        />
-      </div>
-
-      <div className="w-px h-4 bg-gray-200 shrink-0" />
-
-      {/* Session dropdown */}
-      <div className="relative shrink-0">
-        <button
-          onClick={() => setOpen(p => !p)}
-          className="flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-gray-200 bg-white text-[11px] text-gray-700 hover:bg-gray-50 transition-colors"
-        >
-          <span className="font-mono text-[10.5px] text-gray-500">{selected.id.slice(0, 20)}…</span>
-          <ChevronDown size={10} strokeWidth={2} className="text-gray-400 shrink-0" />
-        </button>
-        {open && (
-          <div className="absolute top-full left-0 mt-1 z-50 bg-white rounded-xl border border-gray-200 shadow-lg py-1 min-w-[360px]">
-            {SESSIONS.map(s => (
-              <button
-                key={s.id}
-                onClick={() => { onSelect(s); setOpen(false) }}
-                className={cn(
-                  'w-full text-left px-3 py-2 hover:bg-gray-50 transition-colors flex items-center gap-3',
-                  s.id === selected.id && 'bg-blue-50/50',
-                )}
-              >
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-mono text-gray-700">{s.id.slice(0, 24)}…</span>
-                    {s.id === selected.id && (
-                      <span className="text-[9px] font-bold bg-blue-100 text-blue-600 px-1.5 py-px rounded-full">CURRENT</span>
-                    )}
-                  </div>
-                  <p className="text-[10px] text-gray-400 mt-0.5">{s.agent} · {s.at}</p>
-                </div>
-                <Badge variant={s.risk === 'High' ? 'high' : s.risk === 'Medium' ? 'medium' : 'low'}>{s.risk}</Badge>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Agent + time */}
-      <div className="flex items-center gap-1.5 text-[11px] text-gray-500 min-w-0 overflow-hidden">
-        <Users size={10} strokeWidth={2} className="shrink-0 text-gray-400" />
-        <span className="truncate font-medium text-gray-700">{selected.agent}</span>
-        <span className="text-gray-300 shrink-0">·</span>
-        <Clock size={10} strokeWidth={2} className="shrink-0 text-gray-400" />
-        <span className="shrink-0 text-gray-500">{selected.at}</span>
-      </div>
-
-      <div className="flex-1" />
-
-      {/* Status badges — right-anchored, never clip */}
-      <div className="flex items-center gap-1.5 shrink-0">
-        <div className="w-px h-3.5 bg-gray-200" />
-        <Badge variant={riskVariant}>{selected.risk} Risk</Badge>
-        {selected.status === 'Flagged' && (
-          <span className="inline-flex items-center gap-1 text-[10px] font-semibold bg-red-50 text-red-600 border border-red-200 px-2 py-0.5 rounded-md whitespace-nowrap">
-            <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse" />
-            Flagged
-          </span>
-        )}
-      </div>
-    </div>
-  )
-}
-
 // ── KPI strip ──────────────────────────────────────────────────────────────────
 
 function KpiCard({ label, value, sub, accentClass }) {
@@ -580,7 +496,6 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
   }
 
   const [selectedId,    setSelectedId]    = useState(positionedNodes[0]?.id ?? null)
-  const [sessionOpen,   setSessionOpen]   = useState(false)
 
   // ── Context banner from query params (set by ActionPanel navigation) ──────
   const location        = useLocation()
@@ -599,10 +514,6 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
 
   return (
     <PageContainer>
-      {/* Close session dropdown on outside click */}
-      {sessionOpen && (
-        <div className="fixed inset-0 z-40" onClick={() => setSessionOpen(false)} />
-      )}
 
       {/* ── Context banner (shown when navigated from ActionPanel) ── */}
       {bannerVisible && (ctxAsset || ctxFindingId) && (
