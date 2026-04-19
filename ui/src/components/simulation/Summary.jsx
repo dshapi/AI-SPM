@@ -287,6 +287,9 @@ export function Summary({ simulationState, config }) {
     connectionStatus,
   } = simulationState ?? {}
 
+  // Temporary pipeline diagnostic — remove before production release
+  console.log('[PIPELINE] render: Summary status=', status, 'steps=', steps.length, 'hasResult=', !!finalResults)
+
   // Normalize: use finalResults (completed object) or fall back to partialResults check
   const result = finalResults
 

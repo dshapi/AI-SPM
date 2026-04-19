@@ -47,7 +47,7 @@ export function useSimulationStream() {
     seenRef.current.add(key)
 
     const simEvent = toSimulationEvent(latest)
-    console.log('[SimStream] event', simEvent.event_type, 'stage:', simEvent.stage)
+    console.log('[PIPELINE] emit:', simEvent.event_type, '→ stage:', simEvent.stage, '| id:', simEvent.id)
     setSimEvents(prev => {
       const next = [...prev, simEvent]
       next.sort((a, b) => {
