@@ -111,6 +111,14 @@ const _RAW_TO_CANONICAL = {
   'session_completed':       CANONICAL_EVENT_TYPES.SESSION_COMPLETED,
   'session_blocked':         CANONICAL_EVENT_TYPES.SESSION_BLOCKED,
   'session_created':         CANONICAL_EVENT_TYPES.SESSION_CREATED,
+
+  // Backend simulation.* direct events (simulation.py _ws_emit calls)
+  'simulation.started':      CANONICAL_EVENT_TYPES.SESSION_STARTED,
+  'simulation.blocked':      CANONICAL_EVENT_TYPES.SESSION_BLOCKED,
+  'simulation.allowed':      CANONICAL_EVENT_TYPES.POLICY_ALLOWED,
+  'simulation.completed':    CANONICAL_EVENT_TYPES.SESSION_COMPLETED,
+  'simulation.error':        CANONICAL_EVENT_TYPES.SESSION_FAILED,
+  // simulation.progress has no canonical equivalent — falls through as raw string → stage 'progress'
 }
 
 const _POLICY_EVENT_TYPES = new Set(['policy.decision', 'policy_decision'])
