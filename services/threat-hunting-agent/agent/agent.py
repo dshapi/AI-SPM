@@ -245,6 +245,57 @@ def build_agent(
 
 _MAX_TOOL_ITERATIONS = 8   # cap the ReAct loop to avoid runaway tool calls
 
+# ── Prompt budget ─────────────────────────────────────────────────────────────
+# cpm-llm runs llama-3.1-8B-Instruct at n_ctx=4096.  When a prompt exceeds the
+# context window, llama-cpp-python's OpenAI server aborts the request by
+# closing the TCP socket WITHOUT writing any HTTP response bytes — httpx then
+# raises `RemoteProtocolError: Server disconnected without sending a response`
+# and nothing is written to the cpm-llm access log (so the failure is invisible
+# on the server side).  To stay under the budget we:
+#   (1) cap the number of events serialized into the prompt
+#   (2) drop bulky optional fields on each event (raw prompts/outputs/memory
+#       snapshots) before json.dumps
+#   (3) hard-cap the serialized string length as a final safety net
+_PROMPT_MAX_EVENTS         = 15        # most recent N events only
+_PROMPT_MAX_CHARS          = 6_000     # ~1_500 tokens — leaves room for sys prompt + response
+_EVENT_BULKY_FIELDS = (
+    "prompt", "output", "raw_event", "raw_payload", "memory_snapshot",
+    "model_output", "response_text", "full_text", "context",
+)
+
+
+def _trim_events_for_prompt(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Strip heavy fields from each event and truncate the batch so the resulting
+    JSON comfortably fits inside llama.cpp's n_ctx window.
+
+    Keeps the keys the hunt model actually needs: event_type, verdict,
+    risk_tier, risk_score, signals, session_id, tenant_id, timestamp,
+    source_service, actor, target — plus a truncated 'payload' preview.
+    """
+    trimmed: List[Dict[str, Any]] = []
+    # Most recent N — assume the caller already ordered the batch; keep the tail.
+    for e in events[-_PROMPT_MAX_EVENTS:]:
+        if not isinstance(e, dict):
+            continue
+        out: Dict[str, Any] = {}
+        for k, v in e.items():
+            if k in _EVENT_BULKY_FIELDS:
+                # Preserve a short preview so the model still sees something useful
+                if isinstance(v, str) and v:
+                    out[k] = v[:200] + ("…" if len(v) > 200 else "")
+                continue
+            if k == "payload" and isinstance(v, dict):
+                # Keep payload but prune long strings inside it
+                out[k] = {
+                    pk: (pv[:200] + "…" if isinstance(pv, str) and len(pv) > 200 else pv)
+                    for pk, pv in v.items()
+                }
+                continue
+            out[k] = v
+        trimmed.append(out)
+    return trimmed
+
 
 def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> dict:
     """
@@ -309,10 +360,19 @@ def run_hunt(agent: Any, tenant_id: str, events: List[Dict[str, Any]]) -> dict:
     #
     llm_fragment = None
     try:
-        event_summary = json.dumps(events, default=str, indent=2)
+        # Trim + cap the batch so we don't blow through cpm-llm's n_ctx=4096.
+        trimmed = _trim_events_for_prompt(events)
+        event_summary = json.dumps(trimmed, default=str, indent=2)
+        if len(event_summary) > _PROMPT_MAX_CHARS:
+            event_summary = event_summary[:_PROMPT_MAX_CHARS] + "\n... (truncated)"
+        preview_note = (
+            f"(showing {len(trimmed)} of {len(events)} events; bulky fields trimmed)"
+            if len(trimmed) < len(events) or len(trimmed) != len(events)
+            else ""
+        )
         user_prompt = (
             f"Threat hunt requested for tenant '{tenant_id}'.\n\n"
-            f"Batch of {len(events)} events:\n{event_summary}\n\n"
+            f"Batch of {len(events)} events {preview_note}:\n{event_summary}\n\n"
             "Analyse these events for threats, then output ONLY your structured "
             "finding as a JSON code block wrapped in ```json ... ``` exactly as "
             "specified in the system prompt."
