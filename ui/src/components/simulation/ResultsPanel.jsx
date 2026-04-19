@@ -644,7 +644,11 @@ export function ResultsPanel({
 
         {/* Explainability — renders selected event or empty state */}
         {activeTab === 'Explainability' && (
-          <ExplainabilityTab selectedEvent={selectedEvent} />
+          <ExplainabilityTab
+            selectedEvent={selectedEvent}
+            simulationState={simulationState}
+            mode={mode}
+          />
         )}
 
         {/* ── Decision Trace ── */}
