@@ -19,63 +19,15 @@
  */
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionSocket } from './useSessionSocket'
-
-/**
- * Maps backend event_type → timeline stage used by PHASE_MAP in phaseGrouping.js.
- *
- * Backend emits dot-namespaced types (e.g. "prompt.received", "risk.calculated",
- * "policy.decision") — NOT "simulation.{stage}".  This table normalises them
- * into the stage values the timeline UI understands.
- */
-const EVENT_TYPE_STAGE = {
-  'prompt.received':  'started',
-  'posture.enriched': 'progress',
-  'risk.scored':      'progress',
-  'risk.calculated':  'progress',
-}
+import { normalizeEvent } from '../lib/eventSchema.js'
 
 /**
  * Parse a WsEvent into a SimulationEvent.
- *
- * Handles two event_type conventions:
- *   Legacy assumption: "simulation.{stage}" (e.g. "simulation.blocked")
- *   Real backend:      "{category}.{action}" (e.g. "policy.decision")
- *
- * For "policy.decision" the stage is driven by payload.decision so that
- * the event lands in the correct timeline phase (blocked/allowed).
+ * Delegates to normalizeEvent() from eventSchema.js — single source of truth.
+ * Kept as a named export for backward compatibility with tests and consumers.
  */
 export function toSimulationEvent(wsEvent) {
-  const et      = wsEvent.event_type || ''
-  const payload = wsEvent.payload    || {}
-
-  let stage
-
-  if (et === 'policy.decision') {
-    // Decision is "block" | "allow" | "escalate" — map to timeline stage
-    const dec = (payload.decision || '').toLowerCase()
-    if      (dec === 'block')    stage = 'blocked'
-    else if (dec === 'allow')    stage = 'allowed'
-    else if (dec === 'escalate') stage = 'progress'  // escalated → show in Injection phase
-    else                         stage = 'progress'
-  } else if (EVENT_TYPE_STAGE[et]) {
-    stage = EVENT_TYPE_STAGE[et]
-  } else if (et.startsWith('simulation.')) {
-    // Legacy/future "simulation.{stage}" convention
-    stage = et.split('.')[1] || 'progress'
-  } else {
-    // Unknown event type — show in Injection phase as generic progress
-    stage = 'progress'
-  }
-
-  return {
-    id:             `${et}:${wsEvent.correlation_id || ''}:${wsEvent.timestamp}`,
-    event_type:     et,
-    stage,
-    status:         stage,
-    timestamp:      wsEvent.timestamp,
-    source_service: wsEvent.source_service,
-    details:        payload,
-  }
+  return normalizeEvent(wsEvent)
 }
 
 export function useSimulationStream() {
