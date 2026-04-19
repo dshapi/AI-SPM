@@ -1,103 +1,123 @@
-# Contributing to Orbyx AI SPM
+# 🤝 Contributing to AI-SPM (Orbix)
 
-Thanks for your interest in contributing! Help wanted.. !
-
-“Add new guard model integrations”
-“Improve OPA policies for tool control”
-“Add attack simulation scenarios”
+Welcome—and thanks for taking the time to contribute 🙌  
+This project focuses on **runtime security for AI systems (LLMs, agents, tools, and data flows)**.
 
 ---
 
-## Getting Started
+# 🚀 Getting Started
 
-1. Fork the repository and clone your fork
-2. Follow [README.md/Installation](./README.md/#installation) to get the platform running locally
-3. Create a feature branch: `git checkout -b feat/your-feature-name`
+## 1. Clone the repo
+git clone https://github.com/dshapi/AI-SPM.git
+cd AI-SPM
 
----
+## 2. Run locally (Docker)
+docker compose up --build
 
-## Development Workflow
-
-### Making changes
-
-Most services are hot-reloaded in development. After editing Python files, rebuild only the affected service:
-
-```bash
-docker compose up -d --build api          # API changes
-docker compose up -d --build spm-api      # SPM API changes
-docker compose up -d --build ui           # Frontend changes
-```
-
-### Running tests
-
-```bash
-make test              # unit tests (no Docker needed)
-make smoke-test        # end-to-end test against running platform
-```
-
-Tests live in `tests/`. Please add or update tests for any new behaviour.
-
-### Checking logs
-
-```bash
-make logs              # all services
-make logs-api          # single service
-```
+## 3. Access services
+- UI → http://localhost:3000  
+- API → http://localhost:8000  
+- Grafana → http://localhost:3000  
+- Prometheus → http://localhost:9090  
 
 ---
 
-## Pull Request Guidelines
+# 🧩 How to Contribute
 
-- **One concern per PR** — keep changes focused and reviewable
-- **Write a clear description** — what changed and why
-- **Include tests** — new features and bug fixes should have test coverage
-- **Pass CI** — all tests must be green before review
-- **Update docs** — if you change behaviour, update the relevant `.md` file
-
-Branch naming:
-
-| Type | Pattern |
-|---|---|
-| Feature | `feat/short-description` |
-| Bug fix | `fix/short-description` |
-| Docs | `docs/short-description` |
-| Refactor | `refactor/short-description` |
+We welcome:
+- 🐛 Bug fixes  
+- ✨ Features  
+- 🔐 Security improvements  
+- 📊 Observability enhancements  
+- 🎨 UI/UX improvements  
 
 ---
 
-## Project Structure
+# 🏷️ Label System
 
-```
-services/          # Backend microservices (Python / FastAPI)
-ui/                # Frontend (React + Vite)
-platform_shared/   # Shared Python modules (JWT, Kafka, models)
-spm/               # SPM policy and compliance definitions
-opa/               # OPA Rego policies
-grafana/           # Dashboard JSON and provisioning config
-prometheus/        # Scrape config
-tests/             # Unit and integration tests
-scripts/           # Dev utilities (JWT minting, etc.)
-```
+## 🔰 Onboarding
+- good-first-issue
+- help-wanted
+- beginner-friendly
 
----
-
-## Reporting Issues
-
-Please open a GitHub Issue and include:
-
-- A clear description of the problem
-- Steps to reproduce
-- Relevant logs (`make logs-api` output)
-- Your environment (OS, Docker version, chip architecture)
+## 🧱 Type
+- frontend
+- backend
+- fullstack
+- docs
+- security
+- ai
+- observability
 
 ---
 
-## Code Style
+# 📌 Open Issues (Contributor-Friendly)
 
-- **Python** — follow PEP 8; use type hints where practical
-- **JavaScript** — standard ESM; no external linting config required
-- **Commits** — use [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `docs:`, etc.)
+## #2 Documentation Validation
+- Review README
+- Validate setup
+- Fix outdated sections
+
+## #3 Copy to Clipboard (Policy JSON)
+- Add copy button
+- Copy JSON
+- Show toast
+
+## #4 Fix Empty State Messaging
+- Improve message
+- Add CTA button
+
+## #5 Live / Simulated Badge
+- Add header badge
+- Reflect system mode
+
+## #6 Improve Error Toasts
+- Standardize messages
+- Add retry
+
+## #7 Expose Garak Execution Logs
+- Capture prompts
+- Show in UI
+
+## #8 Policy Explain API
+- Add /policies/explain
+- Return structured reason
+
+## #9 WebSocket Reconnect
+- Auto reconnect
+- Show connection state
+
+## #10 Prompt Deobfuscation
+- Decode base64 / hex / URL
+
+## #11 Risk Scoring
+- Combine signals
+- Output score
+
+## #12 Escalate to Case
+- Add /cases endpoint
+- Persist data
+
+## #13 Decision Trace Timeline
+- Build trace pipeline
+- Render UI timeline
+
+## #14 Why Allowed Insights
+- Explain safe decisions
+
+## #15 Policy Improvement Suggestions
+- Detect near misses
+- Suggest improvements
+
+## #16 Attack Phase Tagging
+- Tag events: Recon → Exploit → Exfil
 
 ---
 
-*For a full feature reference see [FEATURES.md](./FEATURES.md).*
+# ⭐ Final Note
+
+This project is about:
+
+Securing the future of AI systems in production.
+
+Every contribution—small or large—moves that forward.
