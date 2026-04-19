@@ -40,14 +40,27 @@
  *   running ──30s watchdog──────► failed  ("Simulation timeout")
  *   any ──resetSimulation()──────► idle
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useReducer, useEffect, useRef, useCallback } from 'react'
 import { useSimulationStream } from './useSimulationStream'
 import { buildResultFromSimEvents } from '../lib/buildResultFromSimEvents'
 import { runSinglePromptSimulation, runGarakSimulation } from '../api/simulationApi'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const TIMEOUT_MS      = 30_000
-const TERMINAL_STAGES = new Set(['completed', 'error', 'blocked', 'allowed'])
+
+// ── Action types ──────────────────────────────────────────────────────────────
+export const Actions = Object.freeze({
+  SIMULATION_STARTED: 'SIMULATION_STARTED',
+  EVENT_RECEIVED:     'EVENT_RECEIVED',
+  WATCHDOG_FIRED:     'WATCHDOG_FIRED',
+  API_ERROR:          'API_ERROR',
+  SIMULATION_RESET:   'SIMULATION_RESET',
+})
+
+// ── Terminal stage set ────────────────────────────────────────────────────────
+// terminatedRef.current guards against double-dispatch in useEffect.
+// The reducer itself is pure and only sees each terminal event once.
+const TERMINAL_STAGES = new Set(['completed', 'blocked', 'allowed', 'escalated', 'error'])
 
 // ── Step label helper ─────────────────────────────────────────────────────────
 function stepLabel(event) {
@@ -66,7 +79,7 @@ function stepLabel(event) {
 }
 
 // ── Initial state factory ─────────────────────────────────────────────────────
-function makeIdle() {
+export function makeIdle() {
   return {
     status:         'idle',
     steps:          [],
@@ -79,12 +92,83 @@ function makeIdle() {
   }
 }
 
+// ── Reducer ────────────────────────────────────────────────────────────────────
+export function simReducer(state, action) {
+  switch (action.type) {
+
+    case Actions.SIMULATION_STARTED:
+      return {
+        ...makeIdle(),
+        status:    'running',
+        sessionId: action.sessionId,
+        startedAt: action.startedAt,
+      }
+
+    case Actions.EVENT_RECEIVED: {
+      if (state.status !== 'running') return state   // stale event after completion
+
+      const { event, finalResults } = action
+      const isTerminal = TERMINAL_STAGES.has(event.stage)
+      const isFailed   = event.stage === 'error'
+      const isProbe    = event.stage === 'allowed' || event.stage === 'blocked'
+
+      const newStep = {
+        id:        event.id,
+        label:     stepLabel(event),
+        status:    isTerminal ? (isFailed ? 'failed' : 'done') : 'running',
+        timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
+      }
+
+      if (isTerminal) {
+        return {
+          ...state,
+          status:       isFailed ? 'failed' : 'completed',
+          steps:        addOrReplaceStep(state.steps, newStep),
+          finalResults: isFailed ? null : (finalResults ?? null),
+          error:        isFailed ? (event.details?.error_message || 'Simulation failed') : undefined,
+          completedAt:  Date.now(),
+        }
+      }
+
+      return {
+        ...state,
+        steps:          addOrReplaceStep(state.steps, newStep),
+        partialResults: isProbe
+          ? [...state.partialResults, event]
+          : state.partialResults,
+      }
+    }
+
+    case Actions.WATCHDOG_FIRED:
+      return {
+        ...state,
+        status:      'failed',
+        error:       'Simulation timeout — no response received within 30 seconds.',
+        completedAt: Date.now(),
+      }
+
+    case Actions.API_ERROR:
+      return {
+        ...state,
+        status:      'failed',
+        error:       action.error || 'Failed to start simulation',
+        completedAt: Date.now(),
+      }
+
+    case Actions.SIMULATION_RESET:
+      return makeIdle()
+
+    default:
+      return state
+  }
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 export function useSimulationState() {
   const { connectionStatus, simEvents, startStream, stopStream } =
     useSimulationStream()
 
-  const [simState, setSimState] = useState(makeIdle)
+  const [simState, dispatch] = useReducer(simReducer, makeIdle())
 
   // Watchdog timer ref — cleared on terminal event or reset
   const watchdogRef    = useRef(null)
@@ -104,56 +188,22 @@ export function useSimulationState() {
     if (simEvents.length === 0) return
     const latest = simEvents[simEvents.length - 1]
 
-    // Build step object for this event
-    const newStep = {
-      id:        latest.id,
-      label:     stepLabel(latest),
-      status:    TERMINAL_STAGES.has(latest.stage) ? 'done' : 'running',
-      timestamp: latest.timestamp ? new Date(latest.timestamp).getTime() : Date.now(),
-    }
-
     console.log('[SimState] event received', latest.event_type, 'stage:', latest.stage)
 
-    // ── Terminal event ────────────────────────────────────────────────────
-    if (TERMINAL_STAGES.has(latest.stage) && !terminatedRef.current) {
-      terminatedRef.current = true
-      clearWatchdog()
-
-      const built    = buildResultFromSimEvents(simEvents)
-      const isFailed = latest.stage === 'error'
-      const errMsg   = isFailed
-        ? (latest.details?.error_message || 'Simulation failed')
-        : undefined
-
-      console.log('[SimState] terminal event', latest.stage, '— built result:', !!built)
-
-      setSimState(prev => ({
-        ...prev,
-        status:       isFailed ? 'failed' : 'completed',
-        steps:        addOrReplaceStep(prev.steps, { ...newStep, status: isFailed ? 'failed' : 'done' }),
-        finalResults: built,
-        error:        errMsg,
-        completedAt:  Date.now(),
-      }))
+    if (!TERMINAL_STAGES.has(latest.stage)) {
+      dispatch({ type: Actions.EVENT_RECEIVED, event: latest })
       return
     }
 
-    // ── Non-terminal: accumulate step + partial results ───────────────────
-    // Per-probe allowed/blocked events during Garak are partial results
-    const isProbeResult = latest.stage === 'allowed' || latest.stage === 'blocked'
+    // Terminal event — guard against double-processing
+    if (terminatedRef.current) return
+    terminatedRef.current = true
+    clearWatchdog()
 
-    console.log('[SimState] step added:', newStep.label)
+    console.log('[SimState] terminal event', latest.stage, '— built result')
 
-    setSimState(prev => {
-      if (prev.status !== 'running') return prev   // stale event after completion
-      return {
-        ...prev,
-        steps:          addOrReplaceStep(prev.steps, newStep),
-        partialResults: isProbeResult
-          ? [...prev.partialResults, latest]
-          : prev.partialResults,
-      }
-    })
+    const built = buildResultFromSimEvents(simEvents)
+    dispatch({ type: Actions.EVENT_RECEIVED, event: latest, finalResults: built })
   }, [simEvents, clearWatchdog])
 
   // ── Start simulation ─────────────────────────────────────────────────────
@@ -164,12 +214,7 @@ export function useSimulationState() {
     console.log('[SimState] simulation started | session:', sid, '| type:', config.attackType)
 
     // Transition to running state and reset everything
-    setSimState({
-      ...makeIdle(),
-      status:    'running',
-      sessionId: sid,
-      startedAt: Date.now(),
-    })
+    dispatch({ type: Actions.SIMULATION_STARTED, sessionId: sid, startedAt: Date.now() })
 
     // Connect WS before POST so no events are missed
     startStream(sid)
@@ -180,12 +225,7 @@ export function useSimulationState() {
       if (terminatedRef.current) return
       terminatedRef.current = true
       console.warn('[SimState] watchdog fired — no terminal event after', TIMEOUT_MS, 'ms')
-      setSimState(prev => ({
-        ...prev,
-        status:      'failed',
-        error:       'Simulation timeout — no response received within 30 seconds.',
-        completedAt: Date.now(),
-      }))
+      dispatch({ type: Actions.WATCHDOG_FIRED })
     }, TIMEOUT_MS)
 
     try {
@@ -208,12 +248,7 @@ export function useSimulationState() {
       console.error('[SimState] API call failed:', err.message)
       clearWatchdog()
       terminatedRef.current = true
-      setSimState(prev => ({
-        ...prev,
-        status:      'failed',
-        error:       err.message || 'Failed to start simulation',
-        completedAt: Date.now(),
-      }))
+      dispatch({ type: Actions.API_ERROR, error: err.message })
     }
 
     return sid
@@ -225,7 +260,7 @@ export function useSimulationState() {
     clearWatchdog()
     terminatedRef.current = false
     stopStream()
-    setSimState(makeIdle())
+    dispatch({ type: Actions.SIMULATION_RESET })
   }, [clearWatchdog, stopStream])
 
   // ── Cleanup on unmount ────────────────────────────────────────────────────
