@@ -18,6 +18,15 @@ import os
 import re
 import json
 import sys as _sys
+
+# Ensure the services/api/ directory and repo root are on sys.path so that
+# local packages (security, ws, consumers, routes) are found before any
+# same-named system packages, regardless of how this module is imported.
+_HERE = os.path.dirname(os.path.abspath(__file__))          # services/api/
+_ROOT = os.path.dirname(os.path.dirname(_HERE))             # repo root
+for _p in (_HERE, _ROOT):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 import time
 import uuid
 import logging
