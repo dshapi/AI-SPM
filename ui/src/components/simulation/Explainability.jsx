@@ -15,20 +15,25 @@ import { cn }                  from '../../lib/utils.js'
 
 // ── TraceRow ──────────────────────────────────────────────────────────────────
 
-function TraceRow({ label, value, mono = true, highlight }) {
+function TraceRow({ label, value, mono = true, highlight, scroll = false }) {
   if (value == null || value === '') return null
   return (
     <div className="mb-2">
       <p className="text-[9.5px] font-bold uppercase tracking-wide text-gray-400 mb-0.5">{label}</p>
-      <div className={cn(
-        'rounded px-2.5 py-2 text-[11px] leading-relaxed whitespace-pre-wrap break-words border',
-        mono ? 'font-mono' : '',
-        highlight === 'block'
-          ? 'bg-red-50 border-red-200 text-red-800'
-          : highlight === 'allow'
-          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
-          : 'bg-gray-50 border-gray-200 text-gray-700',
-      )}>
+      <div
+        className={cn(
+          'rounded px-2 py-1.5 text-[10.5px] leading-relaxed whitespace-pre-wrap break-words border',
+          mono ? 'font-mono' : '',
+          highlight === 'block'
+            ? 'bg-red-50 border-red-200 text-red-800'
+            : highlight === 'allow'
+            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+            : highlight === 'error'
+            ? 'bg-orange-50 border-orange-200 text-orange-800'
+            : 'bg-gray-50 border-gray-200 text-gray-700',
+        )}
+        style={scroll ? { maxHeight: '4.5rem', overflowY: 'auto' } : undefined}
+      >
         {value}
       </div>
     </div>
@@ -38,62 +43,71 @@ function TraceRow({ label, value, mono = true, highlight }) {
 // ── ProbeTraceCard ────────────────────────────────────────────────────────────
 
 function ProbeTraceCard({ probeName, attempts }) {
-  const [open, setOpen] = useState(true)
+  const [open, setOpen] = useState(false)
   const hasBlock = attempts.some(a => a.decision === 'block')
+  const hasError = attempts.some(a => a.decision === 'error')
+
+  const headerBg    = hasError ? 'bg-orange-50/60' : hasBlock ? 'bg-red-50/60'    : 'bg-gray-50'
+  const borderColor = hasError ? 'border-orange-200' : hasBlock ? 'border-red-200' : 'border-gray-200'
+  const badgeCls    = hasError
+    ? 'bg-orange-100 border-orange-200 text-orange-700'
+    : hasBlock
+    ? 'bg-red-100 border-red-200 text-red-700'
+    : 'bg-emerald-100 border-emerald-200 text-emerald-700'
+  const badgeLabel  = hasError ? 'ERROR' : hasBlock ? 'BLOCKED' : 'ALLOWED'
 
   return (
-    <div className={cn(
-      'rounded-xl border overflow-hidden mb-3',
-      hasBlock ? 'border-red-200' : 'border-gray-200',
-    )}>
+    <div className={cn('rounded-xl border mb-3', borderColor)}>
       <button
         type="button"
         onClick={() => setOpen(o => !o)}
-        className={cn(
-          'w-full flex items-center gap-2 px-3 py-2.5 text-left',
-          hasBlock ? 'bg-red-50/60' : 'bg-gray-50',
-        )}
+        className={cn('w-full flex items-center gap-2 px-3 py-2.5 text-left', headerBg)}
       >
         <span className="shrink-0 text-gray-400">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
-        {hasBlock
+        {hasError
+          ? <ShieldAlert size={13} className="text-orange-500 shrink-0" strokeWidth={2} />
+          : hasBlock
           ? <ShieldAlert size={13} className="text-red-500 shrink-0" strokeWidth={2} />
           : <ShieldCheck size={13} className="text-emerald-500 shrink-0" strokeWidth={2} />
         }
         <span className="text-[11.5px] font-semibold text-gray-800 flex-1 truncate">
           {probeName}
         </span>
-        <span className={cn(
-          'text-[9.5px] font-bold px-2 py-0.5 rounded-full border shrink-0',
-          hasBlock
-            ? 'bg-red-100 border-red-200 text-red-700'
-            : 'bg-emerald-100 border-emerald-200 text-emerald-700',
-        )}>
-          {attempts.length} attempt{attempts.length !== 1 ? 's' : ''} · {hasBlock ? 'BLOCKED' : 'ALLOWED'}
+        <span className={cn('text-[9.5px] font-bold px-2 py-0.5 rounded-full border shrink-0', badgeCls)}>
+          {attempts.length} attempt{attempts.length !== 1 ? 's' : ''} · {badgeLabel}
         </span>
       </button>
 
       {open && (
-        <div className="divide-y divide-gray-100">
+        <div
+          className="divide-y divide-gray-100"
+          style={{ maxHeight: '14rem', overflowY: 'auto' }}
+        >
           {attempts.map((attempt, idx) => (
-            <div key={idx} className="px-3 py-3">
+            <div key={idx} className="px-3 py-2">
               {attempts.length > 1 && (
-                <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-2">
+                <p className="text-[9.5px] font-bold text-gray-400 uppercase tracking-wide mb-1.5">
                   Attempt {idx + 1}
                 </p>
               )}
-              <TraceRow label="Prompt sent to model" value={attempt.prompt} />
-              <TraceRow label="Raw prompt (pre-sanitization)" value={attempt.raw_prompt} />
+              <TraceRow label="Prompt" value={attempt.prompt} scroll />
+              <TraceRow label="Raw prompt (pre-sanitization)" value={attempt.raw_prompt} scroll />
               <TraceRow
                 label={`Guard decision · score ${attempt.score?.toFixed(2) ?? '--'}`}
                 value={`${(attempt.decision ?? 'allow').toUpperCase()} — ${attempt.reason || 'no reason recorded'}`}
                 mono={false}
-                highlight={attempt.decision === 'block' ? 'block' : 'allow'}
+                highlight={
+                  attempt.decision === 'block' ? 'block'
+                  : attempt.decision === 'error' ? 'error'
+                  : 'allow'
+                }
               />
               <TraceRow
                 label="Model response"
                 value={attempt.response}
+                scroll
                 highlight={attempt.passed === false ? 'block' : null}
               />
             </div>

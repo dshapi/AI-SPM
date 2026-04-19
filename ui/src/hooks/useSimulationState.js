@@ -65,10 +65,10 @@ import { runSinglePromptSimulation, runGarakSimulation } from '../api/simulation
 // "Simulation timeout" that caused built-in prompts to look flaky.
 const TIMEOUT_MS      = 60_000
 // Budget from the LAST received (non-terminal) event to the terminal event.
-// PSS (lexical → guard → OPA) completes in ≤ 4 s under normal conditions, but
-// a cold OPA container or slow guard-model startup can stretch to ~10 s.
-// 60 s gives a 15× safety margin without masking genuine hangs.
-const ACTIVITY_TIMEOUT_MS = 60_000
+// Heavy Garak probes (e.g. malwaregen.TopLevel) can take 2+ minutes per probe.
+// 180 s gives a 3× safety margin over the 60 s per-probe HTTP timeout so the
+// UI watchdog never fires mid-probe on slow-running probes.
+const ACTIVITY_TIMEOUT_MS = 180_000
 
 // ── Action types ──────────────────────────────────────────────────────────────
 export const Actions = Object.freeze({
@@ -275,9 +275,11 @@ export function simReducer(state, action) {
     case Actions.WATCHDOG_FIRED:
       return {
         ...state,
-        status:      'failed',
-        error:       'Simulation timeout — no terminal event received from the backend.',
-        completedAt: Date.now(),
+        status:       'failed',
+        error:        'Simulation timeout — no terminal event received from the backend.',
+        // Show partial results (Policy Impact, Output) even on timeout.
+        finalResults: action.finalResults ?? state.finalResults ?? null,
+        completedAt:  Date.now(),
       }
 
     case Actions.API_ERROR:
@@ -307,6 +309,8 @@ export function useSimulationState() {
   const watchdogRef    = useRef(null)
   // Prevent double-processing the same terminal event across renders
   const terminatedRef  = useRef(false)
+  // Always-current copy of simEvents so watchdog closures can read latest events
+  const simEventsRef   = useRef([])
 
   // ── Clear watchdog helper ────────────────────────────────────────────────
   const clearWatchdog = useCallback(() => {
@@ -324,6 +328,10 @@ export function useSimulationState() {
 
   // ── React to incoming simEvents ──────────────────────────────────────────
   useEffect(() => {
+    // Keep the always-current ref in sync so watchdog closures can call
+    // buildResultFromSimEvents on the LATEST events, not a stale closure copy.
+    simEventsRef.current = simEvents
+
     if (simEvents.length === 0) {
       // simEvents was cleared (fresh simulation / reset) — clear the dispatch
       // log too so the next run starts from scratch.
@@ -384,13 +392,16 @@ export function useSimulationState() {
       }
 
       // Non-terminal (incl. decision events) — backend is alive, reset the
-      // activity watchdog so the 60 s idle budget runs from this event.
+      // activity watchdog so the 180 s idle budget runs from this event.
       clearWatchdog()
       watchdogRef.current = setTimeout(() => {
         if (terminatedRef.current) return
         terminatedRef.current = true
         console.warn('[PIPELINE] state: activity watchdog fired timeout_ms=', ACTIVITY_TIMEOUT_MS)
-        dispatch({ type: Actions.WATCHDOG_FIRED })
+        // Build result from whatever partial events arrived — so Policy Impact
+        // and Output tabs show data even when the simulation timed out.
+        const builtOnTimeout = buildResultFromSimEvents(simEventsRef.current)
+        dispatch({ type: Actions.WATCHDOG_FIRED, finalResults: builtOnTimeout })
       }, ACTIVITY_TIMEOUT_MS)
       dispatch({ type: Actions.EVENT_RECEIVED, event: ev })
     }
@@ -416,7 +427,8 @@ export function useSimulationState() {
       if (terminatedRef.current) return
       terminatedRef.current = true
       console.warn('[PIPELINE] state: watchdog fired timeout_ms=', TIMEOUT_MS)
-      dispatch({ type: Actions.WATCHDOG_FIRED })
+      const builtOnTimeout = buildResultFromSimEvents(simEventsRef.current)
+      dispatch({ type: Actions.WATCHDOG_FIRED, finalResults: builtOnTimeout })
     }, TIMEOUT_MS)
 
     try {

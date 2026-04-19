@@ -12,12 +12,13 @@
  */
 
 const STAGE_STYLE = {
-  blocked:   { bg: '#fef2f2', border: '#ef4444', dot: '#ef4444', label: 'BLOCKED' },
-  allowed:   { bg: '#f0fdf4', border: '#22c55e', dot: '#22c55e', label: 'ALLOWED' },
-  error:     { bg: '#fff7ed', border: '#f97316', dot: '#f97316', label: 'ERROR'   },
-  started:   { bg: '#eff6ff', border: '#3b82f6', dot: '#3b82f6', label: 'START'   },
-  progress:  { bg: '#fafafa', border: '#d1d5db', dot: '#9ca3af', label: 'PROBE'   },
-  completed: { bg: '#f9fafb', border: '#d1d5db', dot: '#9ca3af', label: 'DONE'    },
+  blocked:     { bg: '#fef2f2', border: '#ef4444', dot: '#ef4444', label: 'BLOCKED'     },
+  allowed:     { bg: '#f0fdf4', border: '#22c55e', dot: '#22c55e', label: 'ALLOWED'     },
+  error:       { bg: '#fff7ed', border: '#f97316', dot: '#f97316', label: 'ERROR'       },
+  probe_error: { bg: '#fff7ed', border: '#f97316', dot: '#f97316', label: 'PROBE ERROR' },
+  started:     { bg: '#eff6ff', border: '#3b82f6', dot: '#3b82f6', label: 'START'       },
+  progress:    { bg: '#fafafa', border: '#d1d5db', dot: '#9ca3af', label: 'PROBE'       },
+  completed:   { bg: '#f9fafb', border: '#d1d5db', dot: '#9ca3af', label: 'DONE'        },
 }
 const DEFAULT_STYLE = { bg: '#f9fafb', border: '#d1d5db', dot: '#9ca3af', label: '—' }
 

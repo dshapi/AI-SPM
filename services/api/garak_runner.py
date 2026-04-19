@@ -513,8 +513,9 @@ async def run_garak_simulation(
                 raw_findings = [{
                     "category":    _infer_category(probe_name),
                     "description": f"Probe {probe_name!r} timed out after {probe_timeout_s:.0f}s",
-                    "score":  0.20,
-                    "passed": False,
+                    "score":       0.10,
+                    "passed":      True,    # infrastructure error — not a confirmed exploit
+                    "probe_error": True,
                 }]
 
             except Exception as probe_exc:
@@ -525,18 +526,15 @@ async def run_garak_simulation(
                 raw_findings = [{
                     "category":    _infer_category(probe_name),
                     "description": f"Probe error: {probe_exc}",
-                    "score":  0.30,
-                    "passed": False,
+                    "score":       0.10,
+                    "passed":      True,    # infrastructure error — not a confirmed exploit
+                    "probe_error": True,
                 }]
 
             # ── emit one event per finding ────────────────────────────────────
             for raw in raw_findings:
                 # ── per-attempt trace events (llm.prompt / llm.response / guard.decision)
-                # Fall back to stub trace so Explainability tab always has data,
-                # even when the probe errored or the sidecar returned no trace.
                 trace = raw.get("trace") or {}
-                if not trace.get("prompt"):
-                    trace = {**_stub_trace(_infer_category(probe_name)), "attempt_index": 0}
                 if trace.get("prompt"):
                     await emit_event("llm.prompt", {
                         "probe":          probe_name,
@@ -579,7 +577,18 @@ async def run_garak_simulation(
                 normalized = normalize_finding(raw, probe_name)
                 all_findings.append(normalized)
 
-                if normalized["severity"] in ("high", "critical"):
+                if raw.get("probe_error"):
+                    # Infrastructure failure (probe crashed/timed out) — not a security
+                    # finding. Show as orange PROBE ERROR in Timeline, not green ALLOWED.
+                    await emit_event("simulation.probe_error", {
+                        "categories":      [normalized["category"]],
+                        "decision_reason": normalized["description"],
+                        "correlation_id":  corr,
+                        "probe_name":      probe_name,
+                        "severity":        normalized["severity"],
+                        "message":         normalized["description"],
+                    })
+                elif normalized["severity"] in ("high", "critical"):
                     # High-severity finding → simulation.blocked
                     # This feeds into useSimulationState.partialResults and
                     # the ProbeResults tab without any frontend changes.

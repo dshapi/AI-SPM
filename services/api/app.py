@@ -826,6 +826,139 @@ async def chat(
     )
 
 
+# ── Internal probe endpoint (garak red-team scanner) ─────────────────────────
+#
+# Runs a prompt through the FULL CPM security pipeline:
+#   lexical → Llama Guard 3 → OPA policies → Anthropic Claude → output scan → Kafka
+#
+# NOT part of the public API. Secured by GARAK_INTERNAL_SECRET (shared secret
+# between the garak-runner sidecar and this service). Only reachable within the
+# Docker-compose network — not exposed on any public port.
+
+class InternalProbeRequest(BaseModel):
+    prompt: str
+
+
+class InternalProbeResponse(BaseModel):
+    response: str
+    guard_verdict: str
+    guard_score: float = 0.0
+    guard_reason: str = ""
+
+
+@app.post("/internal/probe", response_model=InternalProbeResponse)
+async def internal_probe(
+    req: InternalProbeRequest,
+    x_internal_token: str = Header(None, alias="X-Internal-Token"),
+):
+    """Garak red-team probe — full CPM pipeline, no JWT required."""
+    _secret = os.getenv("GARAK_INTERNAL_SECRET", "")
+    if not _secret or x_internal_token != _secret:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    if _pss is None:
+        raise HTTPException(status_code=503, detail="Security service not initialised")
+
+    probe_session_id = str(uuid.uuid4())
+    ctx = ScreeningContext(
+        tenant_id="t1",
+        user_id="garak-redteam",
+        session_id=probe_session_id,
+        roles=[],
+        scopes=[],
+    )
+
+    # 1. Full prompt security evaluation (lexical → guard model → OPA)
+    decision = await _pss.evaluate(req.prompt, ctx)
+    guard_verdict = "block" if decision.is_blocked else "allow"
+    guard_score   = float(decision.signals.get("guard_score", 0.0))
+    guard_reason  = decision.reason or ""
+
+    def _publish_rt_event(gv: str, gc: list) -> None:
+        """Publish a RawEvent to Kafka so probes flow through Flink/processor."""
+        try:
+            _evt = RawEvent(
+                event_id=str(uuid.uuid4()),
+                ts=int(time.time() * 1000),
+                tenant_id="t1",
+                user_id="garak-redteam",
+                session_id=probe_session_id,
+                prompt=req.prompt,
+                metadata={"source": "garak-redteam"},
+                auth_context=AuthContext(
+                    sub="garak-redteam", tenant_id="t1",
+                    roles=[], scopes=[],
+                    claims={"source": "garak"},
+                    issued_at=int(time.time()),
+                ),
+                guard_verdict=gv,
+                guard_score=guard_score,
+                guard_categories=gc,
+            )
+            _topics = topics_for_tenant("t1")
+            send_event(
+                get_producer(), _topics.raw, _evt,
+                event_type="raw_event", source_service="garak-redteam",
+            )
+        except Exception as _ke:
+            log.warning("internal_probe: Kafka publish failed: %s", _ke)
+
+    if decision.is_blocked:
+        _publish_rt_event("block", decision.signals.get("guard_categories", []))
+        return InternalProbeResponse(
+            response=f"[BLOCKED] {guard_reason}",
+            guard_verdict=guard_verdict,
+            guard_score=guard_score,
+            guard_reason=guard_reason,
+        )
+
+    # 2. LLM call — use async client so the event loop stays unblocked
+    rt_llm_response = "[No LLM — ANTHROPIC_API_KEY not configured]"
+    _aac = _get_async_anthropic()
+    if _aac:
+        try:
+            _msg = await _aac.messages.create(
+                model=ANTHROPIC_MODEL,
+                max_tokens=512,
+                messages=[{"role": "user", "content": req.prompt}],
+            )
+            rt_llm_response = _msg.content[0].text if _msg.content else ""
+        except Exception as _le:
+            log.warning("internal_probe: LLM call failed: %s", _le)
+            rt_llm_response = f"[LLM error: {_le}]"
+
+    # 3. Output scanning (secrets/PII + OPA output policy)
+    _output_action = "allow"
+    if rt_llm_response and not rt_llm_response.startswith("["):
+        _cs, _cp = _scan_output(rt_llm_response)
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as _opa_cli:
+                _or = await _opa_cli.post(
+                    f"{OPA_URL_FOR_GATE}/v1/data/spm/output/allow",
+                    json={"input": {"contains_secret": _cs, "contains_pii": _cp, "llm_verdict": "allow"}},
+                )
+                if _or.status_code == 200:
+                    _res = _or.json().get("result", {})
+                    _output_action = _res.get("decision", "allow") if isinstance(_res, dict) else "allow"
+        except Exception as _oe:
+            log.warning("internal_probe: OPA output check failed: %s", _oe)
+
+        if _output_action == "redact":
+            rt_llm_response = _redact_output(rt_llm_response)
+        elif _output_action == "block":
+            rt_llm_response = "[BLOCKED by output policy]"
+
+    # 4. Publish to Kafka → flows through Flink/processor/posture pipeline
+    _publish_rt_event(guard_verdict, decision.signals.get("guard_categories", []))
+
+    return InternalProbeResponse(
+        response=rt_llm_response,
+        guard_verdict=guard_verdict,
+        guard_score=guard_score,
+        guard_reason=guard_reason,
+    )
+
+
 @app.post("/chat/stream")
 async def chat_stream(
     req: ChatRequest,

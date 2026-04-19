@@ -40,7 +40,7 @@ _WS_WAIT_TIMEOUT_S: float = float(os.environ.get("WS_WAIT_TIMEOUT_S", "10.0"))
 # Hard upper bound for the total simulation runtime. If the coroutine hangs
 # (dead PSS, stuck probe, etc.) we force-emit `simulation.error` so the
 # frontend never waits forever on its own watchdog alone.
-_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "45.0"))
+_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "900.0"))
 
 from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
 _explainer = _PolicyExplainer()
@@ -89,7 +89,7 @@ class SinglePromptSimRequest(BaseModel):
 class GarakConfig(BaseModel):
     profile: str = "default"
     probes: list[str] = []
-    max_attempts: int = 10
+    max_attempts: int = 2   # keep low: each attempt hits the real LLM (~5-15 s each)
 
 
 class GarakSimRequest(BaseModel):
@@ -317,113 +317,76 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
 
 async def _run_garak(session_id: str, garak_config: GarakConfig,
                      execution_mode: str) -> None:
-    """Iterate Garak probes; emit per-probe simulation events.
+    """Delegate probe execution to garak_runner.run_garak_simulation.
 
-    Every event is sent via _ws_emit (direct WS path, no Kafka dependency)
-    AND optionally via Kafka if a producer is available.  This mirrors the
-    pattern in _run_single_prompt and is the fix for the 'stuck running'
-    regression: previously all events were gated on `if producer:`, so
-    without Kafka the frontend never received a terminal event and
-    `running` stayed True forever.
+    This function owns three concerns that belong at the transport layer:
+      1. WS connection wait — ensures the browser is listening before we emit.
+      2. emit_event adapter — fans each event to both the direct WS path and
+         the optional Kafka mirror so both consumers stay in sync.
+      3. Outer error safety — if garak_runner itself raises before its own
+         try/finally (e.g., import failure), we emit a fallback error so the
+         frontend never hangs in ``running`` state.
+
+    Terminal guarantee:
+      garak_runner.run_garak_simulation guarantees EXACTLY ONE terminal event
+      (simulation.completed OR simulation.error) internally.
+      _run_with_hard_timeout provides an additional outer safety net.
     """
     # Same startup race guard as _run_single_prompt — see that function.
     await _ws_wait_for_connection(session_id)
 
     app_mod = sys.modules.get("app")
     producer = getattr(app_mod, "_producer", None) if app_mod else None
-    terminal_sent = False
 
     from platform_shared.simulation_events import (
-        publish_started, publish_progress, publish_allowed,
+        publish_started, publish_progress, publish_allowed, publish_blocked,
         publish_completed, publish_error,
     )
 
-    probes = garak_config.probes or ["default_probe"]
-    total = len(probes)
+    async def emit_event(event_type: str, payload: dict) -> None:
+        """Fan-out: WS direct (always) + Kafka mirror (when producer available).
 
-    # ── started ───────────────────────────────────────────────────────────────
-    await _ws_emit(session_id, "simulation.started", {
-        "attack_type":    "garak",
-        "execution_mode": execution_mode,
-        "total_probes":   total,
-        "profile":        garak_config.profile,
-    })
-    if producer:
-        publish_started(producer, session_id=session_id, prompt="",
-                        attack_type="garak", execution_mode=execution_mode)
+        lineage.node has no Kafka publisher yet — it is forwarded to the WS
+        layer only and silently ignored by the frontend state machine (unknown
+        event types are not dispatched by useSimulationState).
+        """
+        await _ws_emit(session_id, event_type, payload)
+        if not producer:
+            return
+        corr = payload.get("correlation_id", "")
+        if event_type == "simulation.started":
+            publish_started(producer, session_id=session_id, prompt="",
+                            attack_type="garak", execution_mode=execution_mode)
+        elif event_type == "simulation.progress":
+            publish_progress(producer, session_id=session_id,
+                             step=payload.get("step", 0),
+                             total=payload.get("total", 0),
+                             message=payload.get("message", ""),
+                             probe_name=payload.get("probe_name", ""),
+                             correlation_id=corr)
+        elif event_type == "simulation.allowed":
+            publish_allowed(producer, session_id=session_id,
+                            response_preview=payload.get("response_preview", ""),
+                            correlation_id=corr)
+        elif event_type == "simulation.blocked":
+            publish_blocked(producer, session_id=session_id,
+                            categories=payload.get("categories", []),
+                            decision_reason=payload.get("decision_reason", ""),
+                            correlation_id=corr)
+        elif event_type == "simulation.completed":
+            publish_completed(producer, session_id=session_id,
+                              summary=payload.get("summary", {}))
+        elif event_type == "simulation.error":
+            publish_error(producer, session_id=session_id,
+                          error_message=payload.get("error_message", ""))
 
-    try:
-        for i, probe in enumerate(probes, start=1):
-            corr = str(uuid.uuid4())
-
-            # progress — one per probe
-            await _ws_emit(session_id, "simulation.progress", {
-                "step":       i,
-                "total":      total,
-                "message":    f"Running probe: {probe}",
-                "probe_name": probe,
-                "correlation_id": corr,
-            })
-            if producer:
-                publish_progress(producer, session_id=session_id,
-                                 step=i, total=total,
-                                 message=f"Running probe: {probe}",
-                                 probe_name=probe,
-                                 correlation_id=corr)
-
-            # TODO: call real Garak probe runner here
-            await _ws_emit(session_id, "simulation.allowed", {
-                "response_preview": f"[probe {probe} stub]",
-                "correlation_id":   corr,
-            })
-            if producer:
-                publish_allowed(producer, session_id=session_id,
-                                response_preview=f"[probe {probe} stub]",
-                                correlation_id=corr)
-
-        # ── completed ─────────────────────────────────────────────────────────
-        summary = {"probes_run": total, "profile": garak_config.profile}
-        await _ws_emit(session_id, "simulation.completed", {"summary": summary})
-        terminal_sent = True
-        if producer:
-            publish_completed(producer, session_id=session_id, summary=summary)
-
-    except asyncio.CancelledError:
-        log.warning("simulation: garak cancelled session_id=%s", session_id)
-        try:
-            await _ws_emit(session_id, "simulation.error",
-                           {"error_message": "Simulation cancelled (hard timeout)"})
-            if producer:
-                publish_error(producer, session_id=session_id,
-                              error_message="Simulation cancelled (hard timeout)")
-            terminal_sent = True
-        finally:
-            raise
-
-    except Exception as exc:
-        log.exception("simulation garak error session_id=%s", session_id)
-        try:
-            await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
-            if producer:
-                publish_error(producer, session_id=session_id, error_message=str(exc))
-            terminal_sent = True
-        except Exception:
-            log.exception("simulation: garak failed to emit error event session_id=%s",
-                          session_id)
-
-    finally:
-        if not terminal_sent:
-            log.warning("simulation: garak no terminal emitted — injecting fallback error session_id=%s",
-                        session_id)
-            try:
-                await _ws_emit(session_id, "simulation.error",
-                               {"error_message": "Simulation ended without terminal event"})
-                if producer:
-                    publish_error(producer, session_id=session_id,
-                                  error_message="Simulation ended without terminal event")
-            except Exception:
-                log.exception("simulation: garak fallback terminal emit failed session_id=%s",
-                              session_id)
+    # garak_runner owns the probe loop, event mapping, and terminal guarantee.
+    # If the import itself fails (e.g., syntax error in garak_runner), the
+    # exception bubbles to _run_with_hard_timeout which emits a safety-net error.
+    from garak_runner import run_garak_simulation
+    probe_timeout_s = float(os.environ.get("PROBE_TIMEOUT_S", "150.0"))
+    await run_garak_simulation(garak_config, emit_event, session_id,
+                               probe_timeout_s=probe_timeout_s)
 
 
 # ── Hard-timeout wrapper ─────────────────────────────────────────────────────

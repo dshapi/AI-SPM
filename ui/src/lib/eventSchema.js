@@ -45,6 +45,9 @@ const _TYPE_TO_STAGE = {
   [CANONICAL_EVENT_TYPES.GUARD_DECISION]: 'trace',
   [CANONICAL_EVENT_TYPES.TOOL_CALL]:     'trace',
   [CANONICAL_EVENT_TYPES.GUARD_INPUT]:   'trace',
+
+  // Garak probe-level infrastructure error — shows as orange in Timeline, NOT terminal
+  [CANONICAL_EVENT_TYPES.PROBE_ERROR]:   'probe_error',
 }
 
 function deriveStage(canonicalType) {

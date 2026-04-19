@@ -81,6 +81,9 @@ export const CANONICAL_EVENT_TYPES = {
   GUARD_DECISION:     'guard.decision',     // guard/detector verdict
   TOOL_CALL:          'tool.call',          // tool invoked by a probe
   GUARD_INPUT:        'guard.input',        // raw prompt captured before sanitization
+
+  // ── Garak probe-level errors (infrastructure failure, not a security finding)
+  PROBE_ERROR:        'simulation.probe_error', // probe crashed / timed out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -137,6 +140,9 @@ const _RAW_TO_CANONICAL = {
   'guard.decision': CANONICAL_EVENT_TYPES.GUARD_DECISION,
   'tool.call':     CANONICAL_EVENT_TYPES.TOOL_CALL,
   'guard.input':   CANONICAL_EVENT_TYPES.GUARD_INPUT,
+
+  // Garak probe-level infrastructure error (non-terminal — probe failed to run)
+  'simulation.probe_error': CANONICAL_EVENT_TYPES.PROBE_ERROR,
 }
 
 const _POLICY_EVENT_TYPES = new Set(['policy.decision', 'policy_decision'])

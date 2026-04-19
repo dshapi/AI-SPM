@@ -269,16 +269,31 @@ async def test_hard_timeout_wrapper_emits_error_on_uncaught_exception(
 async def test_garak_emits_terminal_on_happy_path(sim_module, capture_emits):
     """Garak flow emits completed after the loop, not per-probe."""
     from services.api.routes.simulation import GarakConfig
+    import garak_runner as _gr
+    from garak_runner import _infer_category, _stub_trace
+
+    async def _stub_probe(probe_name, config, timeout_s=60.0):
+        category = _infer_category(probe_name)
+        return [{
+            "category":    category,
+            "description": f"[test-stub] {probe_name}",
+            "score":       0.0,
+            "passed":      True,
+            "trace":       {**_stub_trace(category), "attempt_index": 0},
+        }]
+
     mock_app = MagicMock()
     mock_app._producer = None
-    with patch.dict(sys.modules, {"app": mock_app}):
+    with patch.dict(sys.modules, {"app": mock_app}), \
+         patch.object(_gr, "_garak_available", return_value=True), \
+         patch.object(_gr, "_run_probe_with_garak", side_effect=_stub_probe):
         await sim_module._run_garak(
             session_id="sid-garak",
             garak_config=GarakConfig(profile="default", probes=["dan", "jailbreak"], max_attempts=1),
             execution_mode="live",
         )
     types = [t for t, _ in capture_emits]
-    # 1 started + 2*(progress + allowed) + 1 completed
+    # 1 started + 2*(trace events + progress + allowed) + 1 completed
     assert types[0] == "simulation.started"
     assert types.count("simulation.progress") == 2
     assert types.count("simulation.allowed") == 2
