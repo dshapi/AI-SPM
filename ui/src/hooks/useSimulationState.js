@@ -46,7 +46,14 @@ import { buildResultFromSimEvents } from '../lib/buildResultFromSimEvents'
 import { runSinglePromptSimulation, runGarakSimulation } from '../api/simulationApi'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+// Initial budget from sim start to first backend event.  30 s is generous for
+// any WS handshake + PSS cold-start on localhost Docker.
 const TIMEOUT_MS      = 30_000
+// Budget from the LAST received (non-terminal) event to the terminal event.
+// PSS (lexical → guard → OPA) completes in ≤ 4 s under normal conditions, but
+// a cold OPA container or slow guard-model startup can stretch to ~10 s.
+// 60 s gives a 15× safety margin without masking genuine hangs.
+const ACTIVITY_TIMEOUT_MS = 60_000
 
 // ── Action types ──────────────────────────────────────────────────────────────
 export const Actions = Object.freeze({
@@ -203,6 +210,16 @@ export function useSimulationState() {
     console.log('[PIPELINE] state: event received stage=', latest.stage, 'steps_before=', simState.steps.length)
 
     if (!TERMINAL_STAGES.has(latest.stage)) {
+      // Non-terminal event — backend is alive.  Reset watchdog so the 60 s
+      // budget runs from this event, not from sim start.  This prevents false
+      // timeouts when the WS handshake + PSS cold-start together are slow.
+      clearWatchdog()
+      watchdogRef.current = setTimeout(() => {
+        if (terminatedRef.current) return
+        terminatedRef.current = true
+        console.warn('[PIPELINE] state: activity watchdog fired timeout_ms=', ACTIVITY_TIMEOUT_MS)
+        dispatch({ type: Actions.WATCHDOG_FIRED })
+      }, ACTIVITY_TIMEOUT_MS)
       dispatch({ type: Actions.EVENT_RECEIVED, event: latest })
       return
     }

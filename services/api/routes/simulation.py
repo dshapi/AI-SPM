@@ -130,10 +130,19 @@ async def _ws_wait_for_connection(session_id: str, timeout_s: float | None = Non
 async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                               execution_mode: str) -> None:
     """Run prompt through PSS; emit simulation events via WS (direct) and Kafka."""
+    t0 = datetime.datetime.utcnow()
+
     # Wait for the browser's WS connection to be registered before emitting
     # any events.  Without this guard the background task races ahead of the
     # WS handshake and all events are silently dropped by ConnectionManager.
     await _ws_wait_for_connection(session_id)
+
+    t_ws = datetime.datetime.utcnow()
+    log.info(
+        "simulation: WS ready session=%s ws_wait_ms=%d",
+        session_id,
+        int((t_ws - t0).total_seconds() * 1000),
+    )
 
     app_mod = sys.modules.get("app")
     if app_mod is None:
@@ -178,10 +187,18 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
             user_id="sim-user",
             tenant_id="t1",
         )
+        t_pss_start = datetime.datetime.utcnow()
         result = await pss.evaluate(prompt, ctx)
+        t_pss_end = datetime.datetime.utcnow()
+        log.info(
+            "simulation: PSS complete session=%s pss_ms=%d is_blocked=%s",
+            session_id,
+            int((t_pss_end - t_pss_start).total_seconds() * 1000),
+            result.is_blocked,
+        )
 
         correlation_id = str(uuid.uuid4())
-        _eval_start = datetime.datetime.utcnow()
+        _eval_start = t_pss_end
 
         # Build explanation for blocked events
         _policy_event = {
@@ -222,11 +239,16 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                                 correlation_id=correlation_id)
 
         _eval_ms = int((datetime.datetime.utcnow() - _eval_start).total_seconds() * 1000)
+        _total_ms = int((datetime.datetime.utcnow() - t0).total_seconds() * 1000)
         completed_summary = {
             "result":      "blocked" if result.is_blocked else "allowed",
             "categories":  result.categories,
             "duration_ms": _eval_ms,
         }
+        log.info(
+            "simulation: complete session=%s total_ms=%d result=%s",
+            session_id, _total_ms, completed_summary["result"],
+        )
         await _ws_emit(session_id, "simulation.completed", {"summary": completed_summary})
         if producer:
             publish_completed(producer, session_id=session_id, summary=completed_summary)
