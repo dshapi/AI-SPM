@@ -19,7 +19,7 @@ from typing import Tuple
 
 import httpx
 
-from security.models import (
+from prompt_security.models import (
     ScreeningContext,
     REASON_POLICY_BLOCK,
     REASON_POLICY_UNAVAILABLE,

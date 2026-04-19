@@ -8,9 +8,9 @@ Exposes:
 
 Usage::
 
-    from security import PromptSecurityService, PromptDecision, ScreeningContext
-    from security.adapters.guard_adapter import LlamaGuardAdapter
-    from security.adapters.policy_adapter import OPAAdapter
+    from prompt_security import PromptSecurityService, PromptDecision, ScreeningContext
+    from prompt_security.adapters.guard_adapter import LlamaGuardAdapter
+    from prompt_security.adapters.policy_adapter import OPAAdapter
 
     svc = PromptSecurityService(
         guard_adapter=LlamaGuardAdapter(guard_url="http://guard:8200"),
@@ -20,7 +20,7 @@ Usage::
     if decision.is_blocked:
         ...
 """
-from security.service import PromptSecurityService
-from security.models import PromptDecision, ScreeningContext
+from prompt_security.service import PromptSecurityService
+from prompt_security.models import PromptDecision, ScreeningContext
 
 __all__ = ["PromptSecurityService", "PromptDecision", "ScreeningContext"]

@@ -40,7 +40,7 @@ import logging
 import uuid
 from typing import Optional
 
-from security.models import (
+from prompt_security.models import (
     PromptDecision,
     ScreeningContext,
     REASON_LEXICAL_BLOCK,
@@ -51,11 +51,11 @@ from security.models import (
     LAYER_GUARD,
     LAYER_POLICY,
 )
-from security.rules.normalizer import Normalizer
-from security.rules.lexical_scanner import LexicalScanner
-from security.rules.explanation_mapper import ExplanationMapper
-from security.adapters.guard_adapter import LlamaGuardAdapter
-from security.adapters.policy_adapter import OPAAdapter
+from prompt_security.rules.normalizer import Normalizer
+from prompt_security.rules.lexical_scanner import LexicalScanner
+from prompt_security.rules.explanation_mapper import ExplanationMapper
+from prompt_security.adapters.guard_adapter import LlamaGuardAdapter
+from prompt_security.adapters.policy_adapter import OPAAdapter
 
 log = logging.getLogger("security.service")
 

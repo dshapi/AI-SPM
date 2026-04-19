@@ -19,7 +19,7 @@ from models.block_response import (
     _UNAVAILABLE_EXPLANATION,
     _POLICY_UNAVAILABLE_EXPLANATION,
 )
-from security.models import (
+from prompt_security.models import (
     REASON_GUARD_UNAVAILABLE,
     REASON_LEXICAL_BLOCK,
     REASON_POLICY_BLOCK,
@@ -52,7 +52,7 @@ class ExplanationMapper:
 
         Parameters
         ----------
-        reason     : Block reason code (REASON_* constants from security.models).
+        reason     : Block reason code (REASON_* constants from prompt_security.models).
         categories : Llama Guard S-codes, e.g. ["S9"] or [].
 
         Returns
