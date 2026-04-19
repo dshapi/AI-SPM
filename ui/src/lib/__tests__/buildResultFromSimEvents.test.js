@@ -74,4 +74,31 @@ describe('buildResultFromSimEvents', () => {
     const result = buildResultFromSimEvents([STARTED, PROGRESS, BLOCKED, COMPLETED_BLOCKED])
     expect(result.decisionTrace).toHaveLength(4)
   })
+
+  it('completed summary WINS over a misleading allowed decision event', () => {
+    // Garak / race scenario: an `allowed` event can appear before the
+    // authoritative `simulation.completed` whose summary.result = "blocked".
+    // The builder must trust the completed summary.
+    const result = buildResultFromSimEvents([STARTED, ALLOWED, COMPLETED_BLOCKED])
+    expect(result).not.toBeNull()
+    expect(result.verdict).toBe('blocked')
+  })
+
+  it('completed summary WINS over a misleading blocked decision event too', () => {
+    const result = buildResultFromSimEvents([STARTED, BLOCKED, COMPLETED_ALLOWED])
+    expect(result).not.toBeNull()
+    expect(result.verdict).toBe('allowed')
+  })
+
+  it('no completed + only allowed decision → verdict allowed', () => {
+    const result = buildResultFromSimEvents([STARTED, ALLOWED])
+    expect(result).not.toBeNull()
+    expect(result.verdict).toBe('allowed')
+  })
+
+  it('no completed + only blocked decision → verdict blocked', () => {
+    const result = buildResultFromSimEvents([STARTED, BLOCKED])
+    expect(result).not.toBeNull()
+    expect(result.verdict).toBe('blocked')
+  })
 })

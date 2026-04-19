@@ -37,6 +37,11 @@ router = APIRouter()
 # The original 2.0s was too short for 4G/intercontinental connections.
 _WS_WAIT_TIMEOUT_S: float = float(os.environ.get("WS_WAIT_TIMEOUT_S", "10.0"))
 
+# Hard upper bound for the total simulation runtime. If the coroutine hangs
+# (dead PSS, stuck probe, etc.) we force-emit `simulation.error` so the
+# frontend never waits forever on its own watchdog alone.
+_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "45.0"))
+
 from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
 _explainer = _PolicyExplainer()
 
@@ -129,8 +134,21 @@ async def _ws_wait_for_connection(session_id: str, timeout_s: float | None = Non
 
 async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                               execution_mode: str) -> None:
-    """Run prompt through PSS; emit simulation events via WS (direct) and Kafka."""
+    """Run prompt through PSS; emit simulation events via WS (direct) and Kafka.
+
+    Correctness guarantees (critical for the frontend pipeline):
+
+      * EXACTLY ONE of `simulation.completed` OR `simulation.error` is always
+        emitted, even if PSS crashes, the WS layer drops, or an inner
+        `_ws_emit` raises.  This is enforced by the `try/finally` below plus
+        a local `terminal_sent` flag.
+      * The whole coroutine is wrapped by `_run_with_hard_timeout` which
+        cancels and emits `simulation.error` if runtime exceeds
+        `SIM_HARD_TIMEOUT_S` (default 45s).  This prevents zombie background
+        tasks from holding open a session forever.
+    """
     t0 = datetime.datetime.utcnow()
+    terminal_sent = False   # set to True once completed/error is emitted
 
     # Wait for the browser's WS connection to be registered before emitting
     # any events.  Without this guard the background task races ahead of the
@@ -145,11 +163,8 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
     )
 
     app_mod = sys.modules.get("app")
-    if app_mod is None:
-        log.error("simulation: app module not found")
-        return
-    pss = getattr(app_mod, "_pss", None)
-    producer = getattr(app_mod, "_producer", None)
+    pss = getattr(app_mod, "_pss", None) if app_mod else None
+    producer = getattr(app_mod, "_producer", None) if app_mod else None
 
     from platform_shared.simulation_events import (
         publish_started, publish_blocked, publish_allowed,
@@ -167,18 +182,22 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                         attack_type=attack_type, execution_mode=execution_mode)
 
     try:
+        if app_mod is None:
+            raise RuntimeError("app module not found — simulation aborted")
+
         if pss is None or execution_mode == "hypothetical":
             await _ws_emit(session_id, "simulation.allowed", {
                 "response_preview": "[hypothetical — not screened]",
             })
-            await _ws_emit(session_id, "simulation.completed", {
-                "summary": {"result": "allowed", "mode": "hypothetical"},
-            })
+            completed_summary = {"result": "allowed", "mode": "hypothetical"}
+            await _ws_emit(session_id, "simulation.completed",
+                           {"summary": completed_summary})
+            terminal_sent = True
             if producer:
                 publish_allowed(producer, session_id=session_id,
                                 response_preview="[hypothetical — not screened]")
                 publish_completed(producer, session_id=session_id,
-                                  summary={"result": "allowed", "mode": "hypothetical"})
+                                  summary=completed_summary)
             return
 
         from security import ScreeningContext
@@ -250,14 +269,50 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
             session_id, _total_ms, completed_summary["result"],
         )
         await _ws_emit(session_id, "simulation.completed", {"summary": completed_summary})
+        terminal_sent = True
         if producer:
             publish_completed(producer, session_id=session_id, summary=completed_summary)
 
+    except asyncio.CancelledError:
+        # The outer hard-timeout wrapper is tearing us down. Emit error and
+        # let the cancellation propagate so the task actually stops.
+        log.warning("simulation: cancelled session_id=%s", session_id)
+        try:
+            await _ws_emit(session_id, "simulation.error",
+                           {"error_message": "Simulation cancelled (hard timeout)"})
+            if producer:
+                publish_error(producer, session_id=session_id,
+                              error_message="Simulation cancelled (hard timeout)")
+            terminal_sent = True
+        finally:
+            raise
+
     except Exception as exc:
         log.exception("simulation single prompt error session_id=%s", session_id)
-        await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
-        if producer:
-            publish_error(producer, session_id=session_id, error_message=str(exc))
+        try:
+            await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
+            if producer:
+                publish_error(producer, session_id=session_id, error_message=str(exc))
+            terminal_sent = True
+        except Exception:
+            log.exception("simulation: failed to emit error event session_id=%s",
+                          session_id)
+
+    finally:
+        # LAST-RESORT safety net: if we somehow got here without emitting a
+        # terminal event, emit simulation.error so the frontend never hangs.
+        if not terminal_sent:
+            log.warning("simulation: no terminal emitted — injecting fallback error session_id=%s",
+                        session_id)
+            try:
+                await _ws_emit(session_id, "simulation.error",
+                               {"error_message": "Simulation ended without terminal event"})
+                if producer:
+                    publish_error(producer, session_id=session_id,
+                                  error_message="Simulation ended without terminal event")
+            except Exception:
+                log.exception("simulation: fallback terminal emit failed session_id=%s",
+                              session_id)
 
 
 async def _run_garak(session_id: str, garak_config: GarakConfig,
@@ -276,6 +331,7 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
 
     app_mod = sys.modules.get("app")
     producer = getattr(app_mod, "_producer", None) if app_mod else None
+    terminal_sent = False
 
     from platform_shared.simulation_events import (
         publish_started, publish_progress, publish_allowed,
@@ -328,14 +384,92 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
         # ── completed ─────────────────────────────────────────────────────────
         summary = {"probes_run": total, "profile": garak_config.profile}
         await _ws_emit(session_id, "simulation.completed", {"summary": summary})
+        terminal_sent = True
         if producer:
             publish_completed(producer, session_id=session_id, summary=summary)
 
+    except asyncio.CancelledError:
+        log.warning("simulation: garak cancelled session_id=%s", session_id)
+        try:
+            await _ws_emit(session_id, "simulation.error",
+                           {"error_message": "Simulation cancelled (hard timeout)"})
+            if producer:
+                publish_error(producer, session_id=session_id,
+                              error_message="Simulation cancelled (hard timeout)")
+            terminal_sent = True
+        finally:
+            raise
+
     except Exception as exc:
         log.exception("simulation garak error session_id=%s", session_id)
-        await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
-        if producer:
-            publish_error(producer, session_id=session_id, error_message=str(exc))
+        try:
+            await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
+            if producer:
+                publish_error(producer, session_id=session_id, error_message=str(exc))
+            terminal_sent = True
+        except Exception:
+            log.exception("simulation: garak failed to emit error event session_id=%s",
+                          session_id)
+
+    finally:
+        if not terminal_sent:
+            log.warning("simulation: garak no terminal emitted — injecting fallback error session_id=%s",
+                        session_id)
+            try:
+                await _ws_emit(session_id, "simulation.error",
+                               {"error_message": "Simulation ended without terminal event"})
+                if producer:
+                    publish_error(producer, session_id=session_id,
+                                  error_message="Simulation ended without terminal event")
+            except Exception:
+                log.exception("simulation: garak fallback terminal emit failed session_id=%s",
+                              session_id)
+
+
+# ── Hard-timeout wrapper ─────────────────────────────────────────────────────
+
+async def _run_with_hard_timeout(session_id: str, coro, label: str) -> None:
+    """
+    Run *coro* but kill it if it exceeds SIM_HARD_TIMEOUT_S and force-emit
+    simulation.error so the WS stream always reaches a terminal event.
+
+    `coro` is awaited once; on timeout we cancel it and synthesise an error
+    event in case the inner coroutine never got a chance to emit one
+    (it usually will, via its own CancelledError handler).
+
+    For ANY uncaught exception from the worker we also emit simulation.error.
+    The worker's own try/finally usually handles this, but it cannot catch
+    exceptions raised BEFORE the try block (e.g., top-level imports of
+    platform_shared.simulation_events failing, or _ws_wait_for_connection
+    raising). Without this safety net those paths would leave the frontend
+    hung waiting for a terminal event that never arrives.
+    """
+    try:
+        await asyncio.wait_for(coro, timeout=_SIM_HARD_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        log.error("simulation: %s hard timeout session_id=%s timeout_s=%.1f",
+                  label, session_id, _SIM_HARD_TIMEOUT_S)
+        try:
+            await _ws_emit(session_id, "simulation.error", {
+                "error_message": f"Simulation exceeded hard timeout of {_SIM_HARD_TIMEOUT_S}s",
+            })
+        except Exception:
+            log.exception("simulation: failed to emit timeout error session_id=%s",
+                          session_id)
+    except Exception as exc:
+        # Any uncaught exception bubbled from the worker — the worker itself
+        # should have emitted simulation.error, but if it raised before its
+        # own try/finally (e.g., import failure, WS-wait crash), no terminal
+        # would have fired. Emit one here as a last-resort safety net.
+        log.exception("simulation: %s worker raised uncaught session_id=%s",
+                      label, session_id)
+        try:
+            await _ws_emit(session_id, "simulation.error", {
+                "error_message": f"Simulation aborted: {exc}",
+            })
+        except Exception:
+            log.exception("simulation: failed to emit uncaught-error session_id=%s",
+                          session_id)
 
 
 # ── Route handlers ───────────────────────────────────────────────────────────
@@ -344,12 +478,14 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
 async def simulate_single(req: SinglePromptSimRequest,
                            background_tasks: BackgroundTasks):
     """Run a single prompt through the security pipeline and stream events."""
-    background_tasks.add_task(
-        _run_single_prompt,
+    coro = _run_single_prompt(
         session_id=req.session_id,
         prompt=req.prompt,
         attack_type=req.attack_type,
         execution_mode=req.execution_mode,
+    )
+    background_tasks.add_task(
+        _run_with_hard_timeout, req.session_id, coro, "single-prompt"
     )
     return {"session_id": req.session_id, "status": "started"}
 
@@ -358,10 +494,12 @@ async def simulate_single(req: SinglePromptSimRequest,
 async def simulate_garak(req: GarakSimRequest,
                           background_tasks: BackgroundTasks):
     """Start a Garak scan and stream per-probe events."""
-    background_tasks.add_task(
-        _run_garak,
+    coro = _run_garak(
         session_id=req.session_id,
         garak_config=req.garak_config,
         execution_mode=req.execution_mode,
+    )
+    background_tasks.add_task(
+        _run_with_hard_timeout, req.session_id, coro, "garak"
     )
     return {"session_id": req.session_id, "status": "started"}

@@ -22,13 +22,29 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, Set, Tuple
+import time
+from collections import deque
+from typing import Deque, Dict, Set, Tuple
 
 from fastapi import WebSocket
 
 log = logging.getLogger("api.ws.connection_manager")
 
 QUEUE_MAX_SIZE: int = 256
+
+# ── Pre-connect event buffer ─────────────────────────────────────────────────
+# If `broadcast()` is called before any WebSocket has registered for a
+# session_id, we buffer the event in a bounded FIFO so it can be flushed to
+# the first connection that arrives. This eliminates the "stuck running" race
+# where simulation events fire while the client is still completing the WS
+# handshake (which on cold Docker stacks can take a few seconds). Without the
+# buffer those events would be silently dropped forever.
+#
+# The buffer is bounded per session (BUFFER_MAX_PER_SESSION) to prevent memory
+# growth from orphan sessions, and entries older than BUFFER_TTL_S are evicted
+# lazily on each broadcast.
+BUFFER_MAX_PER_SESSION: int = 64
+BUFFER_TTL_S: float = 120.0
 
 
 # Internal entry: (ws_object_id, WebSocket, asyncio.Queue)
@@ -50,7 +66,22 @@ class ConnectionManager:
     def __init__(self) -> None:
         # session_id → set of (id(ws), ws, queue) entries
         self._connections: Dict[str, Set[_Entry]] = {}
+        # session_id → deque[(monotonic_ts, event_dict)] for pre-connect buffering
+        self._pending: Dict[str, Deque[Tuple[float, dict]]] = {}
         self._lock = asyncio.Lock()
+
+    # ── Internal pending-buffer helpers ──────────────────────────────────────
+
+    def _evict_expired_locked(self, now: float) -> None:
+        """Drop TTL-expired entries from every pending queue. Must hold lock."""
+        stale = []
+        for sid, buf in self._pending.items():
+            while buf and (now - buf[0][0]) > BUFFER_TTL_S:
+                buf.popleft()
+            if not buf:
+                stale.append(sid)
+        for sid in stale:
+            del self._pending[sid]
 
     async def connect(
         self,
@@ -71,11 +102,28 @@ class ConnectionManager:
             if session_id not in self._connections:
                 self._connections[session_id] = set()
             self._connections[session_id].add(entry)
+            # Drain any events buffered while no WS was connected so the
+            # browser sees the full event sequence.
+            pending = self._pending.pop(session_id, None)
+
+        flushed = 0
+        if pending:
+            for _, ev in pending:
+                if queue.qsize() < QUEUE_MAX_SIZE:
+                    await queue.put(ev)
+                    flushed += 1
+                else:
+                    log.warning(
+                        "ws_flush_queue_full session_id=%s event_type=%s — dropping",
+                        session_id,
+                        ev.get("event_type", "?"),
+                    )
 
         log.info(
-            "ws_connected session_id=%s total=%d",
+            "ws_connected session_id=%s total=%d flushed=%d",
             session_id,
             self.total_connections,
+            flushed,
         )
         return queue
 
@@ -108,9 +156,34 @@ class ConnectionManager:
         Used by in-process background tasks (e.g. simulation runner) that
         want to stream events to the browser without going through Kafka.
         Safe to call from any coroutine running in the same event loop.
+
+        When no WebSocket is registered for *session_id* yet, the event is
+        stashed in a per-session pre-connect buffer (bounded, TTL-evicted)
+        so that the very first WS connection will receive the full sequence.
+        Without this, events emitted during the client's WS-handshake window
+        were silently lost — the primary cause of "stuck running" and
+        non-deterministic built-in prompt behaviour.
         """
+        now = time.monotonic()
         async with self._lock:
             entries = set(self._connections.get(session_id, set()))
+            if not entries:
+                # No live connection — buffer for later flush.
+                self._evict_expired_locked(now)
+                buf = self._pending.get(session_id)
+                if buf is None:
+                    buf = deque(maxlen=BUFFER_MAX_PER_SESSION)
+                    self._pending[session_id] = buf
+                if len(buf) >= BUFFER_MAX_PER_SESSION:
+                    # deque(maxlen=…) would drop oldest; we prefer a warning
+                    # that matches the live-queue overflow behaviour.
+                    log.warning(
+                        "ws_buffer_full session_id=%s event_type=%s — dropping oldest",
+                        session_id,
+                        event.get("event_type", "?"),
+                    )
+                buf.append((now, event))
+                return
         for _, _, queue in entries:
             if queue.qsize() < QUEUE_MAX_SIZE:
                 await queue.put(event)

@@ -35,21 +35,36 @@ export function useSimulationStream() {
   const [simEvents, setSimEvents] = useState([])
   const seenRef = useRef(new Set())
 
-  // Transform incoming WsEvents → SimulationEvents
+  // Transform incoming WsEvents → SimulationEvents.
+  //
+  // We intentionally do NOT rely on `liveEvents[length-1]`: that value is the
+  // event with the latest TIMESTAMP, not the most recently arrived one. When
+  // events arrive out-of-order (slow network, retransmit, or two events with
+  // the same millisecond-precision timestamp), the tail stabilises on the
+  // first seen event and any later-arriving events mid-array would be
+  // silently skipped.
+  //
+  // Instead we walk the whole sorted `liveEvents` array each render, filter
+  // anything already in `seenRef`, normalise the new ones, and append. This is
+  // O(N) per render but N is small (< a few hundred events per simulation).
   useEffect(() => {
-    const latest = liveEvents[liveEvents.length - 1]
-    if (!latest) return
+    if (liveEvents.length === 0) return
 
-    // Dedup key: type + correlation + timestamp — allows multiple events of the
-    // same type (e.g. several policy.decision events in a Garak multi-probe run)
-    const key = `${latest.event_type}:${latest.correlation_id || ''}:${latest.timestamp}`
-    if (seenRef.current.has(key)) return
-    seenRef.current.add(key)
+    const unseen = []
+    for (const raw of liveEvents) {
+      const key = `${raw.event_type}:${raw.correlation_id || ''}:${raw.timestamp || ''}`
+      if (seenRef.current.has(key)) continue
+      seenRef.current.add(key)
+      unseen.push(toSimulationEvent(raw))
+    }
+    if (unseen.length === 0) return
 
-    const simEvent = toSimulationEvent(latest)
-    console.log('[PIPELINE] emit:', simEvent.event_type, '→ stage:', simEvent.stage, '| id:', simEvent.id)
+    for (const ev of unseen) {
+      console.log('[PIPELINE] emit:', ev.event_type, '→ stage:', ev.stage, '| id:', ev.id)
+    }
+
     setSimEvents(prev => {
-      const next = [...prev, simEvent]
+      const next = [...prev, ...unseen]
       next.sort((a, b) => {
         const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0
         const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0

@@ -37,7 +37,8 @@
  *   idle ──startSimulation()──► running
  *   running ──terminal WS event──► completed
  *   running ──error WS event────► failed
- *   running ──30s watchdog──────► failed  ("Simulation timeout")
+ *   running ──60s first-event watchdog──► failed  ("Simulation timeout")
+ *   running ──60s activity watchdog────► failed  ("Simulation timeout")
  *   any ──resetSimulation()──────► idle
  */
 import { useReducer, useEffect, useRef, useCallback } from 'react'
@@ -46,9 +47,23 @@ import { buildResultFromSimEvents } from '../lib/buildResultFromSimEvents'
 import { runSinglePromptSimulation, runGarakSimulation } from '../api/simulationApi'
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-// Initial budget from sim start to first backend event.  30 s is generous for
-// any WS handshake + PSS cold-start on localhost Docker.
-const TIMEOUT_MS      = 30_000
+// Initial budget from sim start to first backend event.
+//
+// This MUST exceed the backend's WS-wait + PSS cold-start window plus a
+// margin for the server's own hard timeout. Concretely:
+//
+//   WS_WAIT_TIMEOUT_S (default 10 s)
+// + SIM_HARD_TIMEOUT_S (default 45 s, worst case when PSS hangs)
+// + small safety buffer for message transit
+//
+// ≈ 60 s. With the backend hard-timeout emitting `simulation.error` at 45 s
+// and the WS pre-connect buffer (added in ws/connection_manager.py) ensuring
+// no events are lost during the handshake race, this budget is now
+// deterministic: the backend will always produce a terminal event before we
+// fire. 30 s was the previous value and could fire on cold Docker stacks
+// BEFORE the backend's first event arrived, producing the false
+// "Simulation timeout" that caused built-in prompts to look flaky.
+const TIMEOUT_MS      = 60_000
 // Budget from the LAST received (non-terminal) event to the terminal event.
 // PSS (lexical → guard → OPA) completes in ≤ 4 s under normal conditions, but
 // a cold OPA container or slow guard-model startup can stretch to ~10 s.
@@ -65,9 +80,26 @@ export const Actions = Object.freeze({
 })
 
 // ── Terminal stage set ────────────────────────────────────────────────────────
+// Only true LIFECYCLE terminals transition the status out of 'running'.
+// `blocked` / `allowed` / `escalated` are DECISION events — they record the
+// verdict but the simulation is not finished until the backend emits
+// `simulation.completed` (or `simulation.error`). This matters because:
+//
+//   • Backend always emits  started → blocked|allowed → completed.  If we
+//     terminated on blocked/allowed we would discard `simulation.completed`,
+//     losing summary fields (duration_ms, probes_run, etc.).
+//   • In Garak multi-probe mode the backend emits `simulation.allowed` once
+//     per probe.  Treating that as terminal breaks after probe 1.
+//   • Decision events can race with completed; relying on the lifecycle
+//     terminal removes the timing dependency.
+//
+// DECISION_STAGES are recorded and extend partialResults but do not flip the
+// reducer out of 'running'.
+//
 // terminatedRef.current guards against double-dispatch in useEffect.
 // The reducer itself is pure and only sees each terminal event once.
-const TERMINAL_STAGES = new Set(['completed', 'blocked', 'allowed', 'escalated', 'error'])
+const TERMINAL_STAGES = new Set(['completed', 'error'])
+const DECISION_STAGES = new Set(['blocked', 'allowed', 'escalated'])
 
 // ── Step label helper ─────────────────────────────────────────────────────────
 function stepLabel(event) {
@@ -117,12 +149,14 @@ export function simReducer(state, action) {
       const { event, finalResults } = action
       const isTerminal = TERMINAL_STAGES.has(event.stage)
       const isFailed   = event.stage === 'error'
-      const isProbe    = event.stage === 'allowed' || event.stage === 'blocked'
+      const isDecision = DECISION_STAGES.has(event.stage)
 
       const newStep = {
         id:        event.id,
         label:     stepLabel(event),
-        status:    isTerminal ? (isFailed ? 'failed' : 'done') : 'running',
+        // 'done' once we know it's a finished step, otherwise 'running'
+        status:    isTerminal ? (isFailed ? 'failed' : 'done')
+                              : (isDecision ? 'done' : 'running'),
         timestamp: event.timestamp ? new Date(event.timestamp).getTime() : Date.now(),
       }
 
@@ -140,7 +174,10 @@ export function simReducer(state, action) {
       return {
         ...state,
         steps:          addOrReplaceStep(state.steps, newStep),
-        partialResults: isProbe
+        // Decision events (blocked / allowed / escalated) are also recorded
+        // as partial results so the UI can show "decision reached" live while
+        // we wait for the lifecycle terminal (`simulation.completed`).
+        partialResults: isDecision
           ? [...state.partialResults, event]
           : state.partialResults,
       }
@@ -150,7 +187,7 @@ export function simReducer(state, action) {
       return {
         ...state,
         status:      'failed',
-        error:       'Simulation timeout — no response received within 30 seconds.',
+        error:       'Simulation timeout — no terminal event received from the backend.',
         completedAt: Date.now(),
       }
 
@@ -190,29 +227,68 @@ export function useSimulationState() {
     }
   }, [])
 
+  // Track which simEvents we have already dispatched to the reducer so we can
+  // process EACH event exactly once, even when multiple new events arrive in
+  // the same render cycle (the previous `latest-only` implementation silently
+  // skipped anything that wasn't at the tail after the timestamp sort).
+  const dispatchedRef = useRef(new Set())
+
   // ── React to incoming simEvents ──────────────────────────────────────────
   useEffect(() => {
-    if (simEvents.length === 0) return
-    const latest = simEvents[simEvents.length - 1]
-
-    // ── Session-ID isolation ──────────────────────────────────────────────
-    // If the event carries a session_id (from its payload/details) that doesn't
-    // match the current session, it's a stale event from a previous run — drop it.
-    // Note: backend currently does not include session_id in event payload, so
-    // this guard is a no-op for current events. It future-proofs the system.
-    const eventSessionId = latest.details?.session_id
-    if (eventSessionId != null && simState.sessionId && eventSessionId !== simState.sessionId) {
-      console.warn('[PIPELINE] state: dropped stale event from session=', eventSessionId)
+    if (simEvents.length === 0) {
+      // simEvents was cleared (fresh simulation / reset) — clear the dispatch
+      // log too so the next run starts from scratch.
+      dispatchedRef.current = new Set()
       return
     }
-    // ─────────────────────────────────────────────────────────────────────
 
-    console.log('[PIPELINE] state: event received stage=', latest.stage, 'steps_before=', simState.steps.length)
+    // Process every NEW event in timestamp order so the reducer sees the
+    // true sequence and terminal detection is deterministic.
+    for (const ev of simEvents) {
+      if (dispatchedRef.current.has(ev.id)) continue
 
-    if (!TERMINAL_STAGES.has(latest.stage)) {
-      // Non-terminal event — backend is alive.  Reset watchdog so the 60 s
-      // budget runs from this event, not from sim start.  This prevents false
-      // timeouts when the WS handshake + PSS cold-start together are slow.
+      // ── Session-ID isolation ────────────────────────────────────────────
+      // The backend puts session_id at the top level of every WS frame;
+      // `normalizeEvent` now preserves it as `ev.session_id` (and we still
+      // tolerate older events that carried it in payload as details.session_id).
+      // If a session_id is present AND doesn't match the active one, it's a
+      // leftover from a previous run — drop it.
+      const eventSessionId = ev.session_id ?? ev.details?.session_id
+      if (
+        eventSessionId != null &&
+        simState.sessionId &&
+        eventSessionId !== simState.sessionId
+      ) {
+        console.warn('[PIPELINE] state: dropped stale event from session=', eventSessionId)
+        dispatchedRef.current.add(ev.id)
+        continue
+      }
+
+      dispatchedRef.current.add(ev.id)
+
+      console.log(
+        '[PIPELINE] state: event received stage=', ev.stage,
+        'type=', ev.event_type,
+        'steps_before=', simState.steps.length
+      )
+
+      if (TERMINAL_STAGES.has(ev.stage)) {
+        // True lifecycle terminal — completed / error.
+        if (terminatedRef.current) continue
+        terminatedRef.current = true
+        clearWatchdog()
+
+        console.log('[PIPELINE] state: terminal event stage=', ev.stage)
+
+        // Build the final result from the ENTIRE event history (includes any
+        // prior blocked/allowed decision events so verdict is correct).
+        const built = buildResultFromSimEvents(simEvents)
+        dispatch({ type: Actions.EVENT_RECEIVED, event: ev, finalResults: built })
+        continue
+      }
+
+      // Non-terminal (incl. decision events) — backend is alive, reset the
+      // activity watchdog so the 60 s idle budget runs from this event.
       clearWatchdog()
       watchdogRef.current = setTimeout(() => {
         if (terminatedRef.current) return
@@ -220,25 +296,15 @@ export function useSimulationState() {
         console.warn('[PIPELINE] state: activity watchdog fired timeout_ms=', ACTIVITY_TIMEOUT_MS)
         dispatch({ type: Actions.WATCHDOG_FIRED })
       }, ACTIVITY_TIMEOUT_MS)
-      dispatch({ type: Actions.EVENT_RECEIVED, event: latest })
-      return
+      dispatch({ type: Actions.EVENT_RECEIVED, event: ev })
     }
-
-    // Terminal event — guard against double-processing
-    if (terminatedRef.current) return
-    terminatedRef.current = true
-    clearWatchdog()
-
-    console.log('[PIPELINE] state: terminal event stage=', latest.stage)
-
-    const built = buildResultFromSimEvents(simEvents)
-    dispatch({ type: Actions.EVENT_RECEIVED, event: latest, finalResults: built })
   }, [simEvents, simState.sessionId, clearWatchdog])
 
   // ── Start simulation ─────────────────────────────────────────────────────
   const startSimulation = useCallback(async (config) => {
     const sid = crypto.randomUUID()
     terminatedRef.current = false
+    dispatchedRef.current = new Set()
 
     console.log('[PIPELINE] state: simulation started session=', sid, 'type=', config.attackType)
 
@@ -288,6 +354,7 @@ export function useSimulationState() {
     console.log('[PIPELINE] state: reset')
     clearWatchdog()
     terminatedRef.current = false
+    dispatchedRef.current = new Set()
     stopStream()
     dispatch({ type: Actions.SIMULATION_RESET })
   }, [clearWatchdog, stopStream])

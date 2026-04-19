@@ -51,6 +51,8 @@ function deriveStage(canonicalType) {
  * @property {string}  stage          — UI timeline stage
  * @property {string}  status         — alias for stage (legacy compat)
  * @property {string}  timestamp      — ISO-8601 from WS frame
+ * @property {string}  [session_id]   — backend session_id (top-level on WS frame)
+ * @property {string}  [correlation_id]
  * @property {string}  [source_service]
  * @property {object}  details        — raw payload from WS frame
  */
@@ -58,6 +60,12 @@ function deriveStage(canonicalType) {
 /**
  * Normalize a raw WebSocket frame into a typed SimulationEvent.
  * This is the ONLY place in the codebase that converts raw WS events.
+ *
+ * The backend emits frames shaped:
+ *   { session_id, event_type, source_service, correlation_id, timestamp, payload }
+ * We flatten `payload` → `details` but also preserve `session_id` and
+ * `correlation_id` at the top level so consumers (e.g. session-isolation
+ * guards) can see them without having to reach into the raw payload.
  *
  * @param {object} wsEvent
  * @returns {SimulationEvent}
@@ -72,6 +80,8 @@ export function normalizeEvent(wsEvent) {
     stage,
     status:         stage,
     timestamp:      wsEvent.timestamp,
+    session_id:     wsEvent.session_id,
+    correlation_id: wsEvent.correlation_id,
     source_service: wsEvent.source_service,
     details:        wsEvent.payload || {},
   }

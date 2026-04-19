@@ -32,9 +32,24 @@ describe('simReducer', () => {
     expect(next).toBe(state) // referential equality — no change
   })
 
-  it('terminal EVENT_RECEIVED (blocked) → completed status', () => {
+  it('decision EVENT_RECEIVED (blocked) keeps status=running but records verdict step', () => {
+    // NEW SEMANTICS: only simulation.completed / simulation.error transition
+    // status. `blocked` / `allowed` are decision events — they accumulate in
+    // partialResults and steps but DO NOT complete the simulation. This
+    // correctly models the backend's  started → blocked|allowed → completed
+    // lifecycle AND prevents Garak multi-probe runs from early-terminating
+    // on the first allowed probe.
     const state = { ...makeIdle(), status: 'running' }
     const ev    = makeEvent(EVENT_TYPES.POLICY_BLOCKED, 'blocked')
+    const next  = simReducer(state, { type: Actions.EVENT_RECEIVED, event: ev })
+    expect(next.status).toBe('running')                // still running
+    expect(next.steps).toHaveLength(1)                  // step recorded
+    expect(next.partialResults).toHaveLength(1)         // decision recorded
+  })
+
+  it('terminal EVENT_RECEIVED (completed) → completed status with finalResults', () => {
+    const state = { ...makeIdle(), status: 'running' }
+    const ev    = makeEvent(EVENT_TYPES.SESSION_COMPLETED, 'completed')
     const next  = simReducer(state, { type: Actions.EVENT_RECEIVED, event: ev, finalResults: { verdict: 'blocked' } })
     expect(next.status).toBe('completed')
     expect(next.finalResults.verdict).toBe('blocked')
@@ -90,14 +105,19 @@ describe('simReducer — full simulation flows', () => {
     let state = makeIdle()
     state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
 
-    // Non-terminal events accumulate steps
+    // started — non-terminal, accumulates step
     state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
     expect(state.status).toBe('running')
     expect(state.steps).toHaveLength(1)
 
-    // Terminal event (blocked) → completed
+    // blocked — decision, still running
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked })
+    expect(state.status).toBe('running')
+    expect(state.steps).toHaveLength(2)
+
+    // completed — true terminal, now transitions to completed
     const finalResults = buildResultFromSimEvents([evStarted, evBlocked, evCompleted])
-    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked, finalResults })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evCompleted, finalResults })
     expect(state.status).toBe('completed')
     expect(state.finalResults).not.toBeNull()
     expect(state.finalResults.verdict).toBe('blocked')
@@ -111,10 +131,46 @@ describe('simReducer — full simulation flows', () => {
     let state = makeIdle()
     state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
     state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evAllowed })
+    expect(state.status).toBe('running')    // decision only — still running
     const finalResults = buildResultFromSimEvents([evStarted, evAllowed, evCompleted])
-    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evAllowed, finalResults })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evCompleted, finalResults })
     expect(state.status).toBe('completed')
     expect(state.finalResults.verdict).toBe('allowed')
+  })
+
+  it('garak: multiple `allowed` probes do NOT early-terminate the simulation', () => {
+    // Before the fix, the first `simulation.allowed` event was marked terminal
+    // and the whole Garak run transitioned to completed — all subsequent
+    // probe events were dropped. This regression test locks in the fix.
+    // Helper with per-probe correlation so each event has a unique id.
+    const ev = (type, payload, corr, ts) =>
+      normalizeEvent({ event_type: type, payload, timestamp: ts, correlation_id: corr })
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1 })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED,
+                                event: ev('simulation.started', { attack_type: 'garak' }, 'start', '2026-01-01T00:00:00Z') })
+
+    // Simulate 3 probes, each emits progress + allowed
+    for (let i = 1; i <= 3; i++) {
+      state = simReducer(state, { type: Actions.EVENT_RECEIVED,
+                                  event: ev('simulation.progress', { probe: `p${i}` }, `p${i}`,
+                                            `2026-01-01T00:00:0${i}Z`) })
+      state = simReducer(state, { type: Actions.EVENT_RECEIVED,
+                                  event: ev('simulation.allowed',  { probe: `p${i}` }, `p${i}`,
+                                            `2026-01-01T00:00:0${i}.5Z`) })
+      expect(state.status).toBe('running')   // never terminates early
+    }
+
+    // Only simulation.completed ends it.
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED,
+                                event: ev('simulation.completed', { summary: { probes_run: 3 } }, 'done',
+                                          '2026-01-01T00:00:10Z'),
+                                finalResults: { verdict: 'allowed' } })
+    expect(state.status).toBe('completed')
+    // 1 started + 3 progress + 3 allowed + 1 completed = 8 unique steps
+    expect(state.steps.length).toBeGreaterThanOrEqual(8)
   })
 
   it('error path: simulation.error event → status failed', () => {
@@ -151,14 +207,16 @@ describe('simReducer — full simulation flows', () => {
   })
 
   it('stale events after completion are ignored', () => {
-    const evStarted = wsEv('simulation.started', {})
-    const evBlocked = wsEv('simulation.blocked', {})
-    const lateEvent = wsEv('simulation.progress', { message: 'late' })
+    const evStarted   = wsEv('simulation.started', {})
+    const evBlocked   = wsEv('simulation.blocked', {})
+    const evCompleted = wsEv('simulation.completed', { summary: { result: 'blocked' } })
+    const lateEvent   = wsEv('simulation.progress', { message: 'late' })
 
     let state = makeIdle()
     state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 's', startedAt: 1 })
     state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
-    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked, finalResults: { verdict: 'blocked' } })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evCompleted, finalResults: { verdict: 'blocked' } })
     expect(state.status).toBe('completed')
 
     // Late event after completion — reducer returns same state reference
@@ -168,40 +226,42 @@ describe('simReducer — full simulation flows', () => {
 })
 
 describe('session-ID isolation guard', () => {
-  it('guard logic: event with mismatched session_id should be skipped', () => {
-    const currentSessionId = 'session-A'
-    const staleEvent = {
-      event_type: 'risk.calculated',
-      stage: 'progress',
-      details: { session_id: 'session-B' }
-    }
-    // Guard: skip if details.session_id exists AND doesn't match
-    const shouldSkip = staleEvent.details?.session_id != null &&
-      staleEvent.details.session_id !== currentSessionId
-    expect(shouldSkip).toBe(true)
+  // The backend puts session_id at the TOP LEVEL of every WS frame and
+  // `normalizeEvent` preserves it there as `event.session_id`. We also
+  // tolerate the legacy shape where it lives in `details.session_id`.
+  const pickSessionId = (ev) => ev.session_id ?? ev.details?.session_id
+  const shouldSkip    = (ev, current) => {
+    const sid = pickSessionId(ev)
+    return sid != null && current && sid !== current
+  }
+
+  it('top-level session_id mismatch → drop', () => {
+    const ev = normalizeEvent({
+      event_type: 'simulation.blocked', payload: {},
+      timestamp: 'ts', session_id: 'session-B',
+    })
+    expect(shouldSkip(ev, 'session-A')).toBe(true)
   })
 
-  it('guard logic: event with matching session_id is allowed through', () => {
-    const currentSessionId = 'session-A'
-    const freshEvent = {
-      event_type: 'risk.calculated',
-      stage: 'progress',
-      details: { session_id: 'session-A' }
-    }
-    const shouldSkip = freshEvent.details?.session_id != null &&
-      freshEvent.details.session_id !== currentSessionId
-    expect(shouldSkip).toBe(false)
+  it('top-level session_id match → pass', () => {
+    const ev = normalizeEvent({
+      event_type: 'simulation.blocked', payload: {},
+      timestamp: 'ts', session_id: 'session-A',
+    })
+    expect(shouldSkip(ev, 'session-A')).toBe(false)
   })
 
-  it('guard logic: event with no session_id is allowed through (no-op guard)', () => {
-    const currentSessionId = 'session-A'
-    const noSessionEvent = {
+  it('no session_id anywhere → pass (no-op guard)', () => {
+    const ev = normalizeEvent({ event_type: 'risk.calculated', payload: {}, timestamp: 'ts' })
+    expect(shouldSkip(ev, 'session-A')).toBeFalsy()
+  })
+
+  it('legacy payload.session_id still honoured', () => {
+    const ev = normalizeEvent({
       event_type: 'risk.calculated',
-      stage: 'progress',
-      details: {}
-    }
-    const shouldSkip = noSessionEvent.details?.session_id != null &&
-      noSessionEvent.details.session_id !== currentSessionId
-    expect(shouldSkip).toBeFalsy()
+      payload: { session_id: 'session-B' },
+      timestamp: 'ts',
+    })
+    expect(shouldSkip(ev, 'session-A')).toBe(true)
   })
 })

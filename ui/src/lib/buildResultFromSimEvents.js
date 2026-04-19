@@ -15,27 +15,43 @@
  */
 
 export function buildResultFromSimEvents(simEvents) {
-  if (!simEvents || simEvents.length === 0) return null
+  if (!Array.isArray(simEvents) || simEvents.length === 0) return null
 
-  // Find terminal event
-  const blockedEv   = simEvents.find(e => e.stage === 'blocked')
-  const allowedEv   = simEvents.find(e => e.stage === 'allowed')
-  const completedEv = simEvents.find(e => e.stage === 'completed')
+  // Find decision + terminal events.
+  //
+  // Verdict precedence (most authoritative first):
+  //   1. `simulation.completed` summary.result — the backend's FINAL answer.
+  //      This is emitted once per run, after all decisions, and reflects the
+  //      true outcome even in Garak multi-probe runs where many allowed
+  //      decisions may stream first.
+  //   2. A `simulation.blocked` decision event — one blocked implies overall
+  //      blocked verdict for single-prompt flow.
+  //   3. A `simulation.allowed` decision event — only if nothing else found.
+  const blockedEv   = simEvents.find(e => e?.stage === 'blocked')
+  const allowedEv   = simEvents.find(e => e?.stage === 'allowed')
+  const completedEv = simEvents.find(e => e?.stage === 'completed')
   const terminal    = blockedEv || allowedEv
 
   if (!terminal && !completedEv) return null   // no useful data yet
 
   const summary = completedEv?.details?.summary || {}
 
-  // If terminal event was dropped by the WS race condition, fall back to the
-  // verdict recorded in simulation.completed summary (always emitted last).
-  const isBlocked = blockedEv
+  const isBlocked = summary.result === 'blocked'
     ? true
-    : allowedEv
+    : summary.result === 'allowed'
       ? false
-      : summary.result === 'blocked'    // completedEv-only fallback
+      : blockedEv
+        ? true
+        : allowedEv
+          ? false
+          : false   // no signal — default to allowed (safe only with completed)
   const verdict = isBlocked ? 'blocked' : 'allowed'
-  const d       = (terminal || completedEv).details || {}
+  // Prefer the blocked event's details when the verdict is blocked so we keep
+  // decision_reason / categories, even if simulation.completed arrived too.
+  const primary = isBlocked
+    ? (blockedEv || completedEv || allowedEv)
+    : (allowedEv || completedEv || blockedEv)
+  const d       = primary?.details || {}
 
   // Decision trace — one entry per sim event
   const decisionTrace = simEvents.map((e, idx) => {

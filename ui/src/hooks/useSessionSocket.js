@@ -19,6 +19,19 @@
  *   { type: "connected", session_id, message }          — handshake, ignored
  *   { session_id, correlation_id, event_type,           — live pipeline event
  *     source_service, timestamp, payload }
+ *
+ * Concurrency model
+ * ─────────────────
+ * Each _doConnect call DETACHES the previous socket's event handlers before
+ * calling close().  This is critical to prevent a class of races where the
+ * OLD socket's onclose fires AFTER we've already started a new connection,
+ * which would otherwise:
+ *   1. Wipe wsRef.current (the new socket) via `wsRef.current = null`, and
+ *   2. Schedule a spurious reconnect to the OLD sessionId.
+ *
+ * In addition, every handler guards with `if (wsRef.current !== ws) return`
+ * so any straggling event from a detached/superseded socket is a strict
+ * no-op — even if the runtime delivers it after detach.
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
@@ -43,6 +56,34 @@ const WS_BASE         = resolveWsBase()
 const MAX_RECONNECTS  = 3
 const BACKOFF_BASE_MS = 1_500   // 1.5 s → 3 s → 6 s
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Detach every handler from `ws` and close it. Safe to call on any state.
+ *
+ * Detaching the handlers BEFORE calling close() guarantees that the old
+ * socket cannot deliver any future onclose / onerror / onmessage callback —
+ * which would otherwise race with a newer connection and either wipe its
+ * wsRef or schedule a reconnect to a stale sessionId.
+ */
+function _detachAndClose(ws) {
+  if (!ws) return
+  try {
+    ws.onopen    = null
+    ws.onmessage = null
+    ws.onerror   = null
+    ws.onclose   = null
+    if (
+      ws.readyState === WebSocket.OPEN ||
+      ws.readyState === WebSocket.CONNECTING
+    ) {
+      ws.close()
+    }
+  } catch {
+    /* noop — close() can throw on already-closed sockets */
+  }
+}
+
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
 export function useSessionSocket() {
@@ -50,11 +91,10 @@ export function useSessionSocket() {
   const [liveEvents,       setLiveEvents]       = useState([])
 
   // Mutable refs — never cause re-renders
-  const wsRef            = useRef(null)
-  const timerRef         = useRef(null)
-  const attemptsRef      = useRef(0)
-  const seenRef          = useRef(new Set())   // dedup keys
-  const intentionalRef   = useRef(false)       // true when we called disconnectWs
+  const wsRef       = useRef(null)
+  const timerRef    = useRef(null)
+  const attemptsRef = useRef(0)
+  const seenRef     = useRef(new Set())   // dedup keys
 
   // ── Internal helpers ────────────────────────────────────────────────────────
 
@@ -68,8 +108,7 @@ export function useSessionSocket() {
   const _closeSocket = useCallback(() => {
     _clearTimer()
     if (wsRef.current) {
-      intentionalRef.current = true
-      wsRef.current.close()
+      _detachAndClose(wsRef.current)
       wsRef.current = null
     }
   }, [_clearTimer])
@@ -77,13 +116,13 @@ export function useSessionSocket() {
   // ── Core connect ────────────────────────────────────────────────────────────
 
   const _doConnect = useCallback((sessionId) => {
-    // Don't re-use old socket
+    // Tear down any previous socket FIRST — handlers detached so its later
+    // onclose cannot interfere with this new connection.
     if (wsRef.current) {
-      intentionalRef.current = true
-      wsRef.current.close()
+      _detachAndClose(wsRef.current)
       wsRef.current = null
     }
-    intentionalRef.current = false
+    _clearTimer()
 
     setConnectionStatus(attemptsRef.current > 0 ? 'reconnecting' : 'connecting')
 
@@ -99,11 +138,16 @@ export function useSessionSocket() {
     wsRef.current = ws
 
     ws.onopen = () => {
+      // If a newer connection has already replaced us, ignore.
+      if (wsRef.current !== ws) return
       attemptsRef.current = 0
       setConnectionStatus('connected')
     }
 
     ws.onmessage = (evt) => {
+      // Drop messages from any superseded socket.
+      if (wsRef.current !== ws) return
+
       let msg
       try { msg = JSON.parse(evt.data) } catch { return }
 
@@ -135,13 +179,26 @@ export function useSessionSocket() {
 
     ws.onerror = () => {
       // onerror is always followed by onclose; handle reconnect there
+      if (wsRef.current !== ws) return
       setConnectionStatus('error')
     }
 
     ws.onclose = () => {
-      wsRef.current = null
-      if (intentionalRef.current) return    // deliberate close — do not reconnect
+      // ── Ownership check ────────────────────────────────────────────────
+      // If a newer connection has already replaced us in wsRef.current,
+      // this close event belongs to an OBSOLETE socket and must NOT:
+      //   • clear wsRef.current (would wipe the new connection), or
+      //   • schedule a reconnect to this stale sessionId.
+      // _detachAndClose nulls handlers before close() so we should rarely
+      // even reach here for a superseded socket — this guard is the
+      // belt-and-braces complement.
+      if (wsRef.current !== ws) return
 
+      wsRef.current = null
+
+      // Auto-reconnect for unexpected disconnects (server bounce, network
+      // glitch).  We never reach this branch for intentional closes because
+      // _closeSocket detaches `onclose` before calling close().
       if (attemptsRef.current < MAX_RECONNECTS) {
         attemptsRef.current++
         const delay = BACKOFF_BASE_MS * (2 ** (attemptsRef.current - 1))
@@ -151,7 +208,7 @@ export function useSessionSocket() {
         setConnectionStatus('closed')
       }
     }
-  }, [_clearTimer])   // _clearTimer is stable
+  }, [_clearTimer])
 
   // ── Public API ──────────────────────────────────────────────────────────────
 
@@ -178,7 +235,10 @@ export function useSessionSocket() {
     setConnectionStatus('idle')
   }, [_closeSocket])
 
-  // Ensure socket is closed when the component unmounts
+  // Ensure socket is closed when the component unmounts.
+  // _closeSocket detaches handlers first, so this cleanup is StrictMode-safe:
+  // the post-first-mount fake unmount is a no-op (wsRef is null) and a real
+  // unmount tears down cleanly without triggering reconnect logic.
   useEffect(() => () => _closeSocket(), [_closeSocket])
 
   return { connectionStatus, liveEvents, connectWs, disconnectWs }
