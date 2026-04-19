@@ -15,7 +15,8 @@ cd AI-SPM
 docker compose up --build
 
 ## 3. Access services
-- UI → http://localhost:3000  
+- Chat UI → http://localhost:3001
+- Admin UI → http://localhost:3001/admin/
 - API → http://localhost:8000  
 - Grafana → http://localhost:3000  
 - Prometheus → http://localhost:9090  
