@@ -188,7 +188,19 @@ export function useSimulationState() {
     if (simEvents.length === 0) return
     const latest = simEvents[simEvents.length - 1]
 
-    console.log('[SimState] event received', latest.event_type, 'stage:', latest.stage)
+    // ── Session-ID isolation ──────────────────────────────────────────────
+    // If the event carries a session_id (from its payload/details) that doesn't
+    // match the current session, it's a stale event from a previous run — drop it.
+    // Note: backend currently does not include session_id in event payload, so
+    // this guard is a no-op for current events. It future-proofs the system.
+    const eventSessionId = latest.details?.session_id
+    if (eventSessionId != null && simState.sessionId && eventSessionId !== simState.sessionId) {
+      console.warn('[PIPELINE] state: dropped stale event from session=', eventSessionId)
+      return
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
+    console.log('[PIPELINE] state: event received stage=', latest.stage, 'steps_before=', simState.steps.length)
 
     if (!TERMINAL_STAGES.has(latest.stage)) {
       dispatch({ type: Actions.EVENT_RECEIVED, event: latest })
@@ -200,18 +212,18 @@ export function useSimulationState() {
     terminatedRef.current = true
     clearWatchdog()
 
-    console.log('[SimState] terminal event', latest.stage, '— built result')
+    console.log('[PIPELINE] state: terminal event stage=', latest.stage)
 
     const built = buildResultFromSimEvents(simEvents)
     dispatch({ type: Actions.EVENT_RECEIVED, event: latest, finalResults: built })
-  }, [simEvents, clearWatchdog])
+  }, [simEvents, simState.sessionId, clearWatchdog])
 
   // ── Start simulation ─────────────────────────────────────────────────────
   const startSimulation = useCallback(async (config) => {
     const sid = crypto.randomUUID()
     terminatedRef.current = false
 
-    console.log('[SimState] simulation started | session:', sid, '| type:', config.attackType)
+    console.log('[PIPELINE] state: simulation started session=', sid, 'type=', config.attackType)
 
     // Transition to running state and reset everything
     dispatch({ type: Actions.SIMULATION_STARTED, sessionId: sid, startedAt: Date.now() })
@@ -224,7 +236,7 @@ export function useSimulationState() {
     watchdogRef.current = setTimeout(() => {
       if (terminatedRef.current) return
       terminatedRef.current = true
-      console.warn('[SimState] watchdog fired — no terminal event after', TIMEOUT_MS, 'ms')
+      console.warn('[PIPELINE] state: watchdog fired timeout_ms=', TIMEOUT_MS)
       dispatch({ type: Actions.WATCHDOG_FIRED })
     }, TIMEOUT_MS)
 
@@ -243,7 +255,7 @@ export function useSimulationState() {
           attackType:    config.attackType,
         })
       }
-      console.log('[SimState] POST returned — background task started')
+      console.log('[PIPELINE] state: POST returned background_task_started')
     } catch (err) {
       console.error('[SimState] API call failed:', err.message)
       clearWatchdog()
@@ -256,7 +268,7 @@ export function useSimulationState() {
 
   // ── Reset simulation ─────────────────────────────────────────────────────
   const resetSimulation = useCallback(() => {
-    console.log('[SimState] reset')
+    console.log('[PIPELINE] state: reset')
     clearWatchdog()
     terminatedRef.current = false
     stopStream()

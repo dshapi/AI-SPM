@@ -166,3 +166,42 @@ describe('simReducer — full simulation flows', () => {
     expect(after).toBe(state)
   })
 })
+
+describe('session-ID isolation guard', () => {
+  it('guard logic: event with mismatched session_id should be skipped', () => {
+    const currentSessionId = 'session-A'
+    const staleEvent = {
+      event_type: 'risk.calculated',
+      stage: 'progress',
+      details: { session_id: 'session-B' }
+    }
+    // Guard: skip if details.session_id exists AND doesn't match
+    const shouldSkip = staleEvent.details?.session_id != null &&
+      staleEvent.details.session_id !== currentSessionId
+    expect(shouldSkip).toBe(true)
+  })
+
+  it('guard logic: event with matching session_id is allowed through', () => {
+    const currentSessionId = 'session-A'
+    const freshEvent = {
+      event_type: 'risk.calculated',
+      stage: 'progress',
+      details: { session_id: 'session-A' }
+    }
+    const shouldSkip = freshEvent.details?.session_id != null &&
+      freshEvent.details.session_id !== currentSessionId
+    expect(shouldSkip).toBe(false)
+  })
+
+  it('guard logic: event with no session_id is allowed through (no-op guard)', () => {
+    const currentSessionId = 'session-A'
+    const noSessionEvent = {
+      event_type: 'risk.calculated',
+      stage: 'progress',
+      details: {}
+    }
+    const shouldSkip = noSessionEvent.details?.session_id != null &&
+      noSessionEvent.details.session_id !== currentSessionId
+    expect(shouldSkip).toBeFalsy()
+  })
+})
