@@ -4,6 +4,8 @@ import { ActionPanel }         from '../../findings/actions/ActionPanel.jsx'
 import { getActionsForFinding } from '../../findings/actions/actionRegistry.js'
 import { useFilterParams }  from '../../hooks/useFilterParams.js'
 import { useFindings, useFinding } from '../../hooks/useFindings.js'
+import { alertsFromEvents } from '../../lib/alertsFromEvents.js'
+import { useSimulationContext } from '../../context/SimulationContext.jsx'
 import {
   Search, SlidersHorizontal, Plus, Download,
   ChevronRight, X, AlertTriangle,
@@ -388,23 +390,42 @@ function FindingsTable({ findings, selectedId, onSelect, loading }) {
 
               {/* Title + source */}
               <td className="px-3 py-[11px]">
-                <p className="text-[12.5px] font-semibold text-gray-800 leading-snug whitespace-nowrap">
-                  {finding.title}
-                </p>
-                <p className="text-[11px] text-gray-400 mt-0.5 font-medium">{finding.type}</p>
+                <div className="flex items-center gap-2">
+                  <div>
+                    <p className="text-[12.5px] font-semibold text-gray-800 leading-snug whitespace-nowrap">
+                      {finding.title}
+                    </p>
+                    <p className="text-[11px] text-gray-400 mt-0.5 font-medium">{finding.type || finding.detail}</p>
+                  </div>
+                  {finding.source === 'simulation' && (
+                    <Badge variant="neutral" className="gap-1 pl-1.5 pr-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap bg-blue-50 text-blue-600 border-blue-200">
+                      Simulation
+                    </Badge>
+                  )}
+                </div>
               </td>
 
               {/* Asset */}
               <td className="px-3 py-[11px]">
-                <p className="text-[12px] font-medium text-gray-700 whitespace-nowrap leading-snug truncate max-w-[144px]">
-                  {finding.asset.name}
-                </p>
-                <AssetTypeTag type={finding.asset.type} />
+                {finding.asset ? (
+                  <>
+                    <p className="text-[12px] font-medium text-gray-700 whitespace-nowrap leading-snug truncate max-w-[144px]">
+                      {finding.asset.name}
+                    </p>
+                    <AssetTypeTag type={finding.asset.type} />
+                  </>
+                ) : (
+                  <span className="text-[11px] text-gray-300">—</span>
+                )}
               </td>
 
               {/* Status */}
               <td className="px-3 py-[11px]">
-                <StatusChip status={finding.status} />
+                {finding.status ? (
+                  <StatusChip status={finding.status} />
+                ) : (
+                  <span className="text-[11px] text-gray-300">—</span>
+                )}
               </td>
 
               {/* Case */}
@@ -993,13 +1014,20 @@ export default function Alerts() {
 
   const { findings, total, loading, error, refetch, markStatus, attachCase } = useFindings(apiFilters)
 
+  // ── Simulation-derived alerts ──────────────────────────────────────────────
+  const { simEvents } = useSimulationContext()
+  const simAlerts = alertsFromEvents(simEvents)
+
   // ── Client-side secondary filter (search, highRiskOnly) ───────────────────
-  const filtered = findings.filter(f => {
+  // Merge sim alerts with findings for display (sim alerts prepended)
+  const allItems = [...simAlerts, ...findings]
+  const filtered = allItems.filter(f => {
     if (search) {
       const q = search.toLowerCase()
-      if (!f.title.toLowerCase().includes(q) &&
-          !f.asset.name.toLowerCase().includes(q) &&
-          !f.type.toLowerCase().includes(q)) return false
+      const titleMatch = f.title.toLowerCase().includes(q)
+      const assetMatch = f.asset?.name?.toLowerCase().includes(q) ?? false
+      const typeMatch = (f.type ?? f.detail ?? '').toLowerCase().includes(q)
+      if (!titleMatch && !assetMatch && !typeMatch) return false
     }
     if (highRiskOnly && f.severity !== 'Critical' && f.severity !== 'High') return false
     return true
@@ -1021,7 +1049,7 @@ export default function Alerts() {
     }
   }
 
-  const openCount = filtered.filter(f => f.status === 'Open').length
+  const openCount = filtered.filter(f => f.status === 'Open' || f.source === 'simulation').length
 
   return (
     <PageContainer>

@@ -96,7 +96,17 @@ Implement proper governance controls around AI usage.
 <p align="center"><img src="/docs/OrbiX2.jpg" width="100%"></p>
 
 ---
+<div align="center">
+<h2>Check out the Demo </h2>
 
+[![Watch the video](https://img.youtube.com/vi/OucfJ6_wcTM/0.jpg)](https://www.youtube.com/watch?v=OucfJ6_wcTM)
+
+</div>
+
+
+
+
+---
 ## Security & Access Control
 
 ### Authentication & Authorization
