@@ -38,6 +38,13 @@ const _TYPE_TO_STAGE = {
   [CANONICAL_EVENT_TYPES.OUTPUT_GENERATED]:       'progress',
   [CANONICAL_EVENT_TYPES.OUTPUT_SCANNED]:         'progress',
   [CANONICAL_EVENT_TYPES.AUDIT_LOGGED]:           'progress',
+
+  // Garak execution trace — stored separately, not shown in Timeline
+  [CANONICAL_EVENT_TYPES.LLM_PROMPT]:    'trace',
+  [CANONICAL_EVENT_TYPES.LLM_RESPONSE]:  'trace',
+  [CANONICAL_EVENT_TYPES.GUARD_DECISION]: 'trace',
+  [CANONICAL_EVENT_TYPES.TOOL_CALL]:     'trace',
+  [CANONICAL_EVENT_TYPES.GUARD_INPUT]:   'trace',
 }
 
 function deriveStage(canonicalType) {

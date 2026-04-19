@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canonicalise, CANONICAL_EVENT_TYPES } from '../sessionResults.js'
+import { canonicalise, CANONICAL_EVENT_TYPES, EVENT_MAP } from '../sessionResults.js'
 
 const C = CANONICAL_EVENT_TYPES
 
@@ -22,5 +22,16 @@ describe('canonicalise — simulation.* backend events', () => {
   it('simulation.progress → falls through as-is (no canonical)', () => {
     // No canonical equivalent — returns raw string unchanged, stage='progress'
     expect(canonicalise({ event_type: 'simulation.progress' })).toBe('simulation.progress')
+  })
+})
+
+describe('guard.input trace event', () => {
+  it('canonicalises guard.input to GUARD_INPUT', () => {
+    const ev = { event_type: 'guard.input' }
+    expect(canonicalise(ev)).toBe(CANONICAL_EVENT_TYPES.GUARD_INPUT)
+  })
+
+  it('GUARD_INPUT has trace:false in EVENT_MAP', () => {
+    expect(EVENT_MAP[CANONICAL_EVENT_TYPES.GUARD_INPUT].trace).toBe(false)
   })
 })
