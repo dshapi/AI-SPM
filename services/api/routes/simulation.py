@@ -200,7 +200,7 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                                   summary=completed_summary)
             return
 
-        from security import ScreeningContext
+        from prompt_security import ScreeningContext
         ctx = ScreeningContext(
             session_id=session_id,
             user_id="sim-user",

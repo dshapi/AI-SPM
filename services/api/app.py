@@ -20,7 +20,7 @@ import json
 import sys as _sys
 
 # Ensure the services/api/ directory and repo root are on sys.path so that
-# local packages (security, ws, consumers, routes) are found before any
+# local packages (prompt_security, ws, consumers, routes) are found before any
 # same-named system packages, regardless of how this module is imported.
 _HERE = os.path.dirname(os.path.abspath(__file__))          # services/api/
 _ROOT = os.path.dirname(os.path.dirname(_HERE))             # repo root
@@ -52,9 +52,9 @@ from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
 
 # ── Prompt Security Service ───────────────────────────────────────────────────
-from security import PromptSecurityService, ScreeningContext
-from security.adapters.guard_adapter import LlamaGuardAdapter
-from security.adapters.policy_adapter import OPAAdapter
+from prompt_security import PromptSecurityService, ScreeningContext
+from prompt_security.adapters.guard_adapter import LlamaGuardAdapter
+from prompt_security.adapters.policy_adapter import OPAAdapter
 
 # ── WebSocket / Kafka bridge ──────────────────────────────────────────────────
 from ws.connection_manager import ConnectionManager

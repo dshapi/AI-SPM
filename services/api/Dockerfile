@@ -4,7 +4,7 @@ COPY services/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY platform_shared/ ./platform_shared/
 COPY services/api/app.py .
-COPY services/api/security/ ./security/
+COPY services/api/prompt_security/ ./prompt_security/
 COPY services/api/promptguard/ ./promptguard/
 COPY services/api/ws/ ./ws/
 COPY services/api/consumers/ ./consumers/

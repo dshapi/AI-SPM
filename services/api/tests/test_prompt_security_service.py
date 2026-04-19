@@ -30,10 +30,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 # ── Bootstrap: import security module (no FastAPI required) ──────────────────
 
-from security.service import PromptSecurityService
-from security.models import ScreeningContext, PromptDecision
-from security.adapters.guard_adapter import LlamaGuardAdapter
-from security.adapters.policy_adapter import OPAAdapter
+from prompt_security.service import PromptSecurityService
+from prompt_security.models import ScreeningContext, PromptDecision
+from prompt_security.adapters.guard_adapter import LlamaGuardAdapter
+from prompt_security.adapters.policy_adapter import OPAAdapter
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
