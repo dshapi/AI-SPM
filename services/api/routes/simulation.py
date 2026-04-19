@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import logging
+import os
 import sys
 import uuid
 
@@ -30,6 +31,11 @@ from pydantic import BaseModel
 
 log = logging.getLogger("api.simulation")
 router = APIRouter()
+
+# WS connection wait timeout — configurable for high-latency environments.
+# Default 10s covers ~99% of real-world network conditions.
+# The original 2.0s was too short for 4G/intercontinental connections.
+_WS_WAIT_TIMEOUT_S: float = float(os.environ.get("WS_WAIT_TIMEOUT_S", "10.0"))
 
 from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
 _explainer = _PolicyExplainer()
@@ -89,7 +95,7 @@ class GarakSimRequest(BaseModel):
 
 # ── Background workers ───────────────────────────────────────────────────────
 
-async def _ws_wait_for_connection(session_id: str, timeout_s: float = 2.0) -> None:
+async def _ws_wait_for_connection(session_id: str, timeout_s: float | None = None) -> None:
     """
     Block (via asyncio.sleep) until *session_id* has an active WS connection
     registered in ConnectionManager, or until *timeout_s* seconds elapse.
@@ -101,6 +107,8 @@ async def _ws_wait_for_connection(session_id: str, timeout_s: float = 2.0) -> No
     for sessions with no registered connections, so the terminal event never
     reaches the browser and `running` stays True forever.
     """
+    if timeout_s is None:
+        timeout_s = _WS_WAIT_TIMEOUT_S
     import ws.session_ws as _sw
     manager = getattr(_sw, "_manager", None)
     if manager is None:
