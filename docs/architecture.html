@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Orbyx AI-SPM — Architecture</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      min-height: 100vh;
+      padding: 40px 24px;
+    }
+
+    h1 {
+      text-align: center;
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+      margin-bottom: 6px;
+      color: #f0f6fc;
+    }
+    .subtitle {
+      text-align: center;
+      font-size: 13px;
+      color: #8b949e;
+      margin-bottom: 40px;
+    }
+
+    /* ── DIAGRAM CANVAS ─────────────────────────────── */
+    .diagram {
+      max-width: 1100px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+      position: relative;
+    }
+
+    /* ── LANES ──────────────────────────────────────── */
+    .lane {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 16px 0;
+      position: relative;
+    }
+    .lane-label {
+      width: 110px;
+      min-width: 110px;
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #484f58;
+      text-align: right;
+      padding-right: 12px;
+    }
+    .lane-content {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    /* ── CONNECTOR LINE (vertical spine) ────────────── */
+    .spine {
+      position: absolute;
+      left: 134px;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: linear-gradient(to bottom, transparent, #21262d 8%, #21262d 92%, transparent);
+      z-index: 0;
+    }
+
+    /* ── NODE CARDS ─────────────────────────────────── */
+    .node {
+      border-radius: 10px;
+      padding: 12px 16px;
+      border: 1px solid;
+      position: relative;
+      min-width: 150px;
+      z-index: 1;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .node:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .node-name {
+      font-size: 13px;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+    .node-desc {
+      font-size: 11px;
+      line-height: 1.5;
+      opacity: 0.75;
+    }
+    .node-port {
+      position: absolute;
+      top: 8px;
+      right: 10px;
+      font-size: 10px;
+      font-family: "SF Mono", monospace;
+      opacity: 0.55;
+      font-weight: 500;
+    }
+    .node-badge {
+      display: inline-block;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-top: 5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    /* ── COLOUR THEMES ──────────────────────────────── */
+    /* Blue — user-facing */
+    .blue {
+      background: #0d1f38;
+      border-color: #1f6feb;
+      color: #79c0ff;
+    }
+    .blue .node-name { color: #79c0ff; }
+    .blue .node-badge { background: #1f6feb22; color: #58a6ff; }
+
+    /* Purple — AI / LLM */
+    .purple {
+      background: #1a1035;
+      border-color: #8b5cf6;
+      color: #c4b5fd;
+    }
+    .purple .node-name { color: #c4b5fd; }
+    .purple .node-badge { background: #8b5cf622; color: #a78bfa; }
+
+    /* Green — infrastructure */
+    .green {
+      background: #0d2818;
+      border-color: #238636;
+      color: #7ee787;
+    }
+    .green .node-name { color: #7ee787; }
+    .green .node-badge { background: #23863622; color: #56d364; }
+
+    /* Orange — security / guard */
+    .orange {
+      background: #2d1b00;
+      border-color: #d29922;
+      color: #e3b341;
+    }
+    .orange .node-name { color: #e3b341; }
+    .orange .node-badge { background: #d2992222; color: #f0c350; }
+
+    /* Red — threat hunting */
+    .red {
+      background: #2d0f0f;
+      border-color: #f85149;
+      color: #ffa198;
+    }
+    .red .node-name { color: #ffa198; }
+    .red .node-badge { background: #f8514922; color: #ff7b72; }
+
+    /* Teal — data / storage */
+    .teal {
+      background: #0d2626;
+      border-color: #20b2aa;
+      color: #6ee7e7;
+    }
+    .teal .node-name { color: #6ee7e7; }
+    .teal .node-badge { background: #20b2aa22; color: #40d8d0; }
+
+    /* Grey — observability */
+    .grey {
+      background: #161b22;
+      border-color: #30363d;
+      color: #8b949e;
+    }
+    .grey .node-name { color: #c9d1d9; }
+    .grey .node-badge { background: #30363d44; color: #8b949e; }
+
+    /* ── ARROWS between lanes ────────────────────────── */
+    .arrow-row {
+      display: flex;
+      align-items: center;
+      padding: 0 0 0 122px;
+      gap: 8px;
+      min-height: 28px;
+    }
+    .arrow {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #484f58;
+    }
+    .arrow-line {
+      height: 2px;
+      background: #30363d;
+      flex: 1;
+    }
+    .arrow svg {
+      flex-shrink: 0;
+    }
+    .arrow-label {
+      font-size: 10px;
+      color: #484f58;
+      white-space: nowrap;
+      background: #0d1117;
+      padding: 0 4px;
+    }
+
+    /* ── SEPARATOR ───────────────────────────────────── */
+    .sep {
+      border: none;
+      border-top: 1px solid #21262d;
+      margin: 4px 0 4px 122px;
+    }
+
+    /* ── KEY ─────────────────────────────────────────── */
+    .legend {
+      max-width: 1100px;
+      margin: 32px auto 0;
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding-left: 122px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 11px;
+      color: #8b949e;
+    }
+    .legend-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      border: 1.5px solid;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Orbyx AI-SPM — Architecture Overview</h1>
+<p class="subtitle">AI Security Posture Management · All services run in Docker Compose</p>
+
+<div class="diagram">
+  <div class="spine"></div>
+
+  <!-- ── USER LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">User</div>
+    <div class="lane-content">
+      <div class="node blue" style="min-width:200px">
+        <span class="node-port">:3000</span>
+        <div class="node-name">Admin Portal (React)</div>
+        <div class="node-desc">Chat UI · Admin dashboard · Threat findings · Cases · Inventory</div>
+        <span class="node-badge">Nginx</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-row">
+    <div class="arrow" style="width:100%">
+      <svg width="10" height="10" viewBox="0 0 10 10"><path d="M5 0 L10 5 L5 10" stroke="#484f58" fill="none" stroke-width="1.5"/><line x1="0" y1="5" x2="9" y2="5" stroke="#484f58" stroke-width="1.5"/></svg>
+      <div class="arrow-line"></div>
+      <span class="arrow-label">HTTP / JWT Bearer</span>
+      <div class="arrow-line"></div>
+    </div>
+  </div>
+
+  <!-- ── GATEWAY LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Gateway</div>
+    <div class="lane-content">
+      <div class="node blue" style="min-width:300px">
+        <span class="node-port">:8080</span>
+        <div class="node-name">API Gateway</div>
+        <div class="node-desc">JWT auth · RS256 · Rate limiting · Guard screen · CEP · Memory · Tool execution · LLM proxy</div>
+        <span class="node-badge">FastAPI</span>
+      </div>
+      <div class="node orange" style="min-width:190px">
+        <span class="node-port">:8090</span>
+        <div class="node-name">Freeze Controller</div>
+        <div class="node-desc">Freeze / unfreeze users, tenants, sessions</div>
+        <span class="node-badge">FastAPI</span>
+      </div>
+      <div class="node grey" style="min-width:190px">
+        <span class="node-port">:8091</span>
+        <div class="node-name">Policy Simulator</div>
+        <div class="node-desc">Dry-run Rego policy evaluation against sample events</div>
+        <span class="node-badge">FastAPI</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── SECURITY LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Security</div>
+    <div class="lane-content">
+      <div class="node orange" style="min-width:210px">
+        <span class="node-port">:8200</span>
+        <div class="node-name">Guard Model</div>
+        <div class="node-desc">Content moderation · Llama Guard 4 12B via Groq · Regex fallback</div>
+        <span class="node-badge">FastAPI · Groq</span>
+      </div>
+      <div class="node orange" style="min-width:190px">
+        <div class="node-name">OPA Policy Engine</div>
+        <span class="node-port">:8181</span>
+        <div class="node-desc">Rego policies · Request allow / escalate / block decisions</div>
+        <span class="node-badge">OPA 0.70</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── AI / LLM LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">AI / LLM</div>
+    <div class="lane-content">
+      <div class="node purple" style="min-width:220px">
+        <div class="node-name">Claude (Anthropic)</div>
+        <div class="node-desc">Haiku · Sonnet · Opus · Tool use · Streaming responses</div>
+        <span class="node-badge">External API</span>
+      </div>
+      <div class="node purple" style="min-width:180px">
+        <div class="node-name">Tavily Search</div>
+        <div class="node-desc">Real-time web search tool available to Claude</div>
+        <span class="node-badge">External API</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-row">
+    <div class="arrow" style="width:100%">
+      <svg width="10" height="10" viewBox="0 0 10 10"><path d="M5 0 L10 5 L5 10" stroke="#484f58" fill="none" stroke-width="1.5"/><line x1="0" y1="5" x2="9" y2="5" stroke="#484f58" stroke-width="1.5"/></svg>
+      <div class="arrow-line"></div>
+      <span class="arrow-label">Kafka events</span>
+      <div class="arrow-line"></div>
+    </div>
+  </div>
+
+  <!-- ── INFRA LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Infrastructure</div>
+    <div class="lane-content">
+      <div class="node green" style="min-width:200px">
+        <div class="node-name">Kafka</div>
+        <div class="node-desc">Event streaming · 12+ topics · Per-tenant ACLs</div>
+        <span class="node-badge">Confluent 7.6</span>
+      </div>
+      <div class="node green" style="min-width:180px">
+        <div class="node-name">Redis</div>
+        <div class="node-desc">Session memory · Long-term history (30d) · Rate limit counters</div>
+        <span class="node-badge">Redis 7</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── PROCESSING LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Processing</div>
+    <div class="lane-content">
+      <div class="node teal" style="min-width:210px">
+        <div class="node-name">SPM Aggregator</div>
+        <div class="node-desc">Kafka consumer → Postgres writer · Prometheus metrics</div>
+        <span class="node-badge">Python · Kafka</span>
+      </div>
+      <div class="node teal" style="min-width:195px">
+        <div class="node-name">Processor</div>
+        <div class="node-desc">Enriches raw events with posture scores and signals</div>
+        <span class="node-badge">Python · Kafka</span>
+      </div>
+      <div class="node teal" style="min-width:180px">
+        <div class="node-name">Memory Service</div>
+        <div class="node-desc">Session · Long-term · System memory namespaces in Redis</div>
+        <span class="node-badge">Python · Redis</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── DATA LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Data</div>
+    <div class="lane-content">
+      <div class="node teal" style="min-width:350px">
+        <div class="node-name">PostgreSQL</div>
+        <div class="node-desc">audit_export · posture_snapshots · model_registry · threat_findings · cases · sessions</div>
+        <span class="node-badge">Postgres 16</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── MANAGEMENT LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Management</div>
+    <div class="lane-content">
+      <div class="node blue" style="min-width:230px">
+        <span class="node-port">:8092</span>
+        <div class="node-name">SPM API</div>
+        <div class="node-desc">Model registry · Posture scores · NIST AI RMF compliance · Enforcement thresholds</div>
+        <span class="node-badge">FastAPI</span>
+      </div>
+      <div class="node blue" style="min-width:230px">
+        <span class="node-port">:8094</span>
+        <div class="node-name">Agent Orchestrator</div>
+        <div class="node-desc">Session lifecycle · Risk scoring · Policy evaluation · Threat findings · Cases</div>
+        <span class="node-badge">FastAPI</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── THREAT HUNTING LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Threat Hunting</div>
+    <div class="lane-content">
+      <div class="node red" style="min-width:480px">
+        <div class="node-name">🎯 Threat Hunting Agent</div>
+        <div class="node-desc">
+          Autonomous AI security scanner · LangChain + Groq Llama 3.3 70B<br>
+          9 proactive scans every 5 min: exposed credentials · port anomalies · runtime anomalies ·
+          prompt secret exfiltration · PII leakage · tool misuse · overprivileged models
+        </div>
+        <span class="node-badge">LangChain · Groq · Required: GROQ_API_KEY</span>
+      </div>
+    </div>
+  </div>
+
+  <hr class="sep" />
+
+  <!-- ── OBSERVABILITY LAYER ── -->
+  <div class="lane">
+    <div class="lane-label">Observability</div>
+    <div class="lane-content">
+      <div class="node grey" style="min-width:200px">
+        <span class="node-port">:9090</span>
+        <div class="node-name">Prometheus</div>
+        <div class="node-desc">Scrapes /metrics from all services every 15 s</div>
+        <span class="node-badge">v2.55</span>
+      </div>
+      <div class="node grey" style="min-width:210px">
+        <span class="node-port">:3001</span>
+        <div class="node-name">Grafana</div>
+        <div class="node-desc">AI SPM Overview · Engineering · Compliance dashboards</div>
+        <span class="node-badge">v11.4 · admin/admin</span>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── LEGEND ── -->
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#1f6feb;background:#0d1f3888"></div> User-facing / API
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#8b5cf6;background:#1a103588"></div> AI / LLM (external)
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#238636;background:#0d281888"></div> Infrastructure
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#d29922;background:#2d1b0088"></div> Security / Policy
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#f85149;background:#2d0f0f88"></div> Threat Hunting
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#20b2aa;background:#0d262688"></div> Data / Processing
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="border-color:#30363d;background:#16172288"></div> Observability
+  </div>
+</div>
+
+</body>
+</html>

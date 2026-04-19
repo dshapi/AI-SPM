@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Orbyx AI-SPM — Control Plane & Data Path</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0d1117;
+      color: #e6edf3;
+      padding: 40px 32px 60px;
+    }
+    h1 { text-align:center; font-size:20px; font-weight:700; letter-spacing:.4px; color:#f0f6fc; margin-bottom:4px; }
+    .subtitle { text-align:center; font-size:12px; color:#8b949e; margin-bottom:36px; }
+
+    /* ── Legend ───────────────────────────────────── */
+    .legend {
+      display:flex; flex-wrap:wrap; gap:20px; justify-content:center;
+      margin-bottom:32px;
+    }
+    .leg { display:flex; align-items:center; gap:6px; font-size:12px; color:#8b949e; }
+    .leg-line { width:36px; height:3px; border-radius:2px; }
+    .leg-dashed { width:36px; height:0; border-top: 3px dashed; border-radius:0; }
+
+    /* ── Two-column layout ────────────────────────── */
+    .canvas {
+      display:grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      max-width: 1300px;
+      margin: 0 auto;
+    }
+    @media (max-width:900px) { .canvas { grid-template-columns:1fr; } }
+
+    /* ── Flow panel ───────────────────────────────── */
+    .panel {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 12px;
+      padding: 24px;
+    }
+    .panel-title {
+      font-size:13px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+      margin-bottom:20px;
+      display:flex; align-items:center; gap:8px;
+    }
+    .panel-dot { width:10px; height:10px; border-radius:50%; flex-shrink:0; }
+
+    /* ── Flow rows ────────────────────────────────── */
+    .flow { display:flex; flex-direction:column; gap:0; }
+    .step {
+      display:flex; align-items:stretch; gap:0;
+    }
+    .step-spine {
+      display:flex; flex-direction:column; align-items:center;
+      width:28px; flex-shrink:0; padding-top:4px;
+    }
+    .node-dot {
+      width:12px; height:12px; border-radius:50%; flex-shrink:0; margin-top:3px;
+    }
+    .spine-line {
+      width:2px; flex:1; margin:2px 0;
+    }
+
+    .step-body { flex:1; padding-bottom:16px; }
+    .node-box {
+      display:inline-flex; align-items:center; gap:8px;
+      border:1px solid; border-radius:7px;
+      padding:6px 12px; font-size:12.5px; font-weight:600;
+      margin-bottom:4px; width:100%;
+    }
+    .node-icon { font-size:14px; flex-shrink:0; }
+    .node-label { flex:1; }
+    .node-port { font-size:10px; font-weight:400; opacity:.6; margin-left:auto; }
+    .step-desc { font-size:11px; color:#8b949e; padding-left:4px; line-height:1.5; }
+    .step-arrow {
+      font-size:10px; color:#6e7681;
+      padding: 1px 0 1px 4px;
+    }
+
+    /* ── Arrow between steps ──────────────────────── */
+    .connector {
+      display:flex; align-items:center; gap:6px;
+      padding: 0 0 4px 34px;
+      font-size:10px; color:#6e7681;
+    }
+    .arrow-line {
+      flex:1; height:1px; max-width:60px;
+    }
+
+    /* ── Colour tokens ────────────────────────────── */
+    /* blue = user/ingress */
+    .c-blue   { background:#1c2b3a; border-color:#1f6feb; color:#58a6ff; }
+    .c-blue   .node-dot, .c-blue   .spine-line { background:#1f6feb; }
+    .c-blue   .arrow-line { background:#1f6feb; }
+
+    /* purple = AI/LLM */
+    .c-purple { background:#1e1b2e; border-color:#7c3aed; color:#a78bfa; }
+    .c-purple .node-dot, .c-purple .spine-line { background:#7c3aed; }
+    .c-purple .arrow-line { background:#7c3aed; }
+
+    /* green = infra/cache */
+    .c-green  { background:#0d2818; border-color:#238636; color:#3fb950; }
+    .c-green  .node-dot, .c-green  .spine-line { background:#238636; }
+    .c-green  .arrow-line { background:#238636; }
+
+    /* orange = security/guard */
+    .c-orange { background:#2d1b00; border-color:#d97706; color:#fbbf24; }
+    .c-orange .node-dot, .c-orange .spine-line { background:#d97706; }
+    .c-orange .arrow-line { background:#d97706; }
+
+    /* red = threat/enforce */
+    .c-red    { background:#2d0f0f; border-color:#da3633; color:#ff7b72; }
+    .c-red    .node-dot, .c-red    .spine-line { background:#da3633; }
+    .c-red    .arrow-line { background:#da3633; }
+
+    /* teal = data/persistence */
+    .c-teal   { background:#0c2229; border-color:#0e7490; color:#22d3ee; }
+    .c-teal   .node-dot, .c-teal   .spine-line { background:#0e7490; }
+    .c-teal   .arrow-line { background:#0e7490; }
+
+    /* grey = observability */
+    .c-grey   { background:#1c1c1c; border-color:#484f58; color:#8b949e; }
+    .c-grey   .node-dot, .c-grey   .spine-line { background:#484f58; }
+    .c-grey   .arrow-line { background:#484f58; }
+
+    /* ── Divider within flow ──────────────────────── */
+    .flow-divider {
+      border-top: 1px dashed #30363d;
+      margin: 10px 0 16px;
+    }
+
+    /* ── Kafka bus bar ────────────────────────────── */
+    .kafka-bus {
+      background: linear-gradient(90deg, #1a2030 0%, #1f2d40 100%);
+      border: 1px solid #1f6feb44;
+      border-radius:8px;
+      padding:8px 14px;
+      font-size:11px;
+      color:#58a6ff;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      margin: 12px 0;
+    }
+    .kafka-bus-label { font-weight:700; font-size:10px; letter-spacing:.4px; text-transform:uppercase; opacity:.7; margin-left:auto; }
+
+    /* ── Topic chip ────────────────────────────────── */
+    .topic {
+      display:inline-block;
+      background:#0d1b2a;
+      border:1px solid #1f6feb55;
+      border-radius:4px;
+      padding:2px 7px;
+      font-size:10px;
+      color:#58a6ff88;
+      margin:2px 2px 0 0;
+    }
+
+    /* ── Full-width bus section ─────────────────────── */
+    .bus-section {
+      max-width: 1300px;
+      margin: 0 auto 28px;
+    }
+    .bus-header {
+      font-size:11px; font-weight:700; letter-spacing:.5px; text-transform:uppercase;
+      color:#58a6ff; margin-bottom:10px; text-align:center;
+    }
+    .bus-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+      gap:8px;
+    }
+    .bus-topic {
+      background:#161b22;
+      border:1px solid #1f6feb33;
+      border-radius:8px;
+      padding:10px 14px;
+    }
+    .bus-topic-name {
+      font-size:11px; font-weight:700; color:#58a6ff; margin-bottom:4px;
+    }
+    .bus-topic-desc {
+      font-size:10px; color:#8b949e; line-height:1.4;
+    }
+    .bus-topic-flow {
+      font-size:10px; color:#6e7681; margin-top:4px;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Orbyx AI-SPM — Control Plane &amp; Data Path</h1>
+<p class="subtitle">How a request flows through the platform — from browser to LLM response, and how every event is monitored.</p>
+
+<!-- ── Legend ─────────────────────────────────────────────────────── -->
+<div class="legend">
+  <div class="leg"><div class="leg-line" style="background:#1f6feb"></div> User / Ingress</div>
+  <div class="leg"><div class="leg-line" style="background:#7c3aed"></div> AI / LLM</div>
+  <div class="leg"><div class="leg-line" style="background:#d97706"></div> Security / Guard</div>
+  <div class="leg"><div class="leg-line" style="background:#da3633"></div> Threat / Enforcement</div>
+  <div class="leg"><div class="leg-line" style="background:#238636"></div> Infra / Cache</div>
+  <div class="leg"><div class="leg-line" style="background:#0e7490"></div> Data / Persistence</div>
+  <div class="leg"><div class="leg-line" style="background:#484f58"></div> Observability</div>
+</div>
+
+<!-- ── Kafka event bus (full-width) ────────────────────────────────── -->
+<div class="bus-section">
+  <div class="bus-header">⚡ Kafka Event Bus — Async backbone connecting all services</div>
+  <div class="bus-grid">
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.audit.{tenant}</div>
+      <div class="bus-topic-desc">Raw request/response events emitted by API gateway</div>
+      <div class="bus-topic-flow">API → Processor → SPM Aggregator</div>
+    </div>
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.posture.{tenant}</div>
+      <div class="bus-topic-desc">Enriched posture-scored events from Processor</div>
+      <div class="bus-topic-flow">Processor → SPM Aggregator → Postgres</div>
+    </div>
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.cep.{tenant}</div>
+      <div class="bus-topic-desc">Complex event patterns — burst, drift, anomalies</div>
+      <div class="bus-topic-flow">Flink CEP → SPM API → Alert</div>
+    </div>
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.guard.{tenant}</div>
+      <div class="bus-topic-desc">Content moderation results from guard-model</div>
+      <div class="bus-topic-flow">Guard Model → Policy Decider</div>
+    </div>
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.enforcement.{tenant}</div>
+      <div class="bus-topic-desc">Block / freeze / rate-limit decisions</div>
+      <div class="bus-topic-flow">Freeze Controller → API Gateway</div>
+    </div>
+    <div class="bus-topic">
+      <div class="bus-topic-name">cpm.tool.{tenant}</div>
+      <div class="bus-topic-desc">Tool call requests and results from agent executor</div>
+      <div class="bus-topic-flow">Executor → Tool Parser → Agent</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Two columns ─────────────────────────────────────────────────── -->
+<div class="canvas">
+
+  <!-- ════════════════════════════════════════════════════
+       COLUMN 1 — DATA PATH (request → response)
+       ════════════════════════════════════════════════════ -->
+  <div class="panel">
+    <div class="panel-title">
+      <div class="panel-dot" style="background:#58a6ff"></div>
+      Data Path — Request / Response Flow
+    </div>
+
+    <div class="flow">
+
+      <!-- 1. Browser -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#58a6ff"></div>
+          <div class="spine-line" style="background:#1f6feb"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-blue">
+            <span class="node-icon">🌐</span>
+            <span class="node-label">Browser (React UI)</span>
+            <span class="node-port">:3001</span>
+          </div>
+          <div class="step-desc">User submits a prompt. JWT token attached to every request.</div>
+        </div>
+      </div>
+
+      <!-- connector -->
+      <div class="connector c-blue"><div class="arrow-line" style="background:#1f6feb"></div>HTTPS POST /api/v1/chat</div>
+
+      <!-- 2. API Gateway -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#fbbf24"></div>
+          <div class="spine-line" style="background:#d97706"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-orange">
+            <span class="node-icon">🛡️</span>
+            <span class="node-label">API Gateway</span>
+            <span class="node-port">:8080</span>
+          </div>
+          <div class="step-desc">
+            <strong style="color:#fbbf24">① JWT auth</strong> — RS256 verify via public key<br>
+            <strong style="color:#fbbf24">② Rate limit</strong> — Redis sliding-window counter (60 RPM)<br>
+            <strong style="color:#fbbf24">③ Input guard</strong> — calls Guard Model (Llama Guard 3)<br>
+            <strong style="color:#fbbf24">④ OPA policy</strong> — Rego policy evaluation (sync HTTP)<br>
+            <strong style="color:#fbbf24">⑤ CEP check</strong> — burst &amp; drift signals from Redis/Kafka
+          </div>
+        </div>
+      </div>
+
+      <!-- connector -->
+      <div class="connector c-green"><div class="arrow-line" style="background:#238636"></div>session lookup / memory read</div>
+
+      <!-- 3. Memory service -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#3fb950"></div>
+          <div class="spine-line" style="background:#238636"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-green">
+            <span class="node-icon">🧠</span>
+            <span class="node-label">Memory Service</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Injects session (1 h), long-term (30 d), and system context into the prompt window via Redis.</div>
+        </div>
+      </div>
+
+      <!-- connector -->
+      <div class="connector c-purple"><div class="arrow-line" style="background:#7c3aed"></div>enriched prompt → LLM</div>
+
+      <!-- 4. LLM (Anthropic) -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#a78bfa"></div>
+          <div class="spine-line" style="background:#7c3aed"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-purple">
+            <span class="node-icon">🤖</span>
+            <span class="node-label">Claude (Anthropic API)</span>
+            <span class="node-port">external</span>
+          </div>
+          <div class="step-desc">Model generates a response. If a tool call is returned, the agent loop begins (Tool Parser → Executor → back to LLM).</div>
+        </div>
+      </div>
+
+      <!-- connector -->
+      <div class="connector c-orange"><div class="arrow-line" style="background:#d97706"></div>response text → output guard</div>
+
+      <!-- 5. Output guard -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#fbbf24"></div>
+          <div class="spine-line" style="background:#d97706"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-orange">
+            <span class="node-icon">🔍</span>
+            <span class="node-label">Output Guard</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Second-pass semantic scan on Claude's response via Guard Model. Blocks PII leakage, policy violations.</div>
+        </div>
+      </div>
+
+      <!-- connector -->
+      <div class="connector c-blue"><div class="arrow-line" style="background:#1f6feb"></div>approved response → browser</div>
+
+      <!-- 6. Response returned -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#58a6ff"></div>
+          <div class="spine-line" style="background:#1f6feb33"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-blue">
+            <span class="node-icon">✅</span>
+            <span class="node-label">Response delivered to user</span>
+            <span class="node-port"></span>
+          </div>
+          <div class="step-desc">Streamed back via SSE. Audit event published to Kafka simultaneously.</div>
+        </div>
+      </div>
+
+      <div class="flow-divider"></div>
+
+      <!-- Tool loop -->
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;">⚙️  Agent / Tool Loop (if tool call returned)</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#fbbf24"></div>
+          <div class="spine-line" style="background:#d97706"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-orange">
+            <span class="node-icon">🔧</span>
+            <span class="node-label">Tool Parser</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Validates tool name and arguments against policy registry.</div>
+        </div>
+      </div>
+
+      <div class="connector c-orange"><div class="arrow-line" style="background:#d97706"></div>approved tool call</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#fbbf24"></div>
+          <div class="spine-line" style="background:#d97706"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-orange">
+            <span class="node-icon">⚡</span>
+            <span class="node-label">Executor</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Runs the tool in sandbox, captures result. Emits <span class="topic">cpm.tool</span> event to Kafka.</div>
+        </div>
+      </div>
+
+      <div class="connector c-purple"><div class="arrow-line" style="background:#7c3aed"></div>tool result injected into next LLM turn</div>
+
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════════════════════
+       COLUMN 2 — CONTROL PLANE (monitoring, enforcement)
+       ════════════════════════════════════════════════════ -->
+  <div class="panel">
+    <div class="panel-title">
+      <div class="panel-dot" style="background:#ff7b72"></div>
+      Control Plane — Monitoring &amp; Enforcement
+    </div>
+
+    <div class="flow">
+
+      <!-- Audit trail -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#58a6ff"></div>
+          <div class="spine-line" style="background:#1f6feb"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-blue">
+            <span class="node-icon">📋</span>
+            <span class="node-label">Kafka Audit Events</span>
+            <span class="node-port">cpm.audit.t1</span>
+          </div>
+          <div class="step-desc">Every request, response, tool call, guard result, and enforcement action is published here.</div>
+        </div>
+      </div>
+
+      <div class="connector c-teal"><div class="arrow-line" style="background:#0e7490"></div>consume</div>
+
+      <!-- Processor -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#22d3ee"></div>
+          <div class="spine-line" style="background:#0e7490"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-teal">
+            <span class="node-icon">⚙️</span>
+            <span class="node-label">Processor</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Enriches raw audit events with posture score, model ID, and risk metadata. Republishes to <span class="topic">cpm.posture</span>.</div>
+        </div>
+      </div>
+
+      <div class="connector c-teal"><div class="arrow-line" style="background:#0e7490"></div>consume + write</div>
+
+      <!-- SPM aggregator -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#22d3ee"></div>
+          <div class="spine-line" style="background:#0e7490"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-teal">
+            <span class="node-icon">🗄️</span>
+            <span class="node-label">SPM Aggregator</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Writes all enriched events to <strong>Postgres</strong> (<code>audit_export</code> table). Feeds posture snapshots every 5 min.</div>
+        </div>
+      </div>
+
+      <div class="connector c-teal"><div class="arrow-line" style="background:#0e7490"></div>read/write</div>
+
+      <!-- SPM API -->
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#22d3ee"></div>
+          <div class="spine-line" style="background:#0e7490"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-teal">
+            <span class="node-icon">📊</span>
+            <span class="node-label">SPM API</span>
+            <span class="node-port">:8092</span>
+          </div>
+          <div class="step-desc">Model registry · posture scores · compliance reports. Triggers enforcement when rolling-avg risk score &gt; 0.85.</div>
+        </div>
+      </div>
+
+      <div class="flow-divider"></div>
+
+      <!-- CEP / Flink -->
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;">🔬  Complex Event Processing</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#fbbf24"></div>
+          <div class="spine-line" style="background:#d97706"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-orange">
+            <span class="node-icon">🌊</span>
+            <span class="node-label">Flink CEP</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">Sliding-window stream analytics: burst detection (2 min), sustained volume (1 h), intent drift (Jaccard ≥ 0.65).</div>
+        </div>
+      </div>
+
+      <div class="flow-divider"></div>
+
+      <!-- Threat hunting -->
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;">🎯  Proactive Threat Hunting (every 5 min)</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#ff7b72"></div>
+          <div class="spine-line" style="background:#da3633"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-red">
+            <span class="node-icon">🔎</span>
+            <span class="node-label">Threat Hunting Agent</span>
+            <span class="node-port">internal</span>
+          </div>
+          <div class="step-desc">
+            9 collectors run in parallel every 5 min:<br>
+            Posture · Anomaly · Data leakage · Tool misuse<br>
+            Prompt injection · Privilege escalation · CEP signals<br>
+            Redis memory · Compliance gaps<br>
+            <strong style="color:#ff7b72">Backend:</strong> LangChain + Groq (Llama 3.3 70B)
+          </div>
+        </div>
+      </div>
+
+      <div class="connector c-red"><div class="arrow-line" style="background:#da3633"></div>POST /api/v1/threat-findings</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#ff7b72"></div>
+          <div class="spine-line" style="background:#da3633"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-red">
+            <span class="node-icon">🎮</span>
+            <span class="node-label">Agent Orchestrator</span>
+            <span class="node-port">:8094</span>
+          </div>
+          <div class="step-desc">Receives findings, scores sessions, manages cases, escalates critical findings to enforcement.</div>
+        </div>
+      </div>
+
+      <div class="connector c-red"><div class="arrow-line" style="background:#da3633"></div>enforce block / freeze</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#ff7b72"></div>
+          <div class="spine-line" style="background:#da363333"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-red">
+            <span class="node-icon">🚫</span>
+            <span class="node-label">Freeze Controller</span>
+            <span class="node-port">:8090</span>
+          </div>
+          <div class="step-desc">Freeze/unfreeze users or tenants. Publishes <span class="topic">cpm.enforcement</span> event so the API Gateway rejects subsequent requests.</div>
+        </div>
+      </div>
+
+      <div class="flow-divider"></div>
+
+      <!-- Observability -->
+      <div style="font-size:11px;color:#8b949e;margin-bottom:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase;">📡  Observability</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#8b949e"></div>
+          <div class="spine-line" style="background:#484f58"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-grey">
+            <span class="node-icon">📈</span>
+            <span class="node-label">Prometheus</span>
+            <span class="node-port">:9090</span>
+          </div>
+          <div class="step-desc">Scrapes <code>/metrics</code> from every service. Tracks request rate, latency, posture scores, enforcement events.</div>
+        </div>
+      </div>
+
+      <div class="connector c-grey"><div class="arrow-line" style="background:#484f58"></div>datasource</div>
+
+      <div class="step">
+        <div class="step-spine">
+          <div class="node-dot" style="background:#8b949e"></div>
+          <div class="spine-line" style="background:#48495800"></div>
+        </div>
+        <div class="step-body">
+          <div class="node-box c-grey">
+            <span class="node-icon">📊</span>
+            <span class="node-label">Grafana</span>
+            <span class="node-port">:3000</span>
+          </div>
+          <div class="step-desc">Pre-provisioned dashboards: AI SPM posture · Engineering SLOs · Compliance audit trail.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────────────── -->
+<p style="text-align:center;font-size:11px;color:#484f58;margin-top:40px;">Orbyx AI-SPM Platform · All services run on Docker Compose · Kafka + Redis + Postgres backbone</p>
+
+</body>
+</html>
