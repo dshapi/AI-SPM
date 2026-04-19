@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { simReducer, makeIdle, Actions } from '../useSimulationState.js'
-import { EVENT_TYPES } from '../../lib/eventSchema.js'
+import { EVENT_TYPES, normalizeEvent } from '../../lib/eventSchema.js'
+import { buildResultFromSimEvents } from '../../lib/buildResultFromSimEvents.js'
 
 function makeEvent(event_type, stage, overrides = {}) {
   return { id: `${event_type}:x:ts`, event_type, stage, status: stage, timestamp: 'ts', details: {}, ...overrides }
@@ -72,5 +73,96 @@ describe('simReducer', () => {
     const frozen = Object.freeze({ ...state, steps: Object.freeze([]) })
     const ev     = makeEvent(EVENT_TYPES.RISK_CALCULATED, 'progress')
     expect(() => simReducer(frozen, { type: Actions.EVENT_RECEIVED, event: ev })).not.toThrow()
+  })
+})
+
+// ── Full-flow simulation tests (end-to-end using real normalized events) ──
+function wsEv(event_type, payload = {}, ts = new Date().toISOString()) {
+  return normalizeEvent({ event_type, payload, timestamp: ts, correlation_id: 'c' })
+}
+
+describe('simReducer — full simulation flows', () => {
+  it('happy path: started → blocked → completed reaches status completed with finalResults', () => {
+    const evStarted   = wsEv('simulation.started',   { prompt: 'test' })
+    const evBlocked   = wsEv('simulation.blocked',   { categories: ['injection'], decision_reason: 'blocked' })
+    const evCompleted = wsEv('simulation.completed', { summary: { result: 'blocked', duration_ms: 100 } })
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
+
+    // Non-terminal events accumulate steps
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    expect(state.status).toBe('running')
+    expect(state.steps).toHaveLength(1)
+
+    // Terminal event (blocked) → completed
+    const finalResults = buildResultFromSimEvents([evStarted, evBlocked, evCompleted])
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked, finalResults })
+    expect(state.status).toBe('completed')
+    expect(state.finalResults).not.toBeNull()
+    expect(state.finalResults.verdict).toBe('blocked')
+  })
+
+  it('allowed path: started → allowed → completed reaches status completed', () => {
+    const evStarted   = wsEv('simulation.started',   { prompt: 'hello' })
+    const evAllowed   = wsEv('simulation.allowed',   { response_preview: 'ok' })
+    const evCompleted = wsEv('simulation.completed', { summary: { result: 'allowed', duration_ms: 50 } })
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    const finalResults = buildResultFromSimEvents([evStarted, evAllowed, evCompleted])
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evAllowed, finalResults })
+    expect(state.status).toBe('completed')
+    expect(state.finalResults.verdict).toBe('allowed')
+  })
+
+  it('error path: simulation.error event → status failed', () => {
+    const evStarted = wsEv('simulation.started', { prompt: 'test' })
+    const evError   = wsEv('simulation.error',   { error_message: 'PSS evaluation failed' })
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evError })
+    expect(state.status).toBe('failed')
+    expect(state.error).toMatch(/PSS evaluation failed/)
+  })
+
+  it('no infinite running: watchdog fires and exits running state', () => {
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1000 })
+    expect(state.status).toBe('running')
+    state = simReducer(state, { type: Actions.WATCHDOG_FIRED })
+    expect(state.status).toBe('failed')
+    expect(state.error).toMatch(/timeout/i)
+  })
+
+  it('steps accumulate correctly across multiple non-terminal events', () => {
+    const evStarted  = wsEv('simulation.started',  { prompt: 'test' }, '2026-01-01T00:00:00Z')
+    const evProgress = wsEv('simulation.progress', { message: 'step 1' }, '2026-01-01T00:00:00.5Z')
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 'sid', startedAt: 1 })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evProgress })
+    expect(state.steps).toHaveLength(2)
+    expect(state.status).toBe('running')
+  })
+
+  it('stale events after completion are ignored', () => {
+    const evStarted = wsEv('simulation.started', {})
+    const evBlocked = wsEv('simulation.blocked', {})
+    const lateEvent = wsEv('simulation.progress', { message: 'late' })
+
+    let state = makeIdle()
+    state = simReducer(state, { type: Actions.SIMULATION_STARTED, sessionId: 's', startedAt: 1 })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evStarted })
+    state = simReducer(state, { type: Actions.EVENT_RECEIVED, event: evBlocked, finalResults: { verdict: 'blocked' } })
+    expect(state.status).toBe('completed')
+
+    // Late event after completion — reducer returns same state reference
+    const after = simReducer(state, { type: Actions.EVENT_RECEIVED, event: lateEvent })
+    expect(after).toBe(state)
   })
 })
