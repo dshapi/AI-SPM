@@ -257,7 +257,7 @@ export function useSimulationState() {
       }
       console.log('[PIPELINE] state: POST returned background_task_started')
     } catch (err) {
-      console.error('[SimState] API call failed:', err.message)
+      console.error('[PIPELINE] state: API call failed:', err.message)
       clearWatchdog()
       terminatedRef.current = true
       dispatch({ type: Actions.API_ERROR, error: err.message })
