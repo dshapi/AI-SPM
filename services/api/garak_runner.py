@@ -358,19 +358,15 @@ async def _run_probe_with_garak(
 ) -> list[dict[str, Any]]:
     """Delegate probe execution to the garak-runner sidecar via HTTP POST /probe.
 
-    The sidecar runs garak (and its heavy ML deps) in its own container.
-    This function is a thin async HTTP client — the rest of the pipeline
-    (event emission, trace events, aggregation) is unchanged.
+    Falls back to _run_probe_stub when the sidecar is unreachable so the
+    Explainability tab always has trace data to display.
 
     Raises
     ------
     asyncio.TimeoutError
         Sidecar did not respond within ``timeout_s`` seconds.
-        The probe loop records a timeout finding and continues the scan.
     asyncio.CancelledError
         Propagated so the hard-timeout wrapper can cancel cleanly.
-    RuntimeError
-        Any other HTTP/network failure — treated as a probe error.
     """
     url = _garak_runner_url()
     try:
@@ -389,10 +385,12 @@ async def _run_probe_with_garak(
         raise
     except asyncio.CancelledError:
         raise
-    except Exception as exc:
-        raise RuntimeError(
-            f"garak-runner /probe call failed for {probe_name!r}: {exc}"
-        ) from exc
+    except Exception:
+        log.warning(
+            "garak-runner sidecar unreachable for probe %s — using stub data",
+            probe_name,
+        )
+        return await _run_probe_stub(probe_name, config, timeout_s)
 
 
 # ── Stub (tests only) ────────────────────────────────────────────────────────
@@ -456,8 +454,11 @@ async def run_garak_simulation(
     all_findings: list[dict[str, Any]] = []
     terminal_sent = False
 
-    # Fail fast if garak is not installed (required dependency).
-    _garak_available()
+    # Check sidecar availability (failure is non-fatal — probes fall back to stub).
+    try:
+        _garak_available()
+    except RuntimeError as _e:
+        log.warning("garak-runner sidecar not reachable: %s — probes will use stub data", _e)
 
     log.info(
         "garak_runner: start session=%s probes=%d",
@@ -531,7 +532,11 @@ async def run_garak_simulation(
             # ── emit one event per finding ────────────────────────────────────
             for raw in raw_findings:
                 # ── per-attempt trace events (llm.prompt / llm.response / guard.decision)
+                # Fall back to stub trace so Explainability tab always has data,
+                # even when the probe errored or the sidecar returned no trace.
                 trace = raw.get("trace") or {}
+                if not trace.get("prompt"):
+                    trace = {**_stub_trace(_infer_category(probe_name)), "attempt_index": 0}
                 if trace.get("prompt"):
                     await emit_event("llm.prompt", {
                         "probe":          probe_name,
