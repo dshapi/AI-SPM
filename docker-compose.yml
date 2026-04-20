@@ -149,6 +149,34 @@ services:
     depends_on:
       <<: *depends-platform
 
+  # ── garak red-team sidecar ──────────────────────────────────────────────────
+  # garak carries heavy ML deps (torch, transformers, etc.) so it lives in its
+  # own container.  The API service talks to it via HTTP on port 8099.
+  # First build takes ~5 min (Rust compile + pip install torch).  Subsequent
+  # builds hit the layer cache as long as services/garak/requirements.txt is
+  # unchanged.
+  garak-runner:
+    build: {context: ., dockerfile: services/garak/Dockerfile}
+    container_name: cpm-garak-runner
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      PROBE_TIMEOUT_S: ${PROBE_TIMEOUT_S:-150}
+      GARAK_WORKERS: ${GARAK_WORKERS:-4}
+      # Route probes through the full CPM pipeline instead of Blank generator
+      CPM_API_URL: http://api:8080
+      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
+    volumes:
+      - ./services/garak/main.py:/app/main.py
+    ports: ["8099:8099"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8099/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      # garak imports torch/transformers on startup — give it time
+      start_period: 90s
+    restart: unless-stopped
+
   api:
     build: {context: ., dockerfile: services/api/Dockerfile}
     container_name: cpm-api
@@ -158,6 +186,8 @@ services:
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       LLM_MODEL_ID: ${LLM_MODEL_ID:-}
+      GARAK_RUNNER_URL: http://garak-runner:8099
+      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
     volumes: *key-vol
     ports: ["8080:8080"]
     healthcheck:
@@ -169,6 +199,8 @@ services:
     depends_on:
       <<: *depends-platform
       guard-model:
+        condition: service_healthy
+      garak-runner:
         condition: service_healthy
 
   retrieval-gateway:

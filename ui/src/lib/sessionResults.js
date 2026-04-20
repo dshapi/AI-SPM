@@ -70,6 +70,20 @@ export const CANONICAL_EVENT_TYPES = {
 
   // ── Audit / completion ─────────────────────────────────────────────────────
   AUDIT_LOGGED:       'audit.logged',       // audit record written to export
+
+  // ── Garak red-team execution trace ────────────────────────────────────────
+  // Per-attempt detail events emitted by garak_runner.py.
+  // These flow through the same WS → useSimulationState pipeline but are
+  // stored separately (prompts[], responses[], guardDecisions[]) rather than
+  // appearing as Decision Trace steps, so EVENT_MAP marks them trace:false.
+  LLM_PROMPT:         'llm.prompt',         // exact prompt sent to the model
+  LLM_RESPONSE:       'llm.response',       // raw model completion
+  GUARD_DECISION:     'guard.decision',     // guard/detector verdict
+  TOOL_CALL:          'tool.call',          // tool invoked by a probe
+  GUARD_INPUT:        'guard.input',        // raw prompt captured before sanitization
+
+  // ── Garak probe-level errors (infrastructure failure, not a security finding)
+  PROBE_ERROR:        'simulation.probe_error', // probe crashed / timed out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +133,16 @@ const _RAW_TO_CANONICAL = {
   'simulation.completed':    CANONICAL_EVENT_TYPES.SESSION_COMPLETED,
   'simulation.error':        CANONICAL_EVENT_TYPES.SESSION_FAILED,
   // simulation.progress has no canonical equivalent — falls through as raw string → stage 'progress'
+
+  // Garak execution trace events — identity mappings (already canonical)
+  'llm.prompt':    CANONICAL_EVENT_TYPES.LLM_PROMPT,
+  'llm.response':  CANONICAL_EVENT_TYPES.LLM_RESPONSE,
+  'guard.decision': CANONICAL_EVENT_TYPES.GUARD_DECISION,
+  'tool.call':     CANONICAL_EVENT_TYPES.TOOL_CALL,
+  'guard.input':   CANONICAL_EVENT_TYPES.GUARD_INPUT,
+
+  // Garak probe-level infrastructure error (non-terminal — probe failed to run)
+  'simulation.probe_error': CANONICAL_EVENT_TYPES.PROBE_ERROR,
 }
 
 const _POLICY_EVENT_TYPES = new Set(['policy.decision', 'policy_decision'])
@@ -443,6 +467,33 @@ export const EVENT_MAP = {
     affects:  ['decision_trace'],
     trace:    false,   // audit events do not generate visible trace steps
     summary:  'No UI change; available for future audit trail tab.',
+  },
+
+  // ── Garak execution trace (stored in useSimulationState, not Decision Trace)
+  'llm.prompt': {
+    affects:  [],      // handled by useSimulationState.prompts[]
+    trace:    false,
+    summary:  'Accumulated into state.prompts[] by useSimulationState reducer.',
+  },
+  'llm.response': {
+    affects:  [],      // handled by useSimulationState.responses[]
+    trace:    false,
+    summary:  'Accumulated into state.responses[] by useSimulationState reducer.',
+  },
+  'guard.decision': {
+    affects:  [],      // handled by useSimulationState.guardDecisions[]
+    trace:    false,
+    summary:  'Accumulated into state.guardDecisions[] by useSimulationState reducer.',
+  },
+  'tool.call': {
+    affects:  [],      // handled by useSimulationState.toolCalls[]
+    trace:    false,
+    summary:  'Accumulated into state.toolCalls[] by useSimulationState reducer.',
+  },
+  'guard.input': {
+    affects:  [],
+    trace:    false,
+    summary:  'Accumulated into state.guardInputs[] by useSimulationState reducer.',
   },
 }
 

@@ -2,14 +2,15 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY services/api/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY platform_shared/ ./platform_shared/
-COPY services/api/app.py .
+COPY platform_shared/            ./platform_shared/
+COPY services/api/app.py         .
+COPY services/api/garak_runner.py .
 COPY services/api/prompt_security/ ./prompt_security/
-COPY services/api/promptguard/ ./promptguard/
-COPY services/api/ws/ ./ws/
-COPY services/api/consumers/ ./consumers/
-COPY services/api/models/ ./models/
-COPY services/api/routes/ ./routes/
+COPY services/api/promptguard/   ./promptguard/
+COPY services/api/ws/            ./ws/
+COPY services/api/consumers/     ./consumers/
+COPY services/api/models/        ./models/
+COPY services/api/routes/        ./routes/
 # NOTE: single worker is REQUIRED.
 # The WebSocket ConnectionManager and the simulation BackgroundTask share
 # in-process state (the per-session queues and the pre-connect event buffer

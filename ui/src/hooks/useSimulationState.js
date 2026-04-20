@@ -65,10 +65,10 @@ import { runSinglePromptSimulation, runGarakSimulation } from '../api/simulation
 // "Simulation timeout" that caused built-in prompts to look flaky.
 const TIMEOUT_MS      = 60_000
 // Budget from the LAST received (non-terminal) event to the terminal event.
-// PSS (lexical → guard → OPA) completes in ≤ 4 s under normal conditions, but
-// a cold OPA container or slow guard-model startup can stretch to ~10 s.
-// 60 s gives a 15× safety margin without masking genuine hangs.
-const ACTIVITY_TIMEOUT_MS = 60_000
+// Heavy Garak probes (e.g. malwaregen.TopLevel) can take 2+ minutes per probe.
+// 180 s gives a 3× safety margin over the 60 s per-probe HTTP timeout so the
+// UI watchdog never fires mid-probe on slow-running probes.
+const ACTIVITY_TIMEOUT_MS = 180_000
 
 // ── Action types ──────────────────────────────────────────────────────────────
 export const Actions = Object.freeze({
@@ -96,10 +96,16 @@ export const Actions = Object.freeze({
 // DECISION_STAGES are recorded and extend partialResults but do not flip the
 // reducer out of 'running'.
 //
+// TRACE_STAGES carry per-attempt detail (llm.prompt, llm.response,
+// guard.decision, tool.call).  They are accumulated into the trace arrays
+// (prompts[], responses[], guardDecisions[], toolCalls[]) but do NOT create
+// Timeline steps and do NOT trigger watchdog resets.
+//
 // terminatedRef.current guards against double-dispatch in useEffect.
 // The reducer itself is pure and only sees each terminal event once.
 const TERMINAL_STAGES = new Set(['completed', 'error'])
 const DECISION_STAGES = new Set(['blocked', 'allowed', 'escalated'])
+const TRACE_STAGES    = new Set(['trace'])
 
 // ── Step label helper ─────────────────────────────────────────────────────────
 function stepLabel(event) {
@@ -113,6 +119,12 @@ function stepLabel(event) {
     const msg = event.details?.message
     return msg ? `Probe: ${msg}` : 'Probe running'
   }
+  // Garak trace events — shown in detail view, not in Timeline steps
+  if (et === 'llm.prompt')    return `Prompt sent (${event.details?.probe ?? ''})`
+  if (et === 'llm.response')  return `Model response (${event.details?.probe ?? ''})`
+  if (et === 'guard.decision') return `Guard: ${event.details?.decision ?? ''} (${event.details?.probe ?? ''})`
+  if (et === 'guard.input')    return `Guard input (${event.details?.probe ?? ''})`
+  if (et === 'tool.call')     return `Tool call: ${event.details?.tool ?? ''}`
   // Generic: capitalise dot-namespaced type (e.g. "policy.decision" → "Policy Decision")
   return et.split('.').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ') || 'Event'
 }
@@ -128,6 +140,15 @@ export function makeIdle() {
     startedAt:      undefined,
     completedAt:    undefined,
     sessionId:      null,
+    // ── Garak execution trace ─────────────────────────────────────────────
+    // One entry per llm.prompt / llm.response / guard.decision / tool.call
+    // event received during a Garak scan.  Each array is ordered by arrival
+    // time and keyed by correlation_id so the detail view can group by probe.
+    prompts:        [],   // { probe, prompt, attempt_index, correlation_id, timestamp }
+    responses:      [],   // { probe, response, passed, attempt_index, correlation_id, timestamp }
+    guardDecisions: [],   // { probe, decision, reason, score, correlation_id, timestamp }
+    toolCalls:      [],   // { tool, args, correlation_id, timestamp }
+    guardInputs:    [],   // { probe, raw_prompt, correlation_id, timestamp }
   }
 }
 
@@ -150,6 +171,74 @@ export function simReducer(state, action) {
       const isTerminal = TERMINAL_STAGES.has(event.stage)
       const isFailed   = event.stage === 'error'
       const isDecision = DECISION_STAGES.has(event.stage)
+      const isTrace    = TRACE_STAGES.has(event.stage)
+
+      // ── Garak execution trace events ───────────────────────────────────────
+      // These carry per-attempt detail and are accumulated into the trace arrays.
+      // They do NOT create Timeline steps and do NOT trigger lifecycle transitions.
+      if (isTrace) {
+        const ts = event.timestamp
+        const d  = event.details ?? {}
+        switch (event.event_type) {
+          case 'llm.prompt':
+            return {
+              ...state,
+              prompts: [...state.prompts, {
+                probe:          d.probe           ?? '',
+                prompt:         d.prompt          ?? '',
+                attempt_index:  d.attempt_index   ?? 0,
+                correlation_id: d.correlation_id  ?? event.correlation_id ?? '',
+                timestamp:      ts,
+              }],
+            }
+          case 'llm.response':
+            return {
+              ...state,
+              responses: [...state.responses, {
+                probe:          d.probe           ?? '',
+                response:       d.response        ?? '',
+                passed:         d.passed          ?? true,
+                attempt_index:  d.attempt_index   ?? 0,
+                correlation_id: d.correlation_id  ?? event.correlation_id ?? '',
+                timestamp:      ts,
+              }],
+            }
+          case 'guard.decision':
+            return {
+              ...state,
+              guardDecisions: [...state.guardDecisions, {
+                probe:          d.probe           ?? '',
+                decision:       d.decision        ?? 'allow',
+                reason:         d.reason          ?? '',
+                score:          d.score           ?? 0,
+                correlation_id: d.correlation_id  ?? event.correlation_id ?? '',
+                timestamp:      ts,
+              }],
+            }
+          case 'tool.call':
+            return {
+              ...state,
+              toolCalls: [...state.toolCalls, {
+                tool:           d.tool            ?? '',
+                args:           d.args            ?? {},
+                correlation_id: d.correlation_id  ?? event.correlation_id ?? '',
+                timestamp:      ts,
+              }],
+            }
+          case 'guard.input':
+            return {
+              ...state,
+              guardInputs: [...state.guardInputs, {
+                probe:          d.probe           ?? '',
+                raw_prompt:     d.raw_prompt      ?? '',
+                correlation_id: d.correlation_id  ?? event.correlation_id ?? '',
+                timestamp:      ts,
+              }],
+            }
+          default:
+            return state
+        }
+      }
 
       const newStep = {
         id:        event.id,
@@ -186,9 +275,11 @@ export function simReducer(state, action) {
     case Actions.WATCHDOG_FIRED:
       return {
         ...state,
-        status:      'failed',
-        error:       'Simulation timeout — no terminal event received from the backend.',
-        completedAt: Date.now(),
+        status:       'failed',
+        error:        'Simulation timeout — no terminal event received from the backend.',
+        // Show partial results (Policy Impact, Output) even on timeout.
+        finalResults: action.finalResults ?? state.finalResults ?? null,
+        completedAt:  Date.now(),
       }
 
     case Actions.API_ERROR:
@@ -218,6 +309,8 @@ export function useSimulationState() {
   const watchdogRef    = useRef(null)
   // Prevent double-processing the same terminal event across renders
   const terminatedRef  = useRef(false)
+  // Always-current copy of simEvents so watchdog closures can read latest events
+  const simEventsRef   = useRef([])
 
   // ── Clear watchdog helper ────────────────────────────────────────────────
   const clearWatchdog = useCallback(() => {
@@ -235,6 +328,10 @@ export function useSimulationState() {
 
   // ── React to incoming simEvents ──────────────────────────────────────────
   useEffect(() => {
+    // Keep the always-current ref in sync so watchdog closures can call
+    // buildResultFromSimEvents on the LATEST events, not a stale closure copy.
+    simEventsRef.current = simEvents
+
     if (simEvents.length === 0) {
       // simEvents was cleared (fresh simulation / reset) — clear the dispatch
       // log too so the next run starts from scratch.
@@ -266,6 +363,13 @@ export function useSimulationState() {
 
       dispatchedRef.current.add(ev.id)
 
+      // ── [TRACE] debug logging for per-attempt execution trace events ──────
+      if (TRACE_STAGES.has(ev.stage)) {
+        console.log('[TRACE]', ev.event_type, ev.details)
+        dispatch({ type: Actions.EVENT_RECEIVED, event: ev })
+        continue
+      }
+
       console.log(
         '[PIPELINE] state: event received stage=', ev.stage,
         'type=', ev.event_type,
@@ -288,13 +392,16 @@ export function useSimulationState() {
       }
 
       // Non-terminal (incl. decision events) — backend is alive, reset the
-      // activity watchdog so the 60 s idle budget runs from this event.
+      // activity watchdog so the 180 s idle budget runs from this event.
       clearWatchdog()
       watchdogRef.current = setTimeout(() => {
         if (terminatedRef.current) return
         terminatedRef.current = true
         console.warn('[PIPELINE] state: activity watchdog fired timeout_ms=', ACTIVITY_TIMEOUT_MS)
-        dispatch({ type: Actions.WATCHDOG_FIRED })
+        // Build result from whatever partial events arrived — so Policy Impact
+        // and Output tabs show data even when the simulation timed out.
+        const builtOnTimeout = buildResultFromSimEvents(simEventsRef.current)
+        dispatch({ type: Actions.WATCHDOG_FIRED, finalResults: builtOnTimeout })
       }, ACTIVITY_TIMEOUT_MS)
       dispatch({ type: Actions.EVENT_RECEIVED, event: ev })
     }
@@ -320,7 +427,8 @@ export function useSimulationState() {
       if (terminatedRef.current) return
       terminatedRef.current = true
       console.warn('[PIPELINE] state: watchdog fired timeout_ms=', TIMEOUT_MS)
-      dispatch({ type: Actions.WATCHDOG_FIRED })
+      const builtOnTimeout = buildResultFromSimEvents(simEventsRef.current)
+      dispatch({ type: Actions.WATCHDOG_FIRED, finalResults: builtOnTimeout })
     }, TIMEOUT_MS)
 
     try {
