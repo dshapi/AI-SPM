@@ -13,7 +13,11 @@ x-common-env: &common-env
   KAFKA_NUM_PARTITIONS: ${KAFKA_NUM_PARTITIONS:-3}
   GUARD_MODEL_URL: http://guard-model:8200
   GUARD_MODEL_ENABLED: ${GUARD_MODEL_ENABLED:-true}
-  GUARD_MODEL_TIMEOUT: ${GUARD_MODEL_TIMEOUT:-2.0}
+  # Client-side timeout for every service that calls /screen on guard-model.
+  # Must be high enough to cover local-LLM inference on CPU (llama-3.1-8b at
+  # Q4 on an M-series CPU takes 3–60s depending on prompt/load).  For real
+  # Groq cloud, 5.0 is plenty — override via env if you're on Groq cloud.
+  GUARD_MODEL_TIMEOUT: ${GUARD_MODEL_TIMEOUT:-60.0}
   WS_WAIT_TIMEOUT_S: ${WS_WAIT_TIMEOUT_S:-10.0}
   RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-60}
   CEP_SHORT_WINDOW_SEC: ${CEP_SHORT_WINDOW_SEC:-120}
@@ -138,7 +142,22 @@ services:
     environment:
       <<: *common-env
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # When GROQ_BASE_URL points at the local llm container
+      # (OpenAI-compatible), the guard talks directly to llama-cpp-python
+      # via httpx instead of the Groq cloud.  Override GUARD_GROQ_MODEL
+      # to match whatever your local server reports — llama-cpp-python
+      # accepts any name.
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
       GUARD_GROQ_MODEL: ${GUARD_GROQ_MODEL:-llama-guard-4-12b}
+      # "json" for general chat models (Llama-3.1-Instruct etc.);
+      # "llama_guard" when an actual Llama-Guard GGUF is loaded.
+      GUARD_PROMPT_MODE: ${GUARD_PROMPT_MODE:-json}
+      # Server-side HTTP timeout to the local LLM — must cover slowest
+      # cold-start inference.  Only used when GROQ_BASE_URL is set.
+      GUARD_LLM_TIMEOUT_S: ${GUARD_LLM_TIMEOUT_S:-180}
+      # Log every raw model response. Defaults OFF; set GUARD_DEBUG=1
+      # in .env to re-enable for diagnosing prompt/parser issues.
+      GUARD_DEBUG: ${GUARD_DEBUG:-0}
     volumes: *key-vol
     ports: ["8200:8200"]
     healthcheck:
@@ -489,6 +508,15 @@ services:
     container_name: cpm-llm
     volumes:
       - llm-models:/models
+    # llama-cpp-python's server honours HOST/PORT env vars more reliably
+    # than the --host/--port CLI flags across versions; set BOTH so the
+    # server binds to 0.0.0.0 and is reachable from other containers on
+    # the compose network.  Without this, older versions silently listen
+    # on 127.0.0.1 only — the in-container healthcheck passes but every
+    # cross-container request times out.
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "8080"
     command:
       - --model
       - /models/model.gguf

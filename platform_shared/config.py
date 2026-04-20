@@ -100,7 +100,10 @@ class Settings:
         # Guard model
         self.guard_model_url = os.getenv("GUARD_MODEL_URL", "http://guard-model:8200")
         self.guard_model_enabled = os.getenv("GUARD_MODEL_ENABLED", "true").lower() == "true"
-        self.guard_model_timeout = float(os.getenv("GUARD_MODEL_TIMEOUT", "2.0"))
+        # 60.0s default — high enough to cover local-LLM inference on CPU
+        # (llama-3.1-8b on M-series CPU: 3–60s per /screen call).  Override
+        # to 2.0–5.0 when using Groq cloud, via GUARD_MODEL_TIMEOUT env var.
+        self.guard_model_timeout = float(os.getenv("GUARD_MODEL_TIMEOUT", "60.0"))
 
         # Rate limiting
         self.rate_limit_rpm = int(os.getenv("RATE_LIMIT_RPM", "60"))
