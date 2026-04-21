@@ -1174,58 +1174,14 @@ A full reference of every technology, library, and external service used in the 
 
 ## Architecture Overview
 
-![Orbyx AI-SPM Architecture](docs/architecture.png)
+![Orbyx AI-SPM Architecture](docs/updated-architecture.png)
 
 ### Control Plane & Data Path
 
 ![Control Plane & Data Path](docs/architecture-flows.png)
 
-<details>
-<summary>ASCII diagram</summary>
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Browser (React)                      │
-└───────────────────────────┬─────────────────────────────┘
-                            │ HTTP
-┌───────────────────────────▼─────────────────────────────┐
-│              API Gateway  (FastAPI / Python)             │
-│  Auth · Rate limit · Guard · CEP · Memory · LLM tools   │
-└──────┬────────────┬────────────┬───────────┬────────────┘
-       │ Kafka      │ Redis      │ OPA        │ Anthropic
-┌──────▼──────┐ ┌───▼───┐ ┌────▼────┐ ┌─────▼──────────┐
-│   Kafka     │ │ Redis │ │   OPA   │ │  Claude (LLM)  │
-│  (events)   │ │(cache)│ │(policy) │ │  + Tavily      │
-└──────┬──────┘ └───────┘ └─────────┘ └────────────────┘
-       │
-       ├─────────────────────────────────────────────────┐
-       │                                                 │
-┌──────▼──────────────────────────────────────────────┐  │
-│             SPM Aggregator  (Python)                 │  │
-│         Consumes events → writes to Postgres         │  │
-└──────────────────────────┬──────────────────────────┘  │
-                           │ SQL                          │ Kafka
-┌──────────────────────────▼──────────────────────────┐  │
-│              SPM API  (FastAPI / Python)             │  │
-│   Model registry · Posture · Compliance · Enforce   │  │
-└──────────────────────────┬──────────────────────────┘  │
-                           │                             │
-┌──────────────────────────▼──────────────────────────┐  │
-│          Observability  (Prometheus + Grafana)       │  │
-└─────────────────────────────────────────────────────┘  │
-                                                         │
-┌────────────────────────────────────────────────────────▼┐
-│          Threat Hunting Agent  (LangChain + Groq)        │
-│  9 proactive scans · Redis · Postgres · /proc · OPA      │
-└──────────────────────────┬──────────────────────────────┘
-                           │ HTTP  POST /api/v1/threat-findings
-┌──────────────────────────▼──────────────────────────────┐
-│       Agent Orchestrator  (FastAPI / Python)             │
-│  Session lifecycle · Risk scoring · Findings · Cases     │
-└─────────────────────────────────────────────────────────┘
-```
 
-</details>
 
 ---
 
