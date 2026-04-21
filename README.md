@@ -769,6 +769,8 @@ You'll see this when it's ready:
 
 ```
 ✓ Platform started.
+  Chat:              http://localhost:3001 
+  Admin portal:      http://localhost:3001/admin
   API:               http://localhost:8080
   Guard Model:       http://localhost:8200
   Freeze Controller: http://localhost:8090
