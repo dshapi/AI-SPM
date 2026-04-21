@@ -40,7 +40,14 @@ _WS_WAIT_TIMEOUT_S: float = float(os.environ.get("WS_WAIT_TIMEOUT_S", "10.0"))
 # Hard upper bound for the total simulation runtime. If the coroutine hangs
 # (dead PSS, stuck probe, etc.) we force-emit `simulation.error` so the
 # frontend never waits forever on its own watchdog alone.
-_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "900.0"))
+#
+# Sizing note: a typical Garak run fires 3–4 probes sequentially, each of
+# which has its own 60s per-probe ceiling in the runner (garak_runner.py and
+# services/garak/main.py).  The previous 45s default tripped almost every
+# multi-probe run with "Garak simulation cancelled (hard timeout)" before the
+# second probe finished.  120s leaves headroom for 2 full probes plus slack;
+# operators who want shorter feedback loops can still override via env.
+_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "120.0"))
 
 from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
 _explainer = _PolicyExplainer()
@@ -50,31 +57,46 @@ def _now() -> str:
     return datetime.datetime.utcnow().isoformat() + "Z"
 
 
-async def _ws_emit(session_id: str, event_type: str, payload: dict) -> None:
+async def _ws_emit(
+    session_id: str,
+    event_type: str,
+    payload: dict,
+    *,
+    timestamp: str | None = None,
+    correlation_id: str = "",
+) -> str:
     """
     Send a simulation event directly to the browser via the WS ConnectionManager.
 
+    Returns the ISO-8601 timestamp actually stamped on the event so callers
+    that also mirror the same event to Kafka (publish_*) can reuse it —
+    otherwise the two paths stamp independent timestamps, the frontend
+    dedup key (event_type:correlation_id:timestamp) fails to collide, and
+    the browser renders every event twice (Timeline, Decision Trace, and
+    Recommendations all duplicated).  See fix C in task #13.
+
     This bypasses Kafka entirely so events flow even when the broker is
-    unavailable.  Kafka publishing (if producer != None) is handled separately
-    and is additive — both paths can run simultaneously without duplication
-    because the frontend dedups by event_type+timestamp.
+    unavailable.  Kafka publishing (if producer != None) remains additive
+    for persistence/analytics, but MUST reuse the returned timestamp.
     """
+    ts = timestamp or _now()
     try:
         import ws.session_ws as _sw
         manager = getattr(_sw, "_manager", None)
         if manager is None:
-            return
+            return ts
         event = {
             "session_id":     session_id,
             "event_type":     event_type,
             "source_service": "api-simulation",
-            "correlation_id": "",
-            "timestamp":      _now(),
+            "correlation_id": correlation_id,
+            "timestamp":      ts,
             "payload":        payload,
         }
         await manager.broadcast(session_id, event)
     except Exception as exc:
         log.warning("_ws_emit error event_type=%s error=%s", event_type, exc)
+    return ts
 
 
 # ── Request schemas ──────────────────────────────────────────────────────────
@@ -89,7 +111,14 @@ class SinglePromptSimRequest(BaseModel):
 class GarakConfig(BaseModel):
     profile: str = "default"
     probes: list[str] = []
-    max_attempts: int = 2   # keep low: each attempt hits the real LLM (~5-15 s each)
+    # Restored 3 → 10 after ADR 0001 parallelism (task #25) + prompt cap
+    # (task #27) shipped.  Garak now fans out 8 attempts concurrently
+    # through the CPM pipeline AND caps probe.prompts at
+    # max_attempts × GARAK_PROMPT_OVERSAMPLE (default 4 = 40 prompts),
+    # so encoding.InjectBase64 first-yields in ~2-7s instead of timing
+    # out.  10 reported attempts fits comfortably in the 60s
+    # PROBE_TIMEOUT_S budget.
+    max_attempts: int = 10
 
 
 class GarakSimRequest(BaseModel):
@@ -172,32 +201,36 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
     )
 
     # ── started ──────────────────────────────────────────────────────────────
-    await _ws_emit(session_id, "simulation.started", {
+    # One timestamp, two paths — see _ws_emit docstring and task #13 fix C.
+    ts_started = await _ws_emit(session_id, "simulation.started", {
         "prompt": prompt,
         "attack_type": attack_type,
         "execution_mode": execution_mode,
     })
     if producer:
         publish_started(producer, session_id=session_id, prompt=prompt,
-                        attack_type=attack_type, execution_mode=execution_mode)
+                        attack_type=attack_type, execution_mode=execution_mode,
+                        timestamp=ts_started)
 
     try:
         if app_mod is None:
             raise RuntimeError("app module not found — simulation aborted")
 
         if pss is None or execution_mode == "hypothetical":
-            await _ws_emit(session_id, "simulation.allowed", {
+            ts_allowed = await _ws_emit(session_id, "simulation.allowed", {
                 "response_preview": "[hypothetical — not screened]",
             })
             completed_summary = {"result": "allowed", "mode": "hypothetical"}
-            await _ws_emit(session_id, "simulation.completed",
-                           {"summary": completed_summary})
+            ts_done = await _ws_emit(session_id, "simulation.completed",
+                                     {"summary": completed_summary})
             terminal_sent = True
             if producer:
                 publish_allowed(producer, session_id=session_id,
-                                response_preview="[hypothetical — not screened]")
+                                response_preview="[hypothetical — not screened]",
+                                timestamp=ts_allowed)
                 publish_completed(producer, session_id=session_id,
-                                  summary=completed_summary)
+                                  summary=completed_summary,
+                                  timestamp=ts_done)
             return
 
         from prompt_security import ScreeningContext
@@ -237,7 +270,9 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
             }
             if _explanation:
                 blocked_payload["explanation"] = _explanation.get("explanation")
-            await _ws_emit(session_id, "simulation.blocked", blocked_payload)
+            ts_term = await _ws_emit(session_id, "simulation.blocked",
+                                     blocked_payload,
+                                     correlation_id=correlation_id)
             if producer:
                 publish_blocked(
                     producer,
@@ -246,16 +281,18 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                     decision_reason=result.reason or "blocked",
                     correlation_id=correlation_id,
                     explanation=_explanation.get("explanation") if _explanation else None,
+                    timestamp=ts_term,
                 )
         else:
-            await _ws_emit(session_id, "simulation.allowed", {
+            ts_term = await _ws_emit(session_id, "simulation.allowed", {
                 "response_preview": "",
                 "correlation_id":   correlation_id,
-            })
+            }, correlation_id=correlation_id)
             if producer:
                 publish_allowed(producer, session_id=session_id,
                                 response_preview="",
-                                correlation_id=correlation_id)
+                                correlation_id=correlation_id,
+                                timestamp=ts_term)
 
         _eval_ms = int((datetime.datetime.utcnow() - _eval_start).total_seconds() * 1000)
         _total_ms = int((datetime.datetime.utcnow() - t0).total_seconds() * 1000)
@@ -268,21 +305,27 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
             "simulation: complete session=%s total_ms=%d result=%s",
             session_id, _total_ms, completed_summary["result"],
         )
-        await _ws_emit(session_id, "simulation.completed", {"summary": completed_summary})
+        ts_done = await _ws_emit(session_id, "simulation.completed",
+                                  {"summary": completed_summary})
         terminal_sent = True
         if producer:
-            publish_completed(producer, session_id=session_id, summary=completed_summary)
+            publish_completed(producer, session_id=session_id,
+                              summary=completed_summary,
+                              timestamp=ts_done)
 
     except asyncio.CancelledError:
         # The outer hard-timeout wrapper is tearing us down. Emit error and
         # let the cancellation propagate so the task actually stops.
         log.warning("simulation: cancelled session_id=%s", session_id)
         try:
-            await _ws_emit(session_id, "simulation.error",
-                           {"error_message": "Simulation cancelled (hard timeout)"})
+            ts_err = await _ws_emit(
+                session_id, "simulation.error",
+                {"error_message": "Simulation cancelled (hard timeout)"},
+            )
             if producer:
                 publish_error(producer, session_id=session_id,
-                              error_message="Simulation cancelled (hard timeout)")
+                              error_message="Simulation cancelled (hard timeout)",
+                              timestamp=ts_err)
             terminal_sent = True
         finally:
             raise
@@ -290,9 +333,11 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
     except Exception as exc:
         log.exception("simulation single prompt error session_id=%s", session_id)
         try:
-            await _ws_emit(session_id, "simulation.error", {"error_message": str(exc)})
+            ts_err = await _ws_emit(session_id, "simulation.error",
+                                     {"error_message": str(exc)})
             if producer:
-                publish_error(producer, session_id=session_id, error_message=str(exc))
+                publish_error(producer, session_id=session_id,
+                              error_message=str(exc), timestamp=ts_err)
             terminal_sent = True
         except Exception:
             log.exception("simulation: failed to emit error event session_id=%s",
@@ -305,11 +350,14 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
             log.warning("simulation: no terminal emitted — injecting fallback error session_id=%s",
                         session_id)
             try:
-                await _ws_emit(session_id, "simulation.error",
-                               {"error_message": "Simulation ended without terminal event"})
+                ts_fb = await _ws_emit(
+                    session_id, "simulation.error",
+                    {"error_message": "Simulation ended without terminal event"},
+                )
                 if producer:
                     publish_error(producer, session_id=session_id,
-                                  error_message="Simulation ended without terminal event")
+                                  error_message="Simulation ended without terminal event",
+                                  timestamp=ts_fb)
             except Exception:
                 log.exception("simulation: fallback terminal emit failed session_id=%s",
                               session_id)
@@ -346,47 +394,56 @@ async def _run_garak(session_id: str, garak_config: GarakConfig,
     async def emit_event(event_type: str, payload: dict) -> None:
         """Fan-out: WS direct (always) + Kafka mirror (when producer available).
 
+        Both paths MUST carry the same ISO-8601 timestamp, otherwise the
+        frontend's dedup key (event_type+correlation_id+timestamp) fails to
+        collide and every event renders twice — see task #13 fix C.
+
         lineage.node has no Kafka publisher yet — it is forwarded to the WS
         layer only and silently ignored by the frontend state machine (unknown
         event types are not dispatched by useSimulationState).
         """
-        await _ws_emit(session_id, event_type, payload)
+        corr = payload.get("correlation_id", "")
+        ts = await _ws_emit(session_id, event_type, payload,
+                            correlation_id=corr)
         if not producer:
             return
-        corr = payload.get("correlation_id", "")
         if event_type == "simulation.started":
             publish_started(producer, session_id=session_id, prompt="",
-                            attack_type="garak", execution_mode=execution_mode)
+                            attack_type="garak", execution_mode=execution_mode,
+                            timestamp=ts)
         elif event_type == "simulation.progress":
             publish_progress(producer, session_id=session_id,
                              step=payload.get("step", 0),
                              total=payload.get("total", 0),
                              message=payload.get("message", ""),
                              probe_name=payload.get("probe_name", ""),
-                             correlation_id=corr)
+                             correlation_id=corr,
+                             timestamp=ts)
         elif event_type == "simulation.allowed":
             publish_allowed(producer, session_id=session_id,
                             response_preview=payload.get("response_preview", ""),
-                            correlation_id=corr)
+                            correlation_id=corr,
+                            timestamp=ts)
         elif event_type == "simulation.blocked":
             publish_blocked(producer, session_id=session_id,
                             categories=payload.get("categories", []),
                             decision_reason=payload.get("decision_reason", ""),
-                            correlation_id=corr)
+                            correlation_id=corr,
+                            timestamp=ts)
         elif event_type == "simulation.completed":
             publish_completed(producer, session_id=session_id,
-                              summary=payload.get("summary", {}))
+                              summary=payload.get("summary", {}),
+                              timestamp=ts)
         elif event_type == "simulation.error":
             publish_error(producer, session_id=session_id,
-                          error_message=payload.get("error_message", ""))
+                          error_message=payload.get("error_message", ""),
+                          timestamp=ts)
 
     # garak_runner owns the probe loop, event mapping, and terminal guarantee.
     # If the import itself fails (e.g., syntax error in garak_runner), the
     # exception bubbles to _run_with_hard_timeout which emits a safety-net error.
     from garak_runner import run_garak_simulation
-    probe_timeout_s = float(os.environ.get("PROBE_TIMEOUT_S", "150.0"))
-    await run_garak_simulation(garak_config, emit_event, session_id,
-                               probe_timeout_s=probe_timeout_s)
+    await run_garak_simulation(garak_config, emit_event, session_id)
 
 
 # ── Hard-timeout wrapper ─────────────────────────────────────────────────────

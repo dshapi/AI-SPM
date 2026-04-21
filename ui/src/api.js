@@ -61,7 +61,22 @@ export async function sendMessage(prompt, sessionId) {
 }
 
 export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, onDone, onError }) {
+  // Track whether a terminal callback fired so we can synthesize one if the
+  // SSE stream closes without a final event.  Without this, a server that
+  // hangs up mid-stream leaves the assistant bubble stuck in the typing
+  // state forever (no onDone / no onError means setLoading(false) is never
+  // called in App.jsx).
+  let terminated = false
+  const fireDone  = (ev) => { if (!terminated) { terminated = true; onDone(ev || {}) } }
+  const fireError = (e)  => { if (!terminated) { terminated = true; onError(e)       } }
+
   const token = await getToken()
+  if (!token) {
+    // /dev-token is unreachable — surface a clear error instead of posting
+    // Bearer null and getting an opaque 401 or hang.
+    fireError(new Error('API unreachable — could not obtain auth token. Check that the api service is running.'))
+    return
+  }
 
   let res
   try {
@@ -74,7 +89,7 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
       body: JSON.stringify({ prompt, session_id: sessionId }),
     })
   } catch (e) {
-    onError(new Error('Network error: ' + e.message))
+    fireError(new Error('Network error: ' + e.message))
     return
   }
 
@@ -90,13 +105,14 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
     }
     const blockErr = new Error(msg)
     if (typeof detail === 'object' && detail !== null) blockErr.blockDetail = detail
-    onError(blockErr)
+    fireError(blockErr)
     return
   }
 
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
+  let sawAnyEvent = false
 
   try {
     while (true) {
@@ -111,15 +127,31 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
         if (!line.startsWith('data: ')) continue
         try {
           const event = JSON.parse(line.slice(6))
-          if (event.type === 'token')  onToken(event.text)
-          else if (event.type === 'badge')  onBadge(event.text)
-          else if (event.type === 'done')   onDone(event)
-          else if (event.type === 'error')  onError(new Error(event.message))
+          sawAnyEvent = true
+          if (event.type === 'token')      onToken(event.text)
+          else if (event.type === 'badge') onBadge(event.text)
+          else if (event.type === 'done')  fireDone(event)
+          else if (event.type === 'error') fireError(new Error(event.message))
         } catch { /* malformed SSE line — skip */ }
       }
     }
   } catch (e) {
-    onError(new Error('Stream read error: ' + e.message))
+    fireError(new Error('Stream read error: ' + e.message))
+    return
+  }
+
+  // Stream closed cleanly but no terminal event arrived.  This happens when
+  // the backend exits the generator without yielding a {type: 'done'} frame
+  // (e.g. Anthropic SDK swallows an exception, or the LLM returns zero text
+  // because every block was a tool_use that produced no follow-up text).
+  // Surface SOMETHING so the bubble doesn't hang.
+  if (!terminated) {
+    if (sawAnyEvent) {
+      // We got tokens/badges but no explicit done — treat the close as done.
+      fireDone({})
+    } else {
+      fireError(new Error('Empty response from server — the stream closed without any content. Check api logs.'))
+    }
   }
 }
 

@@ -459,6 +459,121 @@ async def test_trace_events_carry_correlation_id(runner):
     assert corr_ids.get("llm.prompt") == corr_ids.get("simulation.allowed")
 
 
+# ── Per-attempt correlation_id (task #17 regression) ─────────────────────────
+
+@pytest.mark.asyncio
+async def test_each_attempt_gets_distinct_correlation_id(runner):
+    """A probe that runs N attempts must emit N distinct correlation_ids.
+
+    Regression for task #17: all attempts of one probe used to share the
+    probe-level `corr`, which (combined with the canonical-aware dedup from
+    task #13 fix D — key `cid:<canonical>:<corr>`) collapsed every attempt
+    after the first in the frontend.  The net effect: users ran a 10-attempt
+    encoding probe and saw only 1 attempt in the Timeline / Explainability.
+
+    Contract now: per-finding trace chain (llm.prompt, guard.input,
+    llm.response, guard.decision, simulation.allowed / .blocked / .probe_error)
+    MUST share ONE attempt-level correlation_id that is DISTINCT from the
+    correlation_ids of the probe's other findings.
+    """
+    captured, emit = _make_emit()
+    cfg = _FakeConfig(probes=["encoding.InjectBase64"])
+
+    # Return 3 findings for ONE probe — simulates Garak running 3 attempts.
+    async def _multi_attempt_stub(probe_name, config, timeout_s=60.0):
+        return [
+            {
+                "score": 0.0, "description": f"attempt {i}", "passed": True,
+                "trace": {
+                    "prompt":         f"base64 payload #{i}",
+                    "response":       f"model response #{i}",
+                    "guard_decision": "allow",
+                    "guard_reason":   "ok",
+                    "guard_score":    0.05,
+                    "attempt_index":  i,
+                },
+            }
+            for i in range(3)
+        ]
+
+    with patch.object(runner, "_garak_available", return_value=True), \
+         patch.object(runner, "_run_probe_with_garak", side_effect=_multi_attempt_stub):
+        await runner.run_garak_simulation(cfg, emit, session_id="ses-multi-attempt")
+
+    # Group captured events by the attempt_index embedded in the trace events,
+    # so we can verify the cid is consistent within an attempt and distinct
+    # between attempts.
+    cid_by_attempt: dict[int, set[str]] = {}
+    for t, p in captured:
+        if "attempt_index" not in p or "correlation_id" not in p:
+            continue
+        cid_by_attempt.setdefault(p["attempt_index"], set()).add(p["correlation_id"])
+
+    # 3 attempts, each with its own set of trace events that all agree on cid
+    assert sorted(cid_by_attempt.keys()) == [0, 1, 2]
+    for idx, cids in cid_by_attempt.items():
+        assert len(cids) == 1, \
+            f"attempt {idx} events disagree on correlation_id: {cids}"
+
+    # Each attempt's cid is distinct from every other attempt's
+    all_cids = [next(iter(s)) for s in cid_by_attempt.values()]
+    assert len(set(all_cids)) == len(all_cids), \
+        f"attempts share correlation_ids (dedup would collapse them): {all_cids}"
+
+    # ALL 3 simulation.allowed events must have survived with distinct cids —
+    # this is the invariant the frontend dedup (key `cid:canonical:corr`) relies
+    # on to keep every attempt visible.
+    allowed_cids = [p["correlation_id"] for t, p in captured if t == "simulation.allowed"]
+    assert len(allowed_cids) == 3
+    assert len(set(allowed_cids)) == 3
+
+    # Terminal event for the session is simulation.completed (probe-level, not
+    # per-attempt, so it carries no correlation_id).
+    assert _terminals(captured) == ["simulation.completed"]
+
+
+@pytest.mark.asyncio
+async def test_probe_level_corr_still_used_for_progress_and_lineage(runner):
+    """simulation.progress and lineage.node keep the PROBE-level correlation_id.
+
+    The per-attempt fix (task #17) must NOT affect the probe-level linkage —
+    simulation.progress and lineage.node still identify the probe as a whole,
+    and the frontend Timeline uses that id to group attempts under a probe
+    heading.  If this drifted, lineage would break.
+    """
+    captured, emit = _make_emit()
+    cfg = _FakeConfig(probes=["encoding.InjectBase64"])
+
+    async def _multi_attempt_stub(probe_name, config, timeout_s=60.0):
+        return [
+            {
+                "score": 0.0, "description": f"attempt {i}", "passed": True,
+                "trace": {
+                    "prompt": f"p{i}", "response": f"r{i}",
+                    "guard_decision": "allow", "guard_reason": "ok",
+                    "guard_score": 0.0, "attempt_index": i,
+                },
+            }
+            for i in range(2)
+        ]
+
+    with patch.object(runner, "_garak_available", return_value=True), \
+         patch.object(runner, "_run_probe_with_garak", side_effect=_multi_attempt_stub):
+        await runner.run_garak_simulation(cfg, emit, session_id="ses-probe-corr")
+
+    progress_cids = [p["correlation_id"] for t, p in captured if t == "simulation.progress"]
+    lineage_ids   = [p["id"]             for t, p in captured if t == "lineage.node"]
+    allowed_cids  = [p["correlation_id"] for t, p in captured if t == "simulation.allowed"]
+
+    # One progress + one lineage event per probe (there's only 1 probe here)
+    assert len(progress_cids) == 1
+    assert len(lineage_ids) == 1
+    # Progress and lineage agree on the probe-level id
+    assert progress_cids[0] == lineage_ids[0]
+    # None of the per-attempt allowed events reuse the probe-level id
+    assert progress_cids[0] not in allowed_cids
+
+
 @pytest.mark.asyncio
 async def test_trace_events_not_emitted_when_trace_absent(runner):
     """If a finding has no trace key, no llm.* or guard.* events must be emitted."""
@@ -583,8 +698,12 @@ async def test_run_garak_integration_via_simulation_module():
 
     emitted: list[tuple[str, dict]] = []
 
-    async def fake_emit(session_id, event_type, payload):
+    async def fake_emit(session_id, event_type, payload, **kwargs):
+        # Accept optional timestamp=/correlation_id= kwargs introduced by
+        # task #13 fix C.  Return a stub timestamp so callers that thread it
+        # into publish_* get a stable value.
         emitted.append((event_type, payload))
+        return kwargs.get("timestamp") or "1970-01-01T00:00:00Z"
 
     async def fake_wait(session_id, timeout_s=None):
         return None

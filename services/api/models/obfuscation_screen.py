@@ -28,20 +28,37 @@ from typing import Optional, Tuple
 _MIN_INVISIBLE = 3   # fewer than this → likely accidental, not an attack
 
 # ── Base64 ────────────────────────────────────────────────────────────────────
-_B64_RE = re.compile(r"[A-Za-z0-9+/]{20,}={0,2}")
+# Any run of 8+ b64 chars is a candidate; we check the DECODED content.  Short
+# runs (< 8 chars) cannot contain a meaningful attack phrase so we skip them.
+# Garak's encoding.InjectBase64 emits a spectrum of payload lengths; the prior
+# 20-char floor silently let short payloads through.
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{8,}={0,2}")
+# Bulk-b64 heuristic: any b64 blob that decodes to ≥ this many printable bytes
+# is flagged as a smuggled payload even without attack-phrase keywords.  Kept
+# at 20 so legitimate short tokens (UUIDs, hashes) don't trip this rule.
 _MIN_B64_BYTES = 20
+
+# Attack phrases to check inside decoded b64/hex payloads.  A short b64 blob
+# that decodes to one of these is blocked regardless of total length.  Reused
+# by ROT13 below — same vocabulary, one source of truth.
+_ENCODED_ATTACK_TRIGGERS = [re.compile(p, re.IGNORECASE) for p in [
+    r"ignore\s+(all\s+)?previous",
+    r"ignore\s+prior",
+    r"system\s+prompt",
+    r"jailbreak",
+    r"act\s+as",
+    r"DAN\b",
+    r"reveal\s+(your\s+)?instructions",
+    r"disregard\s+(all\s+)?previous",
+    r"you\s+are\s+now",
+    r"pretend\s+to\s+be",
+]]
 
 # ── Hex encoding ──────────────────────────────────────────────────────────────
 _HEX_RE = re.compile(r"(?:[0-9a-fA-F]{2}[ \-:]?){8,}")
 
 # ── ROT13 trigger phrases (checked after decode) ──────────────────────────────
-_ROT13_TRIGGERS = [re.compile(p, re.IGNORECASE) for p in [
-    r"ignore\s+(all\s+)?previous",
-    r"system\s+prompt",
-    r"jailbreak",
-    r"act\s+as",
-    r"DAN\b",
-]]
+_ROT13_TRIGGERS = _ENCODED_ATTACK_TRIGGERS
 
 # ── Leetspeak normalisation ───────────────────────────────────────────────────
 _LEET_MAP = {"0": "o", "1": "i", "3": "e", "4": "a", "5": "s",
@@ -70,18 +87,44 @@ def screen_obfuscation(text: str) -> Tuple[bool, Optional[str]]:
     if len(invisible) >= _MIN_INVISIBLE:
         return True, "unicode_invisible"
 
-    # 2. Base64 payload
+    # 2. Base64 payload — two independent rules, either fires on a match:
+    #    (a) bulk: decoded ≥ _MIN_B64_BYTES printable bytes, regardless of
+    #        content.  Catches large smuggled payloads (documents, code).
+    #    (b) attack-phrase: decoded contains a known instruction-override /
+    #        jailbreak phrase.  Catches short garak InjectBase64 attempts
+    #        where the payload is only a few words ("ignore previous", "DAN").
     for m in _B64_RE.finditer(text):
         candidate = m.group(0)
         padded = candidate + "=" * (-len(candidate) % 4)
         try:
             decoded = base64.b64decode(padded, validate=True)
-            if len(decoded) >= _MIN_B64_BYTES:
-                decoded_text = decoded.decode("utf-8", errors="ignore")
-                if decoded_text.isprintable() and len(decoded_text.strip()) >= 8:
-                    return True, "base64_payload"
         except (binascii.Error, ValueError):
-            pass
+            continue
+
+        decoded_text = decoded.decode("utf-8", errors="ignore")
+        if not decoded_text.strip():
+            continue
+
+        # (a) bulk payload
+        # `str.isprintable()` returns False for legitimate whitespace
+        # (newlines, tabs) which base64-smuggled paragraphs commonly contain,
+        # so using it as the gate silently let multi-line payloads slip past
+        # the bulk rule.  Instead, require that every NON-whitespace char is
+        # printable — this still rejects binary/garbage decodes but accepts
+        # prose with line breaks.
+        non_ws = "".join(c for c in decoded_text if not c.isspace())
+        looks_textual = bool(non_ws) and non_ws.isprintable()
+        if (
+            len(decoded) >= _MIN_B64_BYTES
+            and looks_textual
+            and len(decoded_text.strip()) >= 8
+        ):
+            return True, "base64_payload"
+
+        # (b) short payload containing an attack phrase
+        for pat in _ENCODED_ATTACK_TRIGGERS:
+            if pat.search(decoded_text):
+                return True, "base64_payload"
 
     # 3. Hex payload
     for m in _HEX_RE.finditer(text):

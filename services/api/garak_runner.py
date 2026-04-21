@@ -532,7 +532,30 @@ async def run_garak_simulation(
                 }]
 
             # ── emit one event per finding ────────────────────────────────────
+            #
+            # Per-attempt correlation_id (task #17 fix)
+            # ─────────────────────────────────────────
+            # `corr` above is PROBE-scoped — it ties simulation.progress +
+            # lineage.node to this probe run.  But every attempt within a probe
+            # is its own end-to-end trace (prompt → response → guard decision →
+            # terminal), and the frontend joins those events by correlation_id
+            # in useSimulationStream (dedup key `cid:<canonical>:<corr>`) and in
+            # buildAttemptsFromEvents (prompt/response/guard maps keyed on cid).
+            #
+            # If ALL attempts of a probe share the same correlation_id, only
+            # the first attempt's event chain survives dedup and every
+            # subsequent attempt's prompt/response overwrites its predecessor
+            # in the attempt builder's maps — leaving the UI with 1-of-N
+            # attempts visible.  This was masked before fix D (task #13) because
+            # the old dedup key included `timestamp`, which differed per
+            # attempt; post-fix-D we key on canonical+cid only, so the bug
+            # surfaced.
+            #
+            # The right fix is to mint a fresh correlation_id PER FINDING here,
+            # so each attempt is a distinct trace in the UI.  Keep the
+            # probe-level `corr` for simulation.progress / lineage.node only.
             for raw in raw_findings:
+                attempt_corr = str(uuid.uuid4())
                 # ── per-attempt trace events (llm.prompt / llm.response / guard.decision)
                 trace = raw.get("trace") or {}
                 if trace.get("prompt"):
@@ -540,7 +563,7 @@ async def run_garak_simulation(
                         "probe":          probe_name,
                         "prompt":         trace["prompt"],
                         "attempt_index":  trace.get("attempt_index", 0),
-                        "correlation_id": corr,
+                        "correlation_id": attempt_corr,
                     })
                 # guard.input — raw prompt before sanitization (same text as llm.prompt;
                 # a separate event so the frontend can show the pre-sanitization stage)
@@ -548,7 +571,7 @@ async def run_garak_simulation(
                     await emit_event("guard.input", {
                         "probe":          probe_name,
                         "raw_prompt":     trace["prompt"],
-                        "correlation_id": corr,
+                        "correlation_id": attempt_corr,
                     })
                 if trace.get("response") is not None:
                     await emit_event("llm.response", {
@@ -556,7 +579,7 @@ async def run_garak_simulation(
                         "response":       trace["response"],
                         "passed":         trace.get("guard_decision") != "block",
                         "attempt_index":  trace.get("attempt_index", 0),
-                        "correlation_id": corr,
+                        "correlation_id": attempt_corr,
                     })
                 if trace.get("guard_decision"):
                     await emit_event("guard.decision", {
@@ -564,14 +587,14 @@ async def run_garak_simulation(
                         "decision":       trace["guard_decision"],
                         "reason":         trace.get("guard_reason", ""),
                         "score":          trace.get("guard_score", 0.0),
-                        "correlation_id": corr,
+                        "correlation_id": attempt_corr,
                     })
                 if trace.get("tool_call"):
                     tc = trace["tool_call"]
                     await emit_event("tool.call", {
                         "tool":           tc.get("name", "unknown"),
                         "args":           tc.get("args", {}),
-                        "correlation_id": corr,
+                        "correlation_id": attempt_corr,
                     })
 
                 normalized = normalize_finding(raw, probe_name)
@@ -583,7 +606,7 @@ async def run_garak_simulation(
                     await emit_event("simulation.probe_error", {
                         "categories":      [normalized["category"]],
                         "decision_reason": normalized["description"],
-                        "correlation_id":  corr,
+                        "correlation_id":  attempt_corr,
                         "probe_name":      probe_name,
                         "severity":        normalized["severity"],
                         "message":         normalized["description"],
@@ -592,20 +615,28 @@ async def run_garak_simulation(
                     # High-severity finding → simulation.blocked
                     # This feeds into useSimulationState.partialResults and
                     # the ProbeResults tab without any frontend changes.
+                    #
+                    # `defense_outcome` tells the UI which security outcome
+                    # this is: "stopped" = our defense caught the attack,
+                    # "missed" = Garak's detector caught the model being
+                    # fooled.  Both emit simulation.blocked but they are
+                    # opposite outcomes and the UI labels them differently.
                     await emit_event("simulation.blocked", {
                         "categories":      [normalized["category"]],
                         "decision_reason": normalized["description"],
-                        "correlation_id":  corr,
+                        "correlation_id":  attempt_corr,
                         "probe_name":      probe_name,
                         "severity":        normalized["severity"],
+                        "defense_outcome": raw.get("defense_outcome"),
                     })
                 else:
                     # Low-severity → simulation.allowed
                     await emit_event("simulation.allowed", {
                         "response_preview": normalized["description"],
-                        "correlation_id":   corr,
+                        "correlation_id":   attempt_corr,
                         "probe_name":       probe_name,
                         "severity":         normalized["severity"],
+                        "defense_outcome":  raw.get("defense_outcome"),
                     })
 
         # ── simulation.completed ──────────────────────────────────────────────

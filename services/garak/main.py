@@ -92,6 +92,32 @@ def _ensure_garak_config() -> None:
             _config.transient.reportfile    = io.StringIO()
 
             log.info("garak config initialised (run_id=%s)", _config.transient.run_id)
+
+            # ── Parallelism shim (task #25, ADR #1) ──────────────────────────
+            # Garak's probes/base._execute_all() uses `from multiprocessing
+            # import Pool` — a ProcessPool — when the generator declares
+            # parallel_capable=True AND parallel_attempts>1.  ProcessPool
+            # would fork worker processes that each hold their own copy of
+            # CPMPipelineGenerator, so guard metadata written to `_meta` in
+            # the worker never makes it back to the parent (where
+            # _run_probe_sync pulls it out after probe.probe() returns).
+            #
+            # ThreadPool has the same imap_unordered API but shares memory,
+            # so a single `_meta` dict protected by threading.Lock stays
+            # consistent.  Garak `import`s Pool *inside* the method body, so
+            # we patch `multiprocessing.Pool` globally — cheap and safe since
+            # garak-runner doesn't use multiprocessing for anything else.
+            if os.environ.get("GARAK_PARALLEL_USE_THREADS", "1") != "0":
+                try:
+                    import multiprocessing as _mp
+                    import multiprocessing.pool as _mp_pool
+                    _mp.Pool = _mp_pool.ThreadPool  # type: ignore[attr-defined]
+                    log.info(
+                        "patched multiprocessing.Pool → ThreadPool "
+                        "(keeps generator._meta shared across parallel attempts)"
+                    )
+                except Exception:
+                    log.exception("failed to patch multiprocessing.Pool — parallel runs may lose guard metadata")
         except Exception:
             log.exception("failed to initialise garak config — probes may crash")
         _garak_initialized = True
@@ -106,10 +132,19 @@ def _ensure_garak_config() -> None:
 # to avoid the heavyweight apikey.GetKey garak probe (which times out at 60s).
 
 _PROBE_ALIASES: dict[str, str] = {
-    "promptinject":  "dan.Dan_11_0",                          # Jailbreak / prompt injection
+    # dan.Dan_11_0 only ships a single monolithic jailbreak prompt, so with
+    # max_attempts=10 the Timeline only gets 1 card for promptinject.
+    # DanInTheWildFull ships ~666 real-world jailbreaks scraped from the wild;
+    # our prompt cap (_run_probe_sync) randomly samples max_attempts×oversample
+    # of them so we get payload variety without blowing the PROBE_TIMEOUT_S.
+    "promptinject":  "dan.DanInTheWildFull",                  # Jailbreak / prompt injection
     "tooluse":       "malwaregen.TopLevel",                   # Misuse / malware generation
     "encoding":      "encoding.InjectBase64",                 # Encoding attack
-    "multiturn":     "grandma.Win10",                         # Multi-turn social engineering
+    # grandma.Win10 only generates 6 near-duplicate prompts (2 templates × 3
+    # Windows SKUs), so Timeline shows the same role-play text over and over.
+    # grandma.Substances gives 2 templates × 5 different illicit substances =
+    # 10 visibly distinct prompts while keeping the grandma-role-play vector.
+    "multiturn":     "grandma.Substances",                    # Multi-turn social engineering
 }
 
 
@@ -227,8 +262,16 @@ class CPMPipelineGenerator:
     generations                 = 1
     max_tokens                  = 512
     temperature                 = 1.0
-    parallel_attempts           = 1
-    max_workers                 = 1
+    # Parallelism (task #25, ADR #1): Garak gates its native Pool dispatch in
+    # probes/base._execute_all() on `generator.parallel_capable` being truthy
+    # AND `parallel_attempts > 1`.  Setting True here flips the flag; the
+    # per-run knob is read from env vars in _run_probe_sync() so ops can
+    # dial concurrency without a code change.
+    parallel_capable            = True
+    # Default bumped 4 → 8 (task #27): at 4-wide concurrency encoding was
+    # first-yielding at 48s out of the 60s PROBE_TIMEOUT_S budget.
+    parallel_attempts           = int(os.environ.get("GARAK_PARALLEL_ATTEMPTS", "8"))
+    max_workers                 = int(os.environ.get("GARAK_MAX_WORKERS", "8"))
     soft_generations            = 1
     buff_count                  = 0
     extended_detectors: list    = []
@@ -238,6 +281,21 @@ class CPMPipelineGenerator:
         self.api_url         = api_url.rstrip("/")
         self.internal_secret = internal_secret
         self._meta: dict[str, dict] = {}
+        self._lock = _threading.Lock()
+
+    # ── Pickle support for garak's multiprocessing.Pool dispatch ─────────────
+    # threading.Lock cannot be pickled, so we must exclude it from __getstate__.
+    # On unpickle we create a fresh lock.  This only matters when Garak's
+    # parallel path actually uses multiprocessing.Pool; our _patch_garak_pool()
+    # shim swaps it for ThreadPool so _meta stays shared, but we keep pickle
+    # support in case Garak's default path is reintroduced.
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state.pop("_lock", None)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        self.__dict__.update(state)
         self._lock = _threading.Lock()
 
     @staticmethod
@@ -431,8 +489,6 @@ def _run_probe_sync(probe_name: str, max_attempts: int) -> list[dict[str, Any]]:
         # Compatibility shim: garak 0.14.x probes may be missing attributes
         # that the base class added in later patch releases.
         for _attr, _default in [
-            ('parallel_attempts', 1),
-            ('max_workers', 1),
             ('generations', 1),
             ('soft_generations', 1),
             ('buff_count', 0),
@@ -441,7 +497,67 @@ def _run_probe_sync(probe_name: str, max_attempts: int) -> list[dict[str, Any]]:
             if not hasattr(probe, _attr):
                 setattr(probe, _attr, _default)
 
+        # Parallelism override (task #25, ADR #1): even if the probe class
+        # declares its own parallel_attempts/max_workers, force them to the
+        # run-level values so operators can dial concurrency from env vars
+        # without a code change.  Base class default for encoding/other
+        # slow probes is 1, which serialises every payload variant and
+        # blows the 60s PROBE_TIMEOUT_S budget.
+        _par_attempts = int(os.environ.get("GARAK_PARALLEL_ATTEMPTS", "8"))
+        _par_workers  = int(os.environ.get("GARAK_MAX_WORKERS", "8"))
+        probe.parallel_attempts = _par_attempts
+        probe.max_workers       = _par_workers
+        log.info(
+            "probe %s: parallelism = %d attempts / %d workers (parallelisable=%s, generator.parallel_capable=%s)",
+            probe_name,
+            _par_attempts,
+            _par_workers,
+            getattr(probe, "parallelisable_attempts", None),
+            getattr(generator, "parallel_capable", None),
+        )
+
+        # Prompt-count cap (task #27): Garak's _execute_all() processes EVERY
+        # prompt in `probe.prompts` before returning — the outer for-loop's
+        # `if idx >= max_attempts: break` only trims the reported findings,
+        # not the work.  InjectBase64 ships 256 base64 payload variants;
+        # at ~6.5 it/s through the CPM pipeline that's ~40s of real work
+        # even at 8-wide concurrency, eating most of PROBE_TIMEOUT_S.
+        #
+        # Cap prompts at (max_attempts × oversample) to bound total work
+        # while preserving some payload variety beyond the first N.  Sample
+        # deterministically-randomly so we don't always test the same
+        # alphabetically-first variants.
+        _prompt_oversample = int(os.environ.get("GARAK_PROMPT_OVERSAMPLE", "4"))
+        _prompt_cap        = max(max_attempts * _prompt_oversample, 8)
+        if (
+            hasattr(probe, "prompts")
+            and probe.prompts
+            and len(probe.prompts) > _prompt_cap
+        ):
+            import random as _random
+            _original_n = len(probe.prompts)
+            _sampled_idxs = sorted(
+                _random.sample(range(_original_n), _prompt_cap)
+            )
+            probe.prompts = tuple(probe.prompts[i] for i in _sampled_idxs)
+            if hasattr(probe, "triggers") and probe.triggers:
+                probe.triggers = tuple(probe.triggers[i] for i in _sampled_idxs)
+            log.info(
+                "probe %s: capped prompts %d → %d (max_attempts=%d × oversample=%d)",
+                probe_name, _original_n, _prompt_cap,
+                max_attempts, _prompt_oversample,
+            )
+
         # ── 3. Run probe attempts ─────────────────────────────────────────────
+        # Diagnostic timers (task #23): garak 0.14.x InjectBase64 and other
+        # payload-mutation probes are suspected of doing ALL prompt mutation
+        # eagerly during `probe.probe()` setup, before yielding the first
+        # Attempt.  If the "entering loop" log never prints but the outer
+        # timeout fires, we know time is lost to setup — not per-attempt
+        # CPM overhead — and `max_attempts` is irrelevant because the body
+        # never runs.  Remove these logs after ADR #1 parallelism lands.
+        import time as _time
+        _probe_t0 = _time.monotonic()
         findings: list[dict[str, Any]] = []
 
         def _to_str(v: Any) -> str:
@@ -480,9 +596,19 @@ def _run_probe_sync(probe_name: str, max_attempts: int) -> list[dict[str, Any]]:
                 return v["text"]
             return str(v) if v else ""
 
+        log.info(
+            "probe %s: entering generator loop after %.2fs of setup",
+            probe_name, _time.monotonic() - _probe_t0,
+        )
+        _last_attempt_ts = _time.monotonic()
         for idx, attempt in enumerate(probe.probe(generator)):
             if idx >= max_attempts:
                 break
+            log.info(
+                "probe %s: attempt #%d yielded after %.2fs (since last attempt)",
+                probe_name, idx, _time.monotonic() - _last_attempt_ts,
+            )
+            _last_attempt_ts = _time.monotonic()
             passed   = getattr(attempt, "passed", True)
             notes    = getattr(attempt, "notes", {}) or {}
             score    = 0.0 if passed else 0.75
@@ -507,14 +633,26 @@ def _run_probe_sync(probe_name: str, max_attempts: int) -> list[dict[str, Any]]:
                 guard_reason   = notes.get("description", "")
                 guard_score    = score
 
+            # Translate Garak's in-house vocabulary at the boundary.
+            #
+            # Garak's convention: passed=True means "the probe's attack was
+            # defeated" (defense held) and passed=False means "the attack
+            # succeeded" (defense failed).  That is the opposite of the
+            # everyday English "the attack passed the defence" and confuses
+            # operators reading the UI.  We translate here once so downstream
+            # services, events, and UI code never see Pass/Fail again.
+            defense_outcome = "stopped" if passed else "missed"
+            synthetic_description = (
+                f"Defense stopped {probe_name} probe" if passed
+                else f"Defense missed {probe_name} probe"
+            )
+
             findings.append({
                 "category":    _infer_category(probe_name),
-                "description": (
-                    notes.get("description")
-                    or f"{'Pass' if passed else 'Fail'}: {probe_name}"
-                ),
+                "description": notes.get("description") or synthetic_description,
                 "score":  score,
                 "passed": passed,
+                "defense_outcome": defense_outcome,   # "stopped" | "missed"
                 "trace": {
                     "attempt_index":  idx,
                     "prompt":         raw_prompt,

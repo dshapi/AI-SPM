@@ -48,9 +48,23 @@ class _SimPayload:
 
 
 def _emit(producer, tenant_id: str, session_id: str, event_type: str,
-          payload: dict[str, Any], correlation_id: str = "") -> None:
+          payload: dict[str, Any], correlation_id: str = "",
+          timestamp: str | None = None) -> None:
+    """Emit to Kafka. When ``timestamp`` is provided, it is injected into the
+    payload so send_event's envelope merge uses it — this lets callers that
+    also emit the same event directly over WS (see routes/simulation.py
+    ``_ws_emit``) share one timestamp across both paths. Without that shared
+    value, the frontend dedup key fails to collide and each event renders
+    twice (see task #13, fix C)."""
     topic = _topic(tenant_id)
-    model = _SimPayload(payload)
+    # send_event merges envelope_extras FIRST then raw payload ON TOP
+    # (see platform_shared/kafka_utils.py::send_event). Injecting the
+    # timestamp into the payload therefore overrides the envelope's
+    # auto-generated one, which is exactly what we want here.
+    stamped_payload = dict(payload)
+    if timestamp is not None:
+        stamped_payload["timestamp"] = timestamp
+    model = _SimPayload(stamped_payload)
     send_event(
         producer, topic, model,
         event_type=event_type,
@@ -68,12 +82,13 @@ def publish_started(
     attack_type: str,
     execution_mode: str,
     tenant_id: str = "t1",
+    timestamp: str | None = None,
 ) -> None:
     _emit(producer, tenant_id, session_id, "simulation.started", {
         "prompt": prompt,
         "attack_type": attack_type,
         "execution_mode": execution_mode,
-    })
+    }, timestamp=timestamp)
 
 
 def publish_progress(
@@ -86,13 +101,14 @@ def publish_progress(
     probe_name: str = "",
     tenant_id: str = "t1",
     correlation_id: str = "",
+    timestamp: str | None = None,
 ) -> None:
     _emit(producer, tenant_id, session_id, "simulation.progress", {
         "step": step,
         "total": total,
         "message": message,
         "probe_name": probe_name,
-    }, correlation_id=correlation_id)
+    }, correlation_id=correlation_id, timestamp=timestamp)
 
 
 def publish_blocked(
@@ -104,6 +120,7 @@ def publish_blocked(
     correlation_id: str = "",
     tenant_id: str = "t1",
     explanation: dict[str, Any] | None = None,
+    timestamp: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "categories": categories,
@@ -112,7 +129,7 @@ def publish_blocked(
     if explanation is not None:
         payload["explanation"] = explanation
     _emit(producer, tenant_id, session_id, "simulation.blocked",
-          payload, correlation_id=correlation_id)
+          payload, correlation_id=correlation_id, timestamp=timestamp)
 
 
 def publish_allowed(
@@ -122,10 +139,11 @@ def publish_allowed(
     response_preview: str = "",
     correlation_id: str = "",
     tenant_id: str = "t1",
+    timestamp: str | None = None,
 ) -> None:
     _emit(producer, tenant_id, session_id, "simulation.allowed", {
         "response_preview": response_preview,
-    }, correlation_id=correlation_id)
+    }, correlation_id=correlation_id, timestamp=timestamp)
 
 
 def publish_completed(
@@ -134,8 +152,10 @@ def publish_completed(
     session_id: str,
     summary: dict[str, Any],
     tenant_id: str = "t1",
+    timestamp: str | None = None,
 ) -> None:
-    _emit(producer, tenant_id, session_id, "simulation.completed", {"summary": summary})
+    _emit(producer, tenant_id, session_id, "simulation.completed",
+          {"summary": summary}, timestamp=timestamp)
 
 
 def publish_error(
@@ -144,5 +164,7 @@ def publish_error(
     session_id: str,
     error_message: str,
     tenant_id: str = "t1",
+    timestamp: str | None = None,
 ) -> None:
-    _emit(producer, tenant_id, session_id, "simulation.error", {"error_message": error_message})
+    _emit(producer, tenant_id, session_id, "simulation.error",
+          {"error_message": error_message}, timestamp=timestamp)

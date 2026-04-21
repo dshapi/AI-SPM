@@ -82,3 +82,103 @@ class TestParseEdgeCases:
     def test_empty_string_returns_defaults(self):
         f = parse_llm_output("")
         assert f.should_open_case is False
+
+
+class TestEvidenceCoercion:
+    """
+    llama3.2:3b (and other small instruction-tuned models) occasionally emit
+    list-of-dicts where the prompt asked for list-of-strings, e.g.:
+
+        "evidence": [{"description": "Port 8096 is unexpected."}]
+
+    Before the coercion validator this blew up the whole fragment and we fell
+    back to generic defaults, losing all LLM narrative.  These tests lock in
+    graceful coercion.
+    """
+    def test_evidence_dict_with_description_is_flattened(self):
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"medium",'
+            '"evidence":[{"description":"Port 8096 is unexpected."},'
+            '{"description":"Port 4185 is unexpected."}],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.title == "T"             # fragment survived
+        assert len(f.evidence) == 2
+        assert f.evidence[0] == "Port 8096 is unexpected."
+        assert f.evidence[1] == "Port 4185 is unexpected."
+
+    def test_evidence_mixed_strings_and_dicts(self):
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"evidence":["already a string",'
+            '{"text":"from text key"},'
+            '{"detail":"from detail key"}],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.evidence == ["already a string", "from text key", "from detail key"]
+
+    def test_triggered_policies_dict_coerced(self):
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"triggered_policies":[{"policy":"pii_redact_v2"},"block_rule_v1.4"],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.triggered_policies == ["pii_redact_v2", "block_rule_v1.4"]
+
+    def test_recommended_actions_dict_coerced(self):
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"recommended_actions":[{"action":"escalate"},{"action":"block_session"}],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.recommended_actions == ["escalate", "block_session"]
+
+    def test_dict_with_no_string_keys_falls_back_to_json(self):
+        # No known string key — we don't want to drop the entry silently; stringify.
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"evidence":[{"foo":42,"bar":[1,2]}],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert len(f.evidence) == 1
+        # Compact JSON representation preserved so the operator still sees
+        # something instead of an empty list.
+        assert "foo" in f.evidence[0] and "42" in f.evidence[0]
+
+    def test_empty_dict_items_dropped(self):
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"evidence":["",{"description":""},"real evidence"],'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.evidence == ["real evidence"]
+
+    def test_single_string_instead_of_list_is_wrapped(self):
+        # Sometimes the model emits a single string where a list is expected.
+        raw = (
+            '```json\n'
+            '{"title":"T","hypothesis":"H","severity":"low",'
+            '"evidence":"just one piece of evidence",'
+            '"should_open_case":false}\n'
+            '```'
+        )
+        f = parse_llm_output(raw)
+        assert f.evidence == ["just one piece of evidence"]

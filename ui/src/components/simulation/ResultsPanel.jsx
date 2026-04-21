@@ -27,20 +27,26 @@
 import { useState, useEffect } from 'react'
 import {
   Target, Clock,
-  AlertTriangle, XCircle, Shield, ArrowRight,
+  AlertTriangle, XCircle,
   CheckCircle2, AlertCircle, Copy, Info,
-  ChevronRight, RefreshCw,
+  RefreshCw,
 } from 'lucide-react'
 import { cn }               from '../../lib/utils.js'
 import { Badge }            from '../ui/Badge.jsx'
-import { Button }           from '../ui/Button.jsx'
 import { Summary }          from './Summary.jsx'
-import { Timeline }         from './Timeline.jsx'
+// Timeline migrated to attempt-based rendering (see docs/refactor/garak-integration/
+// 02-frontend/TIMELINE_MIGRATION.md).  The new component lives in ui/src/simulation/
+// and consumes the same simulationState prop so this is a drop-in swap.  The
+// legacy components/simulation/Timeline.jsx + PhaseSection.jsx + TimelineNode.jsx
+// remain in the tree (unused by the live UI) because the existing test suite
+// still references them; they'll be retired once those tests are rewritten.
+import { Timeline }         from '../../simulation/Timeline.jsx'
 import { ExplainabilityTab } from './Explainability.jsx'
 import { TabEmpty }         from './EmptyState.jsx'
 import { RiskTrend }        from './RiskTrend.jsx'
-import { PhaseSection }     from './PhaseSection.jsx'
-import { groupByPhase, groupByPhaseAndProbe } from '../../lib/phaseGrouping.js'
+import { PolicyImpact }     from './PolicyImpact.jsx'
+import { ProbeResults }     from './ProbeResults.jsx'
+import { Recommendations }  from './Recommendations.jsx'
 
 // ── Tab configuration ─────────────────────────────────────────────────────────
 
@@ -85,13 +91,7 @@ const TRACE_CFG = {
   flagged:  { label: 'Flagged'  },
 }
 
-const POLICY_ACTION_CFG = {
-  BLOCK:    { badge: 'critical', icon: XCircle       },
-  ESCALATE: { badge: 'high',     icon: AlertTriangle },
-  FLAG:     { badge: 'high',     icon: AlertTriangle },
-  ALLOW:    { badge: 'success',  icon: CheckCircle2  },
-  SKIP:     { badge: 'neutral',  icon: ArrowRight    },
-}
+// POLICY_ACTION_CFG moved to PolicyImpact.jsx — the only consumer.
 
 const STAGE_RISK = {
   started: 10, progress: 50, blocked: 90, allowed: 30, error: 70, completed: 10,
@@ -279,98 +279,6 @@ function GarakOutputSummary({ events }) {
             <div className="text-[10px] text-gray-400 mt-0.5">{label}</div>
           </div>
         ))}
-      </div>
-    </div>
-  )
-}
-
-// ── ProbeResultsTab ───────────────────────────────────────────────────────────
-
-const OUTCOME_CFG = {
-  blocked:  { label: 'Blocked', bg: 'bg-red-50',     border: 'border-red-200',     dot: 'bg-red-500',     txt: 'text-red-700'     },
-  allowed:  { label: 'Allowed', bg: 'bg-emerald-50', border: 'border-emerald-200', dot: 'bg-emerald-500', txt: 'text-emerald-700' },
-  progress: { label: 'Running', bg: 'bg-amber-50',   border: 'border-amber-200',   dot: 'bg-amber-400',   txt: 'text-amber-700'   },
-  error:    { label: 'Error',   bg: 'bg-orange-50',  border: 'border-orange-200',  dot: 'bg-orange-500',  txt: 'text-orange-700'  },
-}
-
-function ProbeResultsTab({ events, status }) {
-  if (events.length === 0) {
-    return (
-      <TabEmpty
-        label={status === 'idle'
-          ? 'Run a Garak scan to see per-probe results.'
-          : 'Waiting for probe results…'}
-      />
-    )
-  }
-
-  // Reduce events to the highest-priority outcome per probe name
-  const PRIORITY = { blocked: 3, allowed: 3, error: 2, progress: 1 }
-  const probeMap = new Map()
-  for (const ev of events) {
-    const name = ev.details?.probe_name
-    if (!name) continue
-    const existing = probeMap.get(name)
-    if (!existing || (PRIORITY[ev.stage] ?? 0) >= (PRIORITY[existing.stage] ?? 0)) {
-      probeMap.set(name, ev)
-    }
-  }
-
-  const probes = Array.from(probeMap.entries())
-  if (probes.length === 0) return <TabEmpty label="No probe events yet…" />
-
-  const blocked = probes.filter(([, e]) => e.stage === 'blocked').length
-  const allowed = probes.filter(([, e]) => e.stage === 'allowed').length
-  const errors  = probes.filter(([, e]) => e.stage === 'error').length
-
-  return (
-    <div className="p-4 space-y-3">
-      {/* Summary strip */}
-      <div className="grid grid-cols-3 gap-2 mb-1">
-        {[
-          { label: 'Blocked', value: blocked, color: 'text-red-600',     bg: 'bg-red-50',     border: 'border-red-200'     },
-          { label: 'Allowed', value: allowed, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' },
-          { label: 'Errors',  value: errors,  color: 'text-orange-600',  bg: 'bg-orange-50',  border: 'border-orange-200'  },
-        ].map(({ label, value, color, bg, border }) => (
-          <div key={label} className={cn('rounded-xl border p-3 text-center', bg, border)}>
-            <div className={cn('text-[24px] font-black tabular-nums', color)}>{value}</div>
-            <div className="text-[9.5px] text-gray-400 font-medium mt-0.5">{label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Per-probe list */}
-      <div className="space-y-1.5">
-        {probes.map(([probeName, ev]) => {
-          const cfg   = OUTCOME_CFG[ev.stage] ?? OUTCOME_CFG.progress
-          const step  = ev.details?.step
-          const total = ev.details?.total
-          return (
-            <div
-              key={probeName}
-              className={cn('flex items-center gap-3 rounded-xl border px-3 py-2.5', cfg.bg, cfg.border)}
-            >
-              <span className={cn('w-2 h-2 rounded-full shrink-0', cfg.dot)} />
-              <div className="flex-1 min-w-0">
-                <p className="text-[11.5px] font-semibold text-gray-800 truncate">{probeName}</p>
-                {ev.details?.message && (
-                  <p className="text-[10px] text-gray-400 mt-0.5 truncate">{ev.details.message}</p>
-                )}
-              </div>
-              <div className="shrink-0 flex items-center gap-2">
-                {step != null && total != null && (
-                  <span className="text-[9.5px] text-gray-400 font-mono">{step}/{total}</span>
-                )}
-                <span className={cn(
-                  'text-[10px] font-bold px-2 py-0.5 rounded-full border',
-                  cfg.bg, cfg.border, cfg.txt,
-                )}>
-                  {cfg.label}
-                </span>
-              </div>
-            </div>
-          )
-        })}
       </div>
     </div>
   )
@@ -777,61 +685,14 @@ export function ResultsPanel({
         )}
 
         {/* ── Policy Impact ── */}
-        {activeTab === 'Policy Impact' && !result && (
-          <TabEmpty
-            label={status === 'running'
-              ? 'Evaluating policies…'
-              : 'Policy evaluation results will appear here after a simulation runs.'}
-          />
-        )}
-        {activeTab === 'Policy Impact' && result && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-gray-400">How each policy evaluated this request.</p>
-            {(result.policyImpact?.length ?? 0) === 0 ? (
-              <div className="text-center py-6 text-[12px] text-gray-400">
-                No policies triggered.
-              </div>
-            ) : (
-              result.policyImpact.map((pi, i) => {
-                const acfg = POLICY_ACTION_CFG[pi.action] ?? POLICY_ACTION_CFG.SKIP
-                return (
-                  <div
-                    key={i}
-                    className={cn(
-                      'rounded-xl border p-3.5 flex items-start gap-3',
-                      pi.severity === 'critical' ? 'bg-red-50/60 border-red-200'
-                        : pi.severity === 'high' ? 'bg-amber-50/60 border-amber-200'
-                        : 'bg-gray-50 border-gray-200',
-                    )}
-                  >
-                    <div className={cn(
-                      'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
-                      pi.severity === 'critical' ? 'bg-red-100'
-                        : pi.severity === 'high' ? 'bg-amber-100'
-                        : 'bg-gray-100',
-                    )}>
-                      <Shield
-                        size={14}
-                        className={
-                          pi.severity === 'critical' ? 'text-red-600'
-                          : pi.severity === 'high' ? 'text-amber-600'
-                          : 'text-gray-500'
-                        }
-                        strokeWidth={1.75}
-                      />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <span className="text-[12px] font-semibold text-gray-800">{pi.policy}</span>
-                        <Badge variant={acfg.badge}>{pi.action}</Badge>
-                      </div>
-                      <p className="text-[10.5px] text-gray-500 leading-snug">{pi.trigger}</p>
-                    </div>
-                  </div>
-                )
-              })
-            )}
-          </div>
+        {/*
+         * Delegated to PolicyImpact.jsx which uses resolvePolicyDecision() to
+         * NEVER render "Unknown".  Unresolved policies render as
+         * "⚠ Unresolved Policy / Fallback: <source>" so operators can always
+         * attribute the decision.
+         */}
+        {activeTab === 'Policy Impact' && (
+          <PolicyImpact result={result} status={status} />
         )}
 
         {/* ── Risk Analysis ── */}
@@ -952,45 +813,24 @@ export function ResultsPanel({
         )}
 
         {/* ── Recommendations ── */}
-        {activeTab === 'Recommendations' && !result && (
-          <TabEmpty
-            label={status === 'running'
-              ? 'Analyzing results for recommendations…'
-              : 'Recommendations will appear here after a simulation runs.'}
-          />
-        )}
-        {activeTab === 'Recommendations' && result && (
-          <div className="p-4 space-y-3">
-            <p className="text-[11px] text-gray-400">Suggested actions based on simulation results.</p>
-            {(result.recommendations?.length ?? 0) === 0 ? (
-              <div className="text-center py-6 text-[12px] text-gray-400">No recommendations.</div>
-            ) : (
-              result.recommendations.map((rec, i) => (
-                <div
-                  key={i}
-                  className="bg-white rounded-xl border border-gray-200 p-3.5 flex items-start gap-3"
-                >
-                  <div className="w-8 h-8 rounded-lg bg-gray-100 flex items-center justify-center shrink-0">
-                    <rec.icon size={14} className="text-gray-600" strokeWidth={1.75} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-[12px] font-semibold text-gray-800">{rec.label}</p>
-                    <p className="text-[10.5px] text-gray-500 mt-0.5 leading-snug">{rec.desc}</p>
-                  </div>
-                  {rec.action && (
-                    <Button variant="outline" size="sm" className="shrink-0 text-[10.5px] h-7 px-2.5">
-                      {rec.action}
-                    </Button>
-                  )}
-                </div>
-              ))
-            )}
-          </div>
+        {/*
+         * Delegated to Recommendations.jsx which reads Attempts via
+         * useRecommendations() and evaluates 4 rules: unresolved-policy,
+         * allowed-high-risk, inconsistent-enforcement, no-policy-coverage.
+         * Empty state renders "All clear — all probes behaved as expected."
+         */}
+        {activeTab === 'Recommendations' && (
+          <Recommendations simulationState={simulationState} />
         )}
 
         {/* ── Probe Results (Garak only) ── */}
+        {/*
+         * Aggregated stats per probe — blocked/allowed/error counts + avg risk.
+         * DOES NOT show prompts, responses, or traces; those live in
+         * Explainability per the tab-responsibility contract.
+         */}
         {activeTab === 'Probe Results' && (
-          <ProbeResultsTab events={simEvents} status={status} />
+          <ProbeResults simulationState={simulationState} status={status} />
         )}
 
         {/* ── Coverage (Garak only) ── */}

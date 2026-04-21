@@ -611,9 +611,20 @@ const GARAK_PROBES = [
   { id: 'multiturn',    label: 'Multi-turn' },
 ]
 
+// Probes excluded from the default selection because their Garak probe.probe()
+// iterator stalls beyond PROBE_TIMEOUT_S (60s) on the first __next__() call —
+// see task #23 diagnostic log.  The probe_error card (task #20) still surfaces
+// the failure honestly if an operator enables them manually, but defaulting
+// them OFF keeps the "Standard" profile fast and green out of the box.
+//
+// Empty after tasks #25 (parallelism) + #27 (prompt cap): encoding and
+// multiturn both now first-yield inside a few seconds.  Leave the set in
+// place so future slow probes can be guarded by flipping one id in.
+const GARAK_SLOW_PROBES = new Set()
+
 const GARAK_DEFAULT_CONFIG = {
   profile: 'Standard',
-  probes:  GARAK_PROBES.map(p => p.id),
+  probes:  GARAK_PROBES.map(p => p.id).filter(id => !GARAK_SLOW_PROBES.has(id)),
 }
 
 // ── SegmentedControl ───────────────────────────────────────────────────────────

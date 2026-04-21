@@ -37,12 +37,16 @@ export default function App() {
     })
   }, [])
 
-  // Refs for the character-drip typer — survive re-renders without stale closures
-  const charQueueRef  = useRef([])   // pending characters to drip
-  const displayedRef  = useRef('')   // what's currently shown
+  // Refs for the streaming display — survive re-renders without stale closures.
+  // We used to character-drip via setInterval, but each tick triggered a full
+  // ReactMarkdown re-render (~100-300ms), so the typer ran far slower than its
+  // 18ms schedule and long replies took a minute to trickle out.  The natural
+  // token stream already gives a typing feel, so we render each token directly
+  // via rAF-coalesced updates instead.
+  const displayedRef  = useRef('')   // full text shown so far
   const badgesRef     = useRef([])   // tool badges received so far
-  const timerRef      = useRef(null) // interval handle
-  const streamDoneRef = useRef(false)// has the SSE stream finished?
+  const rafRef        = useRef(null) // pending animation-frame handle
+  const pendingRef    = useRef(false)// a render is queued
 
   const buildDisplay = (text, streaming) => {
     const badgeLine = badgesRef.current.map(b => `\`${b}\``).join('  ')
@@ -50,23 +54,26 @@ export default function App() {
     updateLastAssistant(body, streaming)
   }
 
-  const startTyper = useCallback(() => {
-    if (timerRef.current) return
-    timerRef.current = setInterval(() => {
-      if (charQueueRef.current.length === 0) {
-        // Queue empty — if stream is done, finalize
-        if (streamDoneRef.current) {
-          clearInterval(timerRef.current)
-          timerRef.current = null
-          buildDisplay(displayedRef.current, false)
-          setLoading(false)
-        }
-        return
-      }
-      // Drip one character at a time
-      displayedRef.current += charQueueRef.current.shift()
-      buildDisplay(displayedRef.current, true)
-    }, 18) // ~55 chars/sec — feels like fast typing
+  // Coalesce bursts of tokens into a single render per animation frame.
+  // Without this, a fast LLM can fire tokens faster than React can reconcile,
+  // producing jank even on the happy path.
+  const scheduleRender = useCallback((streaming) => {
+    if (pendingRef.current) return
+    pendingRef.current = true
+    rafRef.current = requestAnimationFrame(() => {
+      pendingRef.current = false
+      rafRef.current = null
+      buildDisplay(displayedRef.current, streaming)
+    })
+  }, [updateLastAssistant])
+
+  const flushRender = useCallback((streaming) => {
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    pendingRef.current = false
+    buildDisplay(displayedRef.current, streaming)
   }, [updateLastAssistant])
 
   const handleSend = useCallback(async (text) => {
@@ -74,12 +81,11 @@ export default function App() {
     setError(null)
     if (!inChat) setInChat(true)
 
-    // Reset typer state for new message
-    charQueueRef.current  = []
-    displayedRef.current  = ''
-    badgesRef.current     = []
-    streamDoneRef.current = false
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+    // Reset streaming state for new message
+    displayedRef.current = ''
+    badgesRef.current    = []
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
+    pendingRef.current = false
 
     appendMessage('user', text)
     setLoading(true)
@@ -87,31 +93,27 @@ export default function App() {
 
     sendMessageStream(text, _sessionId, {
       onToken: (chunk) => {
-        // Push each character into the queue — typer drips them one by one
-        charQueueRef.current.push(...chunk.split(''))
-        startTyper()
+        // Append the token directly and coalesce renders via rAF.
+        displayedRef.current += chunk
+        scheduleRender(true)
       },
       onBadge: (badge) => {
         badgesRef.current.push(badge)
-        buildDisplay(displayedRef.current, true)
+        scheduleRender(true)
       },
       onDone: () => {
-        streamDoneRef.current = true
-        // If typer already drained the queue, finalize immediately
-        if (charQueueRef.current.length === 0) {
-          if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
-          buildDisplay(displayedRef.current, false)
-          setLoading(false)
-        }
+        flushRender(false)
+        setLoading(false)
       },
       onError: (e) => {
-        if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
+        if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null }
+        pendingRef.current = false
         updateLastAssistant(`⚠️ ${e.message}`, false, e.blockDetail || null)
         setError(e.message)
         setLoading(false)
       },
     })
-  }, [loading, inChat, appendMessage, updateLastAssistant, startTyper])
+  }, [loading, inChat, appendMessage, updateLastAssistant, scheduleRender, flushRender])
 
   const handleNewChat = useCallback(() => {
     setMessages([])

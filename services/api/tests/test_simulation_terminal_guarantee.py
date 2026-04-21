@@ -111,8 +111,13 @@ def capture_emits(sim_module):
     """
     emitted: list[tuple[str, dict]] = []
 
-    async def fake_emit(session_id, event_type, payload):
+    async def fake_emit(session_id, event_type, payload, **kwargs):
+        # Accept optional `timestamp=` / `correlation_id=` kwargs introduced by
+        # task #13 fix C (shared-timestamp across WS + Kafka paths).  The real
+        # _ws_emit now returns the ISO timestamp it stamped so callers can
+        # reuse it for publish_*; we return a deterministic stub for tests.
         emitted.append((event_type, payload))
+        return kwargs.get("timestamp") or "1970-01-01T00:00:00Z"
 
     async def fake_wait(session_id, timeout_s=None):
         return None

@@ -182,7 +182,10 @@ describe('ResultsPanel — idle state', () => {
   it('switches to Timeline tab and shows idle message', () => {
     renderPanel()
     fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
-    expect(screen.getByText(/Run a simulation to see events here/i)).toBeInTheDocument()
+    // Attempt-based Timeline copy: "Run a simulation to see attempts here."
+    // Legacy copy was "events" — accept either so the assertion is stable
+    // across the rollout.
+    expect(screen.getByText(/Run a simulation to see (events|attempts) here/i)).toBeInTheDocument()
   })
 })
 
@@ -475,7 +478,9 @@ describe('ResultsPanel — Timeline tab', () => {
       simulationState: makeSimState({ status: 'completed' }),
     })
     fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
-    expect(screen.getByText(/No events recorded|Run a simulation to see events/i)).toBeInTheDocument()
+    // Attempt-based Timeline: "No attempts recorded." Legacy was "No events
+    // recorded". Accept either so this assertion doesn't flip on copy changes.
+    expect(screen.getByText(/No (events|attempts) recorded|Run a simulation to see (events|attempts)/i)).toBeInTheDocument()
   })
 
   it('renders phase sections when events exist', () => {
@@ -483,7 +488,9 @@ describe('ResultsPanel — Timeline tab', () => {
       simulationState: makeSimState({ status: 'running', connectionStatus: 'connected', simEvents: MOCK_EVENTS }),
     })
     fireEvent.click(screen.getByRole('button', { name: /^Timeline/ }))
-    expect(screen.getByTestId('phase-System')).toBeInTheDocument()
+    // MOCK_EVENTS has no probe_name, so phase inference returns 'other'.
+    // The new PhaseSection emits data-testid={`phase-section-${phase}`}.
+    expect(screen.getByTestId('phase-section-other')).toBeInTheDocument()
   })
 
   it('shows LIVE status label when running', () => {

@@ -27,6 +27,82 @@ _VALID_SEVERITIES = {"low", "medium", "high", "critical"}
 _DEFAULT_SEVERITY  = "medium"
 
 
+_STRING_KEY_PRIORITY = (
+    "description", "detail", "details", "text", "message",
+    "evidence", "summary", "action", "policy", "name",
+)
+
+
+def _coerce_item_to_string(item: Any) -> Optional[str]:
+    """
+    Coerce one list element into a non-empty string.
+
+    Small instruction-tuned models (e.g. llama3.2:3b) like to "help" by wrapping
+    string entries in {"description": "..."} or {"action": "..."} objects even
+    when the prompt asks for plain strings.  Rather than rejecting the whole
+    payload and falling back to generic defaults, accept any reasonable shape
+    and extract the most string-like field.
+
+    Returns None if no usable string can be produced, so the caller can drop
+    empty entries instead of surfacing '{}'.
+    """
+    if item is None:
+        return None
+    if isinstance(item, str):
+        s = item.strip()
+        return s or None
+    if isinstance(item, dict):
+        # If the dict uses a known string-priority key, honor its value — even
+        # an empty value means "operator had nothing to say here", so we drop
+        # the item rather than falling through to JSON-stringify the whole
+        # dict.  Only when NO known string-priority key is present do we fall
+        # back to stringifying the dict.
+        for key in _STRING_KEY_PRIORITY:
+            if key in item:
+                v = item.get(key)
+                if isinstance(v, str):
+                    s = v.strip()
+                    return s if s else None
+                # Non-string value under a string-priority key — treat as drop.
+                return None
+        # No known key — try any string value before stringifying the dict.
+        for v in item.values():
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        # Last resort: compact JSON so we preserve some information instead of
+        # dropping the entry entirely.
+        try:
+            return json.dumps(item, separators=(",", ":"), ensure_ascii=False)[:500]
+        except Exception:
+            return None
+    # Numbers, bools, etc. — stringify.
+    try:
+        s = str(item).strip()
+        return s or None
+    except Exception:
+        return None
+
+
+def _coerce_string_list(v: Any) -> List[str]:
+    """Coerce whatever the LLM emitted into a list[str], dropping empties."""
+    if v is None:
+        return []
+    if isinstance(v, (str, dict)):
+        # Single value emitted instead of a list — wrap it.
+        coerced = _coerce_item_to_string(v)
+        return [coerced] if coerced else []
+    if isinstance(v, list):
+        out: List[str] = []
+        for item in v:
+            coerced = _coerce_item_to_string(item)
+            if coerced:
+                out.append(coerced)
+        return out
+    # Fallback — anything else, stringify.
+    coerced = _coerce_item_to_string(v)
+    return [coerced] if coerced else []
+
+
 class LLMFragment(BaseModel):
     """
     The subset of Finding fields that the LLM is allowed to populate.
@@ -50,6 +126,15 @@ class LLMFragment(BaseModel):
             return str(v).lower()
         logger.warning("LLM produced invalid severity %r — using default %r", v, _DEFAULT_SEVERITY)
         return _DEFAULT_SEVERITY
+
+    @field_validator("evidence", "triggered_policies", "recommended_actions", mode="before")
+    @classmethod
+    def _coerce_string_list_fields(cls, v: Any) -> List[str]:
+        # Small models (llama3.2:3b) sometimes emit list-of-dicts where a
+        # list-of-strings is expected.  Coerce instead of rejecting — losing
+        # the narrative in a fallback is worse than accepting a slightly
+        # messier string.
+        return _coerce_string_list(v)
 
     model_config = {"extra": "ignore"}   # silently drop risk_score, confidence, etc.
 

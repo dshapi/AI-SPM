@@ -95,10 +95,10 @@ risk_score or confidence (those are computed externally).
   "asset": "<specific agent/model/system name if identifiable, otherwise 'Threat Hunting AI Agent'>",
   "environment": "<production | staging | dev, or 'unknown'>",
   "evidence": [
-    "<string describing each piece of supporting evidence>"
+    "<plain string — one sentence per item. DO NOT wrap items in objects like {\"description\": ...}. Each array element MUST be a JSON string.>"
   ],
   "triggered_policies": [
-    "<policy name or OPA path that fired>"
+    "<plain string — policy name or OPA path that fired. NOT an object.>"
   ],
   "policy_signals": [
     {
