@@ -6,3 +6,4 @@
 # Keep the directory in the tree via .gitkeep, ignore its contents.
 /services/spm_api/models/*
 !/services/spm_api/models/.gitkeep
+/.venv/

@@ -15,7 +15,7 @@ import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { ResultsPanel }  from '../../components/simulation/ResultsPanel.jsx'
 import { createSession, fetchSessionEvents } from '../../api/simulationApi.js'
-import { useSimulationState } from '../../hooks/useSimulationState.js'
+import { useSimulationContext } from '../../context/SimulationContext.jsx'
 import { buildResultFromSimEvents } from '../../lib/buildResultFromSimEvents.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
@@ -1117,7 +1117,11 @@ export default function Simulation() {
   const [resultB,     setResultB]    = useState(null)   // after  (compare mode)
 
   // ── Unified simulation lifecycle state ────────────────────────────────────
-  const { simState, startSimulation, resetSimulation } = useSimulationState()
+  // Consume the SHARED instance from AppShell so events produced here are
+  // visible to Lineage / Alerts across route transitions.  Calling
+  // useSimulationState() here directly would create a second, isolated
+  // state — the old bug that kept Lineage permanently empty.
+  const { simState, startSimulation, resetSimulation } = useSimulationContext()
   const {
     status:          simStatus,
     steps:           simSteps,

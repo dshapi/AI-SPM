@@ -39,8 +39,11 @@ export function AppShell() {
 
   // ── Hoist simulation state to layout level ──
   // This ensures simEvents persist across route changes.
-  // Lineage, Alerts, and other routes will consume via useSimulationContext()
-  const { simState } = useSimulationState()
+  // Lineage, Alerts, Simulation and any other routes consume via
+  // useSimulationContext() — they MUST NOT call useSimulationState()
+  // locally, or they'll get an independent state instance and the events
+  // they generate will never reach other routes (broke Lineage previously).
+  const { simState, startSimulation, resetSimulation } = useSimulationState()
 
   // Scroll the main content area back to the top on every route change.
   // Without this, navigating from a scrolled page (e.g. Overview scrolled
@@ -51,7 +54,14 @@ export function AppShell() {
   }, [pathname])
 
   return (
-    <SimulationContext.Provider value={{ simEvents: simState.simEvents }}>
+    <SimulationContext.Provider
+      value={{
+        simEvents: simState.simEvents,
+        simState,
+        startSimulation,
+        resetSimulation,
+      }}
+    >
       <div className="flex h-screen overflow-hidden bg-[#f6f7fb]">
 
         {/* Far-left brand accent strip */}
