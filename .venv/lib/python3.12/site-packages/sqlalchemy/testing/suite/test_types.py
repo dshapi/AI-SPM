@@ -1,5 +1,5 @@
 # testing/suite/test_types.py
-# Copyright (C) 2005-2026 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -299,7 +299,6 @@ class ArrayTest(_LiteralRoundTripFixture, fixtures.TablesTest):
 
 class BinaryTest(_LiteralRoundTripFixture, fixtures.TablesTest):
     __backend__ = True
-    __requires__ = ("binary_literals",)
 
     @classmethod
     def define_tables(cls, metadata):
@@ -432,9 +431,7 @@ class StringTest(_LiteralRoundTripFixture, fixtures.TestBase):
         connection.execute(t.insert(), [{"x": "AB"}, {"x": "BC"}, {"x": "AC"}])
 
         eq_(
-            connection.scalars(
-                select(t.c.x).where(t.c.x.like(expr)).order_by(t.c.x)
-            ).all(),
+            connection.scalars(select(t.c.x).where(t.c.x.like(expr))).all(),
             expected,
         )
 
@@ -1486,7 +1483,6 @@ class JSONTest(_LiteralRoundTripFixture, fixtures.TablesTest):
 
         return datatype, compare_value, p_s
 
-    @testing.requires.legacy_unconditional_json_extract
     @_index_fixtures(False)
     def test_index_typed_access(self, datatype, value):
         data_table = self.tables.data_table
@@ -1508,7 +1504,6 @@ class JSONTest(_LiteralRoundTripFixture, fixtures.TablesTest):
             eq_(roundtrip, compare_value)
             is_(type(roundtrip), type(compare_value))
 
-    @testing.requires.legacy_unconditional_json_extract
     @_index_fixtures(True)
     def test_index_typed_comparison(self, datatype, value):
         data_table = self.tables.data_table
@@ -1533,7 +1528,6 @@ class JSONTest(_LiteralRoundTripFixture, fixtures.TablesTest):
             # make sure we get a row even if value is None
             eq_(row, (compare_value,))
 
-    @testing.requires.legacy_unconditional_json_extract
     @_index_fixtures(True)
     def test_path_typed_comparison(self, datatype, value):
         data_table = self.tables.data_table

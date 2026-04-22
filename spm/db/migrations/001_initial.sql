@@ -3,27 +3,45 @@
 
 -- ── Enums ────────────────────────────────────────────────────────────────────
 
-CREATE TYPE model_provider AS ENUM ('local', 'openai', 'anthropic', 'other');
-CREATE TYPE model_risk_tier AS ENUM ('minimal', 'limited', 'high', 'unacceptable');
+CREATE TYPE model_provider AS ENUM (
+    'local', 'openai', 'anthropic', 'other',
+    'aws', 'azure', 'gcp', 'internal'
+);
+CREATE TYPE model_risk_tier AS ENUM (
+    'minimal', 'limited', 'high', 'unacceptable',
+    'low', 'medium', 'critical'
+);
 CREATE TYPE model_status AS ENUM ('registered', 'under_review', 'approved', 'deprecated', 'retired');
+CREATE TYPE model_type AS ENUM (
+    'llm', 'open_source_llm', 'embedding_model',
+    'audio_model', 'vision_model', 'multimodal', 'other'
+);
+CREATE TYPE policy_coverage AS ENUM ('full', 'partial', 'none');
 CREATE TYPE compliance_status AS ENUM ('satisfied', 'partial', 'not_satisfied');
 
 -- ── Tables ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE model_registry (
-    model_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name         TEXT NOT NULL,
-    version      TEXT NOT NULL,
-    provider     model_provider NOT NULL DEFAULT 'local',
-    purpose      TEXT,
-    risk_tier    model_risk_tier NOT NULL DEFAULT 'limited',
-    tenant_id    TEXT NOT NULL DEFAULT 'global',
-    status       model_status NOT NULL DEFAULT 'registered',
-    approved_by  TEXT,
-    approved_at  TIMESTAMPTZ,
-    ai_sbom      JSONB DEFAULT '{}',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    model_id      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name          TEXT NOT NULL,
+    version       TEXT NOT NULL,
+    provider      model_provider NOT NULL DEFAULT 'local',
+    purpose       TEXT,
+    risk_tier     model_risk_tier NOT NULL DEFAULT 'limited',
+    model_type    model_type,
+    -- Inventory-table columns (surfaced as Owner / Policy / Alerts / Last Seen)
+    owner         TEXT,
+    policy_status policy_coverage,
+    alerts_count  INT NOT NULL DEFAULT 0,
+    last_seen_at  TIMESTAMPTZ,
+    tenant_id     TEXT NOT NULL DEFAULT 'global',
+    status        model_status NOT NULL DEFAULT 'registered',
+    approved_by   TEXT,
+    approved_at   TIMESTAMPTZ,
+    notes         TEXT,
+    ai_sbom       JSONB DEFAULT '{}',
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT uq_model_name_version_tenant UNIQUE (name, version, tenant_id)
 );
 

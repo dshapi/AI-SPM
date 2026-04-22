@@ -23,18 +23,22 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+import hashlib
+import pathlib
+
 import httpx
 import requests
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from spm.db.models import (
     ComplianceEvidence, ModelRegistry,
-    ModelStatus, ModelProvider, ModelRiskTier,
+    ModelStatus, ModelProvider, ModelRiskTier, ModelType, PolicyCoverage,
 )
 from spm.db.session import get_db, get_engine
 from spm.db.models import Base
@@ -52,6 +56,19 @@ FREEZE_CONTROLLER_URL = os.getenv("FREEZE_CONTROLLER_URL", "http://freeze-contro
 JWT_PUBLIC_KEY_PATH   = os.getenv("JWT_PUBLIC_KEY_PATH", "/keys/public.pem")
 KAFKA_BOOTSTRAP       = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092")
 SPM_SERVICE_JWT       = os.getenv("SPM_SERVICE_JWT", "")
+# Default upload dir lives under the spm_api service directory, e.g.
+#   services/spm_api/models
+# This keeps uploaded files co-located with the service code and avoids
+# taking a dependency on /data/ mount points.  Override with MODEL_UPLOAD_DIR
+# (absolute path) when running containerised with a volume mount.
+# NOTE: this directory is listed in the repo's .gitignore so uploaded model
+# artefacts never end up in git.
+_SERVICE_DIR          = pathlib.Path(__file__).resolve().parent
+MODEL_UPLOAD_DIR      = os.getenv(
+    "MODEL_UPLOAD_DIR",
+    str(_SERVICE_DIR / "models"),
+)
+MODEL_UPLOAD_MAX_MB   = int(os.getenv("MODEL_UPLOAD_MAX_MB", "8192"))  # 8 GB default cap
 
 
 # ── JWT auth ─────────────────────────────────────────────────────────────────
@@ -95,6 +112,33 @@ def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
     return claims
 
 
+def _tenant_from_claims(claims: Dict, fallback: str = "global") -> str:
+    """
+    Resolve tenant_id from JWT claims.  System is single-tenant today, but we
+    honour whatever the token carries so an org-aware token doesn't silently
+    land rows in the wrong tenant.  Falls back to `fallback` when nothing is
+    present.
+    """
+    return (
+        claims.get("tenant_id")
+        or claims.get("tenant")
+        or claims.get("org_id")
+        or fallback
+    )
+
+
+# Risk tier thresholds keyed off alerts_count.  Matches the ladder the user
+# defined for the Inventory UI: 0=Low, 1–2=Medium, 3–5=High, 6+=Critical.
+def _risk_tier_from_alerts(alerts: int) -> ModelRiskTier:
+    if alerts <= 0:
+        return ModelRiskTier.low
+    if alerts <= 2:
+        return ModelRiskTier.medium
+    if alerts <= 5:
+        return ModelRiskTier.high
+    return ModelRiskTier.critical
+
+
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
 class ModelCreate(BaseModel):
@@ -103,9 +147,15 @@ class ModelCreate(BaseModel):
     provider: str = "local"
     purpose: Optional[str] = None
     risk_tier: str = "limited"
-    tenant_id: str = "global"
+    model_type: Optional[str] = None
+    # Inventory-table fields
+    owner: Optional[str] = None
+    policy_status: Optional[str] = None
+    alerts_count: int = 0
+    tenant_id: Optional[str] = None   # derived from JWT when omitted
     status: str = "registered"
     approved_by: Optional[str] = None
+    notes: Optional[str] = None
     ai_sbom: Dict[str, Any] = {}
 
 
@@ -116,27 +166,47 @@ class ModelResponse(BaseModel):
     provider: str
     purpose: Optional[str]
     risk_tier: str
+    model_type: Optional[str]
+    # Inventory-table fields
+    owner: Optional[str]
+    policy_status: Optional[str]
+    alerts_count: int
+    last_seen_at: Optional[str]
     tenant_id: str
     status: str
     approved_by: Optional[str]
     approved_at: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
+    notes: Optional[str] = None
+    ai_sbom: Dict[str, Any] = {}
 
     @classmethod
     def from_orm(cls, m: ModelRegistry) -> "ModelResponse":
+        # Always derive risk_tier from the current alerts_count so the UI
+        # chip stays in lockstep with alert volume — the stored `risk_tier`
+        # enum value is treated as a floor that operators can raise, never
+        # lower, but at registration time we report the computed tier.
+        computed_risk = _risk_tier_from_alerts(m.alerts_count or 0)
         return cls(
             model_id=str(m.model_id),
             name=m.name, version=m.version,
             provider=m.provider.value if m.provider else "local",
             purpose=m.purpose,
-            risk_tier=m.risk_tier.value if m.risk_tier else "limited",
+            risk_tier=computed_risk.value,
+            model_type=m.model_type.value if m.model_type else None,
+            owner=m.owner,
+            policy_status=m.policy_status.value if m.policy_status else None,
+            alerts_count=m.alerts_count or 0,
+            last_seen_at=m.last_seen_at.isoformat() if m.last_seen_at else None,
             tenant_id=m.tenant_id,
             status=m.status.value if m.status else "registered",
             approved_by=m.approved_by,
             approved_at=m.approved_at.isoformat() if m.approved_at else None,
             created_at=m.created_at.isoformat() if m.created_at else None,
             updated_at=m.updated_at.isoformat() if m.updated_at else None,
+            notes=getattr(m, "notes", None),
+            ai_sbom=m.ai_sbom or {},
         )
 
 
@@ -156,6 +226,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="AI SPM API", version="1.0.0", lifespan=lifespan)
 
+# CORS — allow the admin UI (vite dev server) to call this API directly if
+# needed. In production, the UI routes through a proxy and this is a no-op.
+_cors_origins = os.getenv(
+    "SPM_API_CORS_ORIGINS",
+    "http://localhost:3001,http://127.0.0.1:3001",
+).split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins if o.strip()],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # ── Health ─────────────────────────────────────────────────────────────────────
 
@@ -166,31 +250,279 @@ async def health():
 
 # ── Model Registry ─────────────────────────────────────────────────────────────
 
+def _coerce_enum(enum_cls, value, default):
+    """Return enum_cls(value), or `default` if value is None/empty/invalid."""
+    if value is None or value == "":
+        return default
+    try:
+        return enum_cls(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {enum_cls.__name__} value: {value!r}",
+        )
+
+
+async def _insert_model_row(
+    db: AsyncSession,
+    *,
+    name: str,
+    version: str,
+    provider: ModelProvider,
+    risk_tier: ModelRiskTier,
+    status_val: ModelStatus,
+    model_type: Optional[ModelType],
+    purpose: Optional[str],
+    owner: Optional[str],
+    policy_status: Optional[PolicyCoverage],
+    alerts_count: int,
+    tenant_id: str,
+    approved_by: Optional[str],
+    notes: Optional[str],
+    ai_sbom: Dict[str, Any],
+) -> ModelRegistry:
+    """
+    Insert a new model row.  Raises HTTP 409 if (name, version, tenant_id) is
+    already taken — the UI shows a "this model already exists, bump the
+    version" dialog in that case.
+    """
+    # Explicit duplicate check first so we can return a structured 409
+    # before hitting the DB-level unique constraint.
+    existing = await db.execute(
+        select(ModelRegistry).where(
+            ModelRegistry.name == name,
+            ModelRegistry.version == version,
+            ModelRegistry.tenant_id == tenant_id,
+        )
+    )
+    if existing.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "model_already_exists",
+                "message": (
+                    f"A model named {name!r} with version {version!r} is already "
+                    f"registered in tenant {tenant_id!r}. Bump the version and try again."
+                ),
+                "name": name,
+                "version": version,
+                "tenant_id": tenant_id,
+            },
+        )
+
+    now_ts = datetime.now(tz=timezone.utc)
+    row = ModelRegistry(
+        name=name, version=version, provider=provider,
+        purpose=purpose, risk_tier=risk_tier, model_type=model_type,
+        owner=owner, policy_status=policy_status,
+        alerts_count=alerts_count or 0,
+        last_seen_at=now_ts,            # registration is itself a "sighting"
+        tenant_id=tenant_id, status=status_val,
+        approved_by=approved_by,
+        approved_at=now_ts if approved_by else None,
+        ai_sbom=ai_sbom or {},
+    )
+    # `notes` column may not exist on older DBs that haven't run migration 005.
+    if notes is not None and hasattr(ModelRegistry, "notes"):
+        row.notes = notes
+    db.add(row)
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Race: another writer inserted the same (name, version, tenant) between
+        # our pre-check and commit.  Surface the same structured 409.
+        await db.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "model_already_exists",
+                "message": (
+                    f"A model named {name!r} with version {version!r} is already "
+                    f"registered in tenant {tenant_id!r}. Bump the version and try again."
+                ),
+                "name": name,
+                "version": version,
+                "tenant_id": tenant_id,
+            },
+        )
+    await db.refresh(row)
+    return row
+
+
 @app.post("/models", status_code=201)
 async def register_model(
     body: ModelCreate,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    claims: Dict = Depends(require_admin),
 ) -> ModelResponse:
-    """Register a model (upsert on name+version+tenant_id)."""
-    status_val   = ModelStatus(body.status) if body.status else ModelStatus.registered
-    provider_val = ModelProvider(body.provider) if body.provider else ModelProvider.local
-    risk_val     = ModelRiskTier(body.risk_tier) if body.risk_tier else ModelRiskTier.limited
-
-    stmt = pg_insert(ModelRegistry).values(
-        name=body.name, version=body.version, provider=provider_val,
-        purpose=body.purpose, risk_tier=risk_val, tenant_id=body.tenant_id,
-        status=status_val, approved_by=body.approved_by,
-        approved_at=datetime.now(tz=timezone.utc) if body.approved_by else None,
+    """Register a new model. Returns 409 on (name, version, tenant) collision."""
+    tenant_id = body.tenant_id or _tenant_from_claims(claims)
+    # Initial risk is derived from alerts_count; ignore anything the caller
+    # sent so there's one source of truth.
+    initial_risk = _risk_tier_from_alerts(body.alerts_count or 0)
+    row = await _insert_model_row(
+        db,
+        name=body.name, version=body.version,
+        provider=_coerce_enum(ModelProvider, body.provider, ModelProvider.local),
+        risk_tier=initial_risk,
+        status_val=_coerce_enum(ModelStatus, body.status, ModelStatus.registered),
+        model_type=_coerce_enum(ModelType, body.model_type, None) if body.model_type else None,
+        purpose=body.purpose,
+        owner=body.owner,
+        policy_status=_coerce_enum(PolicyCoverage, body.policy_status, None) if body.policy_status else None,
+        alerts_count=body.alerts_count or 0,
+        tenant_id=tenant_id,
+        approved_by=body.approved_by,
+        notes=body.notes,
         ai_sbom=body.ai_sbom,
-    ).on_conflict_do_update(
-        constraint="uq_model_name_version_tenant",
-        set_={"updated_at": datetime.now(tz=timezone.utc)},
-    ).returning(ModelRegistry)
+    )
+    return ModelResponse.from_orm(row)
 
-    result = await db.execute(stmt)
-    await db.commit()
-    row = result.scalar_one()
+
+# ── Upload endpoint (multipart: metadata + optional model artifact file) ──────
+
+# Reasonable set of extensions for model artifacts; we don't enforce this, but
+# we sanitise the filename against it so an attacker can't upload arbitrary
+# executables with the same filename.
+_ALLOWED_MODEL_EXTS = {
+    ".safetensors", ".gguf", ".ggml", ".bin", ".onnx", ".pt", ".pth",
+    ".ckpt", ".h5", ".tflite", ".pkl", ".tar", ".zip", ".npz", ".msgpack",
+}
+
+
+def _safe_filename(raw: str) -> str:
+    """Strip any path components and normalise whitespace from an uploaded filename."""
+    stem = pathlib.PurePosixPath(raw).name
+    stem = stem.replace("\\", "").strip()
+    # Drop characters that are never useful in a filename on common filesystems
+    return "".join(c for c in stem if c.isalnum() or c in ("-", "_", ".", "+"))
+
+
+async def _persist_upload(file: UploadFile) -> Dict[str, Any]:
+    """
+    Stream `file` to disk under MODEL_UPLOAD_DIR, enforce a size cap, and
+    return a dict suitable for embedding into `ai_sbom["artifact"]`.
+    """
+    upload_dir = pathlib.Path(MODEL_UPLOAD_DIR)
+    upload_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_filename(file.filename or "model.bin") or "model.bin"
+    # Prefix with a UUID so two uploads with the same filename don't collide
+    stored_name = f"{uuid.uuid4().hex}_{safe_name}"
+    target = upload_dir / stored_name
+
+    max_bytes = MODEL_UPLOAD_MAX_MB * 1024 * 1024
+    hasher = hashlib.sha256()
+    written = 0
+    try:
+        with target.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1 MiB
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    out.close()
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Uploaded file exceeds {MODEL_UPLOAD_MAX_MB} MB limit",
+                    )
+                hasher.update(chunk)
+                out.write(chunk)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Best-effort cleanup on any IO failure
+        target.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to store upload: {e}")
+
+    ext = pathlib.Path(safe_name).suffix.lower()
+    return {
+        "filename":      safe_name,
+        "stored_name":   stored_name,
+        "storage_path":  str(target),
+        "size_bytes":    written,
+        "sha256":        hasher.hexdigest(),
+        "content_type":  file.content_type or "application/octet-stream",
+        "extension":     ext,
+        "extension_recognized": ext in _ALLOWED_MODEL_EXTS,
+        "uploaded_at":   datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+@app.post("/models/upload", status_code=201)
+async def register_model_with_file(
+    name:          str           = Form(...),
+    version:       str           = Form("1.0.0"),
+    provider:      str           = Form("local"),
+    risk_tier:     str           = Form("limited"),  # accepted but ignored — derived from alerts
+    model_type:    Optional[str] = Form(None),
+    purpose:       Optional[str] = Form(None),
+    owner:         Optional[str] = Form(None),
+    policy_status: Optional[str] = Form(None),
+    alerts_count:  int           = Form(0),
+    tenant_id:     Optional[str] = Form(None),       # derived from JWT when omitted
+    status:        str           = Form("registered"),
+    approved_by:   Optional[str] = Form(None),
+    notes:         Optional[str] = Form(None),
+    linked_policies: Optional[str] = Form(None),     # JSON array of policy ids
+    ai_sbom:       Optional[str] = Form(None),       # JSON string; optional extra metadata
+    file:          Optional[UploadFile] = File(None),
+    db: AsyncSession = Depends(get_db),
+    claims: Dict = Depends(require_admin),
+) -> ModelResponse:
+    """
+    Register a model via multipart/form-data, with an optional model file.
+
+    The file (if provided) is streamed to MODEL_UPLOAD_DIR (defaults to
+    <service-dir>/models), sha256'd, and its metadata is embedded in
+    the row's ai_sbom under the "artifact" key.  Returns 409 on duplicate.
+    """
+    effective_tenant = tenant_id or _tenant_from_claims(claims)
+
+    # Parse optional ai_sbom JSON blob
+    sbom: Dict[str, Any] = {}
+    if ai_sbom:
+        try:
+            parsed = json.loads(ai_sbom)
+            if isinstance(parsed, dict):
+                sbom = parsed
+            else:
+                raise ValueError("ai_sbom must be a JSON object")
+        except (ValueError, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid ai_sbom JSON: {e}")
+
+    # Parse linked_policies list (policy ids from CPM)
+    if linked_policies:
+        try:
+            parsed_lp = json.loads(linked_policies)
+            if not isinstance(parsed_lp, list):
+                raise ValueError("linked_policies must be a JSON array")
+            sbom["linked_policies"] = [str(p) for p in parsed_lp]
+        except (ValueError, json.JSONDecodeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid linked_policies JSON: {e}")
+
+    # Persist file first — if it fails we don't want a half-registered row
+    if file is not None and file.filename:
+        sbom["artifact"] = await _persist_upload(file)
+
+    row = await _insert_model_row(
+        db,
+        name=name, version=version,
+        provider=_coerce_enum(ModelProvider, provider, ModelProvider.local),
+        risk_tier=_risk_tier_from_alerts(alerts_count or 0),
+        status_val=_coerce_enum(ModelStatus, status, ModelStatus.registered),
+        model_type=_coerce_enum(ModelType, model_type, None) if model_type else None,
+        purpose=purpose,
+        owner=owner,
+        policy_status=_coerce_enum(PolicyCoverage, policy_status, None) if policy_status else None,
+        alerts_count=alerts_count or 0,
+        tenant_id=effective_tenant,
+        approved_by=approved_by,
+        notes=notes,
+        ai_sbom=sbom,
+    )
     return ModelResponse.from_orm(row)
 
 

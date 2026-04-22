@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState, useMemo, useRef } from 'react'
 import { useNavigate, useParams, useLocation } from 'react-router-dom'
 import {
   Search, SlidersHorizontal, LayoutGrid, List,
@@ -7,6 +7,7 @@ import {
   Shield, ShieldAlert, ShieldCheck, ShieldOff,
   User, Cloud, Clock, ArrowUpRight,
   CheckCircle2, XCircle, AlertCircle, Share2,
+  Upload, FileUp, Loader2,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
 import { useFilterParams } from '../../hooks/useFilterParams.js'
@@ -14,6 +15,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js'
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
@@ -607,7 +609,533 @@ function PreviewPanel({ asset, onClose }) {
   )
 }
 
+// ── Register Asset side panel ──────────────────────────────────────────────────
+
+// Mirrors PreviewPanel's shell (300px right-side drawer, header + scrollable
+// body + footer) so the two panels visually swap in the same slot. No new
+// reusable component — kept inline here the same way PreviewPanel is.
+
+const MODEL_TYPE_OPTIONS = [
+  { value: 'llm',             label: 'LLM' },
+  { value: 'open_source_llm', label: 'Open Source LLM' },
+  { value: 'embedding_model', label: 'Embedding Model' },
+  { value: 'audio_model',     label: 'Audio Model' },
+  { value: 'vision_model',    label: 'Vision Model' },
+  { value: 'multimodal',      label: 'Multimodal' },
+  { value: 'other',           label: 'Other' },
+]
+
+const PROVIDER_OPTIONS = [
+  'aws', 'azure', 'gcp', 'internal',
+  'local', 'openai', 'anthropic', 'other',
+]
+
+// Risk ladder mirrors backend: 0=Low, 1-2=Medium, 3-5=High, 6+=Critical
+function riskFromAlerts(n) {
+  const a = Number(n) || 0
+  if (a <= 0) return 'Low'
+  if (a <= 2) return 'Medium'
+  if (a <= 5) return 'High'
+  return 'Critical'
+}
+
+function policyCoverageFromLinks(count) {
+  if (!count)        return 'none'
+  if (count >= 3)    return 'full'
+  return 'partial'
+}
+
+// Reuse the same input/select styles as FilterBar so the panel visually
+// matches the rest of the page.
+const FIELD_CLS = cn(
+  'w-full h-8 px-2.5 rounded-lg border border-gray-200 bg-white',
+  'text-[12px] text-gray-700 placeholder:text-gray-400',
+  'hover:border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-400',
+  'transition-colors duration-150',
+)
+const SELECT_CLS = cn(
+  FIELD_CLS, 'pr-7 font-medium appearance-none cursor-pointer',
+  'bg-[url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'10\' height=\'10\' viewBox=\'0 0 24 24\'%3E%3Cpath d=\'M6 9l6 6 6-6\' stroke=\'%239ca3af\' stroke-width=\'2.5\' fill=\'none\' stroke-linecap=\'round\'/%3E%3C/svg%3E")]',
+  'bg-no-repeat bg-[right_0.5rem_center]',
+)
+
+function FieldLabel({ children, required }) {
+  return (
+    <label className="block text-[10px] font-bold uppercase tracking-[0.08em] text-gray-400 mb-1.5">
+      {children}
+      {required && <span className="text-red-400 ml-0.5">*</span>}
+    </label>
+  )
+}
+
+function FieldError({ msg }) {
+  if (!msg) return null
+  return <p className="mt-1 text-[11px] text-red-500 font-medium">{msg}</p>
+}
+
+function RegisterAssetPanel({ onClose, onRegistered }) {
+  // Form state
+  const [name,        setName]        = useState('')
+  const [version,     setVersion]     = useState('1.0.0')
+  const [modelType,   setModelType]   = useState('llm')
+  const [owner,       setOwner]       = useState('')
+  const [provider,    setProvider]    = useState('')
+  const [description, setDescription] = useState('')
+  const [notes,       setNotes]       = useState('')
+  const [file,        setFile]        = useState(null)
+  const [linkedPols,  setLinkedPols]  = useState([])       // array of policy ids
+  const [policies,    setPolicies]    = useState([])       // [{id, name, ...}]
+
+  // Dynamic owner dropdown — populated from the merged asset list above
+  const ownerOptions = onRegistered?.ownerOptions ?? []
+
+  // Derived, not editable
+  const alertsCount = 0                                   // new asset has no alerts yet
+  const risk        = riskFromAlerts(alertsCount)
+  const coverage    = policyCoverageFromLinks(linkedPols.length)
+
+  // UX state
+  const [errors,   setErrors]   = useState({})           // field → message
+  const [progress, setProgress] = useState(0)            // 0..100
+  const [busy,     setBusy]     = useState(false)
+  const [apiError, setApiError] = useState(null)
+  const [dupe,     setDupe]     = useState(null)         // {name, version} when 409
+  const abortRef = useRef(null)
+
+  const fileInputRef = useRef(null)
+
+  // Load policies from CPM once
+  useEffect(() => {
+    fetchPolicies().then(setPolicies).catch(() => setPolicies([]))
+  }, [])
+
+  // Esc closes (only when not uploading), Enter submits
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === 'Escape') { if (!busy) cancelAndClose() }
+      else if (e.key === 'Enter' && !e.shiftKey) {
+        // Avoid stealing Enter inside the textarea
+        if (document.activeElement?.tagName !== 'TEXTAREA') {
+          e.preventDefault()
+          handleApply()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, version, modelType, owner, provider, description, file, linkedPols, busy])
+
+  // Cancel in-flight upload if the panel unmounts (e.g. user navigates away)
+  useEffect(() => () => { try { abortRef.current?.abort() } catch {} }, [])
+
+  function cancelAndClose() {
+    try { abortRef.current?.abort() } catch {}
+    onClose?.()
+  }
+
+  function validate() {
+    const e = {}
+    if (!name.trim())       e.name      = 'Name is required'
+    if (!version.trim())    e.version   = 'Version is required'
+    if (!modelType)         e.modelType = 'Type is required'
+    if (!owner)             e.owner     = 'Owner is required'
+    if (!provider)          e.provider  = 'Provider is required'
+    if (!description.trim())e.description = 'Description is required'
+    if (!file)              e.file      = 'Please select a model file'
+    return e
+  }
+
+  async function handleApply() {
+    if (busy) return
+    setApiError(null)
+    setDupe(null)
+    const e = validate()
+    setErrors(e)
+    if (Object.keys(e).length > 0) return
+
+    const fd = new FormData()
+    fd.set('name',        name.trim())
+    fd.set('version',     version.trim())
+    fd.set('model_type',  modelType)
+    fd.set('owner',       owner)
+    fd.set('provider',    provider)
+    fd.set('purpose',     description.trim())           // description → purpose column
+    if (notes.trim())     fd.set('notes', notes.trim())
+    fd.set('alerts_count', '0')
+    fd.set('policy_status', policyCoverageFromLinks(linkedPols.length))
+    fd.set('linked_policies', JSON.stringify(linkedPols))
+    fd.set('file', file)
+
+    const ctrl = new AbortController()
+    abortRef.current = ctrl
+    setBusy(true); setProgress(0)
+    try {
+      const row = await registerModelWithFile(fd, {
+        onProgress: setProgress,
+        signal:     ctrl.signal,
+      })
+      onRegistered?.onCreated?.(row)
+      onClose?.()
+    } catch (err) {
+      if (err?.aborted) return                          // silent — panel is closing
+      if (err?.status === 409) {
+        setDupe({ name: name.trim(), version: version.trim() })
+      } else {
+        setApiError(err?.message || 'Registration failed')
+      }
+    } finally {
+      setBusy(false)
+      abortRef.current = null
+    }
+  }
+
+  function togglePolicy(id) {
+    setLinkedPols(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  function onPickFile(f) {
+    if (!f) return
+    setFile(f)
+    if (errors.file) setErrors(p => ({ ...p, file: undefined }))
+  }
+
+  // Header styling mirrors PreviewPanel (risk-tinted)
+  const riskBg = { Critical: 'bg-red-50', High: 'bg-orange-50', Medium: 'bg-yellow-50', Low: 'bg-emerald-50' }[risk]
+
+  return (
+    <div className="w-[300px] shrink-0 flex flex-col h-full" data-testid="register-asset-panel">
+
+      {/* Header */}
+      <div className={cn('px-4 py-3.5 border-b border-gray-100 flex items-start justify-between gap-2', riskBg)}>
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold text-gray-900 leading-snug truncate">
+            {name.trim() || 'Register Asset'}
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5">
+            {MODEL_TYPE_OPTIONS.find(o => o.value === modelType)?.label ?? 'Model'}
+          </p>
+        </div>
+        <button
+          onClick={cancelAndClose}
+          disabled={busy}
+          className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors shrink-0 mt-0.5 disabled:opacity-40"
+        >
+          <X size={13} />
+        </button>
+      </div>
+
+      {/* Scrollable body */}
+      <div className="flex-1 overflow-y-auto divide-y divide-gray-100">
+
+        {/* Derived risk + policy badges (read-only) */}
+        <div className="px-4 py-3 flex items-center gap-2 flex-wrap">
+          <RiskChip risk={risk} />
+          <div className="flex items-center gap-1.5">
+            <PolicyIcon status={coverage} />
+            <Badge variant={POLICY_VARIANT[coverage]} className="text-[10px]">
+              {POLICY_LABEL[coverage]}
+            </Badge>
+          </div>
+        </div>
+
+        {/* Core fields */}
+        <div className="px-4 py-3 space-y-3">
+
+          {/* Name */}
+          <div>
+            <FieldLabel required>Name</FieldLabel>
+            <input
+              type="text" className={FIELD_CLS} placeholder="gpt-4-turbo"
+              value={name}
+              onChange={e => { setName(e.target.value); if (errors.name) setErrors(p => ({...p, name: undefined})) }}
+              disabled={busy}
+            />
+            <FieldError msg={errors.name} />
+          </div>
+
+          {/* Version */}
+          <div>
+            <FieldLabel required>Version</FieldLabel>
+            <input
+              type="text" className={FIELD_CLS} placeholder="1.0.0"
+              value={version}
+              onChange={e => { setVersion(e.target.value); if (errors.version) setErrors(p => ({...p, version: undefined})) }}
+              disabled={busy}
+            />
+            <FieldError msg={errors.version} />
+          </div>
+
+          {/* Type */}
+          <div>
+            <FieldLabel required>Type</FieldLabel>
+            <select
+              className={SELECT_CLS} value={modelType}
+              onChange={e => setModelType(e.target.value)}
+              disabled={busy}
+            >
+              {MODEL_TYPE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <FieldError msg={errors.modelType} />
+          </div>
+
+          {/* Owner */}
+          <div>
+            <FieldLabel required>Owner</FieldLabel>
+            <select
+              className={SELECT_CLS} value={owner}
+              onChange={e => { setOwner(e.target.value); if (errors.owner) setErrors(p => ({...p, owner: undefined})) }}
+              disabled={busy}
+            >
+              <option value="">enter the owner of the model…</option>
+              {ownerOptions.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+            <FieldError msg={errors.owner} />
+          </div>
+
+          {/* Provider */}
+          <div>
+            <FieldLabel required>Provider</FieldLabel>
+            <select
+              className={SELECT_CLS} value={provider}
+              onChange={e => { setProvider(e.target.value); if (errors.provider) setErrors(p => ({...p, provider: undefined})) }}
+              disabled={busy}
+            >
+              <option value="">enter the provider…</option>
+              {PROVIDER_OPTIONS.map(p => <option key={p} value={p}>{p}</option>)}
+            </select>
+            <FieldError msg={errors.provider} />
+          </div>
+
+          {/* Last Seen — read only ("now", will update via updated_at) */}
+          <div className="grid grid-cols-[72px_1fr] items-baseline gap-1">
+            <span className="flex items-center gap-1.5 text-[11px] text-gray-400">
+              <Clock size={11} className="shrink-0" />
+              Last Seen
+            </span>
+            <span className="text-[12px] text-gray-400 italic">set on apply</span>
+          </div>
+        </div>
+
+        {/* Description */}
+        <div className="px-4 py-3">
+          <FieldLabel required>Description</FieldLabel>
+          <textarea
+            rows={3}
+            className={cn(FIELD_CLS, 'h-auto py-2 resize-none leading-snug')}
+            placeholder="please provide a description for the model"
+            value={description}
+            onChange={e => { setDescription(e.target.value); if (errors.description) setErrors(p => ({...p, description: undefined})) }}
+            disabled={busy}
+          />
+          <FieldError msg={errors.description} />
+        </div>
+
+        {/* Notes / Tags */}
+        <div className="px-4 py-3">
+          <FieldLabel>Tags / Notes</FieldLabel>
+          <input
+            type="text" className={FIELD_CLS}
+            placeholder="optional — comma-separated tags or free-text"
+            value={notes} onChange={e => setNotes(e.target.value)}
+            disabled={busy}
+          />
+        </div>
+
+        {/* Linked Policies */}
+        <div className="px-4 py-3">
+          <SectionLabel>Linked Policies</SectionLabel>
+          {policies.length === 0
+            ? <p className="text-[12px] text-gray-400 italic">No policies available</p>
+            : (
+              <div className="max-h-32 overflow-y-auto rounded-lg border border-gray-200 divide-y divide-gray-100">
+                {policies.map(p => {
+                  const checked = linkedPols.includes(p.id)
+                  return (
+                    <label
+                      key={p.id}
+                      className={cn(
+                        'flex items-center gap-2 px-2.5 py-1.5 text-[12px] cursor-pointer',
+                        checked ? 'bg-blue-50/60' : 'hover:bg-gray-50',
+                      )}
+                    >
+                      <input
+                        type="checkbox" checked={checked}
+                        onChange={() => togglePolicy(p.id)}
+                        disabled={busy}
+                        className="accent-blue-600 shrink-0"
+                      />
+                      <span className="text-gray-700 truncate">{p.name}</span>
+                      {p.is_active && (
+                        <span className="ml-auto text-[10px] font-semibold text-emerald-600 uppercase tracking-wider shrink-0">Active</span>
+                      )}
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+          {linkedPols.length > 0 && (
+            <p className="mt-1.5 text-[10px] text-gray-400">{linkedPols.length} selected</p>
+          )}
+        </div>
+
+        {/* Active alerts — read only */}
+        <div className="px-4 py-3">
+          <SectionLabel>Active Alerts</SectionLabel>
+          <div className="flex items-center gap-1.5">
+            <ShieldCheck size={12} className="text-gray-300 shrink-0" />
+            <span className="text-[12px] text-gray-400">none — populated when alerts start flowing</span>
+          </div>
+        </div>
+
+      </div>
+
+      {/* Footer: file + actions */}
+      <div className="px-4 py-3 border-t border-gray-100 space-y-2 shrink-0">
+
+        {/* File picker */}
+        <input
+          ref={fileInputRef} type="file" className="hidden"
+          onChange={e => onPickFile(e.target.files?.[0])}
+        />
+        {file ? (
+          <div className="flex items-center gap-1.5 px-2.5 h-8 rounded-lg bg-gray-50 border border-gray-200">
+            <FileUp size={12} className="text-gray-500 shrink-0" />
+            <span className="text-[11px] text-gray-700 truncate flex-1">{file.name}</span>
+            <span className="text-[10px] text-gray-400 shrink-0 tabular-nums">
+              {(file.size / (1024 * 1024)).toFixed(1)} MB
+            </span>
+            {!busy && (
+              <button
+                onClick={() => setFile(null)}
+                className="w-4 h-4 flex items-center justify-center rounded text-gray-400 hover:text-red-500 hover:bg-red-50 shrink-0"
+                aria-label="Remove file"
+              >
+                <X size={11} />
+              </button>
+            )}
+          </div>
+        ) : (
+          <Button
+            variant="outline" size="sm"
+            className="w-full h-8 gap-1.5 text-[12px] justify-center"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={busy}
+          >
+            <Upload size={12} />
+            Browse…
+          </Button>
+        )}
+        <FieldError msg={errors.file} />
+
+        {/* Progress */}
+        {busy && (
+          <div className="space-y-1">
+            <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
+              <div
+                className="h-full bg-blue-500 transition-all duration-150"
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <p className="text-[10px] text-gray-400 text-center tabular-nums">
+              Uploading… {progress}%
+            </p>
+          </div>
+        )}
+
+        {/* API error */}
+        {apiError && (
+          <p className="text-[11px] text-red-500 font-medium">{apiError}</p>
+        )}
+
+        {/* Apply */}
+        <Button
+          size="sm"
+          className="w-full h-8 gap-1.5 text-[12px] justify-center"
+          onClick={handleApply}
+          disabled={busy}
+        >
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />}
+          {busy ? 'Uploading…' : 'Apply'}
+        </Button>
+      </div>
+
+      {/* Duplicate-model confirm dialog */}
+      {dupe && (
+        <div className="absolute inset-0 bg-black/30 flex items-center justify-center z-20">
+          <div className="bg-white rounded-xl shadow-xl w-72 p-4 space-y-3 mx-3">
+            <p className="text-[13px] font-semibold text-gray-900">Model already exists</p>
+            <p className="text-[12px] text-gray-600 leading-relaxed">
+              <span className="font-mono">{dupe.name}</span> version{' '}
+              <span className="font-mono">{dupe.version}</span> is already registered.
+              Bump the version and try again.
+            </p>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => setDupe(null)}>OK</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Inventory page ─────────────────────────────────────────────────────────────
+
+// ── Live model adapter: spm_api row → table-row shape ─────────────────────────
+
+const PROVIDER_DISPLAY = {
+  aws: 'AWS', azure: 'Azure', gcp: 'GCP', internal: 'Internal',
+  local: 'Local', openai: 'OpenAI', anthropic: 'Anthropic', other: 'Other',
+}
+
+const TYPE_DISPLAY = {
+  llm: 'LLM', open_source_llm: 'Open Source LLM',
+  embedding_model: 'Embedding Model', audio_model: 'Audio Model',
+  vision_model: 'Vision Model', multimodal: 'Multimodal', other: 'Other',
+}
+
+function formatAgo(iso) {
+  if (!iso) return '—'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return '—'
+  const diff = Math.max(0, Date.now() - then)
+  const mins = Math.floor(diff / 60000)
+  if (mins < 1)       return 'just now'
+  if (mins < 60)      return `${mins}m ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24)       return `${hrs}h ago`
+  const days = Math.floor(hrs / 24)
+  return `${days}d ago`
+}
+
+function riskDisplayFromBackend(r) {
+  if (!r) return 'Low'
+  const s = String(r).toLowerCase()
+  if (s === 'critical' || s === 'unacceptable') return 'Critical'
+  if (s === 'high')                             return 'High'
+  if (s === 'medium' || s === 'limited')        return 'Medium'
+  return 'Low'
+}
+
+function adaptLiveModel(m) {
+  return {
+    id:            `live-${m.model_id}`,
+    name:          m.name,
+    type:          TYPE_DISPLAY[m.model_type] ?? 'LLM',
+    risk:          riskDisplayFromBackend(m.risk_tier),
+    owner:         m.owner || undefined,
+    provider:      PROVIDER_DISPLAY[m.provider] ?? (m.provider || '—'),
+    policyStatus:  m.policy_status || 'none',
+    lastSeen:      formatAgo(m.last_seen_at || m.updated_at),
+    description:   m.purpose || 'Registered via Inventory.',
+    linkedPolicies: (m.ai_sbom?.linked_policies ?? []).map(String),
+    linkedAlerts:  m.alerts_count || 0,
+    _live: true,
+  }
+}
+
+// ── Inventory page ────────────────────────────────────────────────────────────
 
 export default function Inventory() {
   const { assetId } = useParams()
@@ -624,8 +1152,40 @@ export default function Inventory() {
   const { tab: activeTab, view, search, provider, risk, policy } = values
   const { setTab, setView, setSearch, setProvider, setRisk, setPolicy } = setters
 
-  // Selection derived from URL param, not local state
-  const selected  = allAssets.find(a => a.id === assetId) ?? null
+  // Live models fetched from spm_api — prepended to the Models tab. Mocks kept.
+  const [liveModels, setLiveModels] = useState([])
+  const [showRegister, setShowRegister] = useState(false)
+
+  async function reloadLiveModels() {
+    try {
+      const rows = await fetchModels()
+      setLiveModels(rows.map(adaptLiveModel))
+    } catch {
+      // Offline / backend down → just show mocks
+      setLiveModels([])
+    }
+  }
+
+  useEffect(() => { reloadLiveModels() }, [])
+
+  // Merged view per tab — live models prepend to the Models list
+  const mergedAssets = useMemo(() => {
+    const next = { ...ASSETS }
+    next.models = [...liveModels, ...ASSETS.models]
+    return next
+  }, [liveModels])
+
+  const mergedAllAssets = useMemo(() => Object.values(mergedAssets).flat(), [mergedAssets])
+
+  // Selection derived from URL param — now searches the merged list so live rows work
+  const selected = mergedAllAssets.find(a => a.id === assetId) ?? null
+
+  // Owners seen across all merged assets, for the Register panel's Owner dropdown
+  const ownerOptions = useMemo(() => {
+    const set = new Set()
+    for (const a of mergedAllAssets) if (a.owner) set.add(a.owner)
+    return Array.from(set).sort()
+  }, [mergedAllAssets])
 
   // ── Redirect ?asset=<name> → /:assetId (runs once on mount) ──────────────
   const location  = useLocation()
@@ -633,18 +1193,19 @@ export default function Inventory() {
 
   useEffect(() => {
     if (!assetNameParam || assetId) return            // already a path param, or no query param
-    const match = allAssets.find(
+    const match = mergedAllAssets.find(
       a => a.name.toLowerCase() === assetNameParam.toLowerCase()
     )
     if (match) navigate(`/admin/inventory/${match.id}`, { replace: true })
-  }, [assetNameParam, assetId, navigate])
+  }, [assetNameParam, assetId, navigate, mergedAllAssets])
 
   const handleTabChange = (tab) => {
     setTab(tab)
+    setShowRegister(false)                            // close panel on tab change
     if (assetId) navigate('/admin/inventory', { replace: true })
   }
 
-  const rawAssets = ASSETS[activeTab] ?? []
+  const rawAssets = mergedAssets[activeTab] ?? []
 
   const filtered = rawAssets.filter(a => {
     if (search   && !a.name.toLowerCase().includes(search.toLowerCase()) && !a.type.toLowerCase().includes(search.toLowerCase())) return false
@@ -653,6 +1214,8 @@ export default function Inventory() {
     if (policy   !== 'All Coverage'  && a.policyStatus !== policy)   return false
     return true
   })
+
+  const canRegister = activeTab === 'models'
 
   return (
     <PageContainer>
@@ -663,12 +1226,19 @@ export default function Inventory() {
         actions={
           <>
             <Button variant="outline" size="sm">Export</Button>
-            <Button size="sm">+ Register Asset</Button>
+            <Button
+              size="sm"
+              onClick={() => canRegister && setShowRegister(v => !v)}
+              disabled={!canRegister}
+              title={canRegister ? 'Register a new model' : 'Register Asset is only available on the Models tab'}
+            >
+              + Register Asset
+            </Button>
           </>
         }
       />
 
-      {/* Summary strip */}
+      {/* Summary strip — reflects whatever the Models tab currently shows (live + mock) */}
       <SummaryStrip assets={rawAssets} />
 
       {/* Main panel */}
@@ -689,8 +1259,8 @@ export default function Inventory() {
           />
         </div>
 
-        {/* Table + preview side panel */}
-        <div className="flex items-stretch divide-x divide-gray-100">
+        {/* Table + (preview | register) side panel */}
+        <div className="relative flex items-stretch divide-x divide-gray-100">
 
           <div className="flex-1 min-w-0 overflow-x-auto">
             {view === 'table'
@@ -709,7 +1279,20 @@ export default function Inventory() {
             }
           </div>
 
-          {selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />}
+          {/* Register panel takes precedence over preview when open */}
+          {showRegister && canRegister
+            ? <RegisterAssetPanel
+                onClose={() => setShowRegister(false)}
+                onRegistered={{
+                  ownerOptions,
+                  onCreated: async () => {
+                    // Refresh live list so the new row appears at the top
+                    await reloadLiveModels()
+                  },
+                }}
+              />
+            : selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />
+          }
 
         </div>
 

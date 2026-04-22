@@ -1258,7 +1258,7 @@ async def dev_token():
             "tenant_id": "t1",
             "email": "dany.shapiro@gmail.com",
             "name": "Dany Shapiro",
-            "roles": ["admin"],
+            "roles": ["admin", "spm:admin", "spm:auditor"],
             "groups": [],
             "scopes": [
                 "calendar:read", "calendar:write",

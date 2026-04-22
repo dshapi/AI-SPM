@@ -350,6 +350,9 @@ services:
     image: postgres:16-alpine
     platform: linux/arm64/v8
     container_name: cpm-spm-db
+    # Publish 5432 so host tooling (alembic, psql) can connect.
+    # If 5432 is already in use on the host, change the left side e.g. "5433:5432".
+    ports: ["5432:5432"]
     environment:
       POSTGRES_DB: spm
       POSTGRES_USER: spm_rw
@@ -377,8 +380,13 @@ services:
       PROMETHEUS_URL: http://prometheus:9090
       CPM_API_URL: http://api:8080
       POLICY_SIMULATOR_URL: http://policy-simulator:8091
+      # Uploaded model files land here (inside the container).
+      # Mounted to ./services/spm_api/models on the host below.
+      MODEL_UPLOAD_DIR: /app/models
     volumes:
       - ./keys:/keys:ro
+      # Persist uploaded model artefacts on the host (listed in .gitignore).
+      - ./services/spm_api/models:/app/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=4)"]
       interval: 10s

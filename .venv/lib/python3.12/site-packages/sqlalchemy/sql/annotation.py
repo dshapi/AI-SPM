@@ -1,5 +1,5 @@
 # sql/annotation.py
-# Copyright (C) 2005-2026 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -465,9 +465,7 @@ def _deep_annotate(
             newelem = elem
 
         newelem._copy_internals(
-            clone=clone,
-            ind_cols_on_fromclause=ind_cols_on_fromclause,
-            _annotations_traversal=True,
+            clone=clone, ind_cols_on_fromclause=ind_cols_on_fromclause
         )
 
         cloned_ids[id_] = newelem
@@ -507,7 +505,7 @@ def _deep_deannotate(
 
         if key not in cloned:
             newelem = elem._deannotate(values=values, clone=True)
-            newelem._copy_internals(clone=clone, _annotations_traversal=True)
+            newelem._copy_internals(clone=clone)
             cloned[key] = newelem
             return newelem
         else:
@@ -528,7 +526,7 @@ def _shallow_annotate(element: _SA, annotations: _AnnotationDict) -> _SA:
     structure wasting time.
     """
     element = element._annotate(annotations)
-    element._copy_internals(_annotations_traversal=True)
+    element._copy_internals()
     return element
 
 

@@ -8,7 +8,7 @@ function devTokenPlugin() {
       server.middlewares.use('/api/dev-token', (_req, res) => {
         const enc = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url')
         const header  = enc({ alg: 'none', typ: 'JWT' })
-        const payload = enc({ sub: 'dev_user', roles: ['admin'], groups: [], exp: Math.floor(Date.now() / 1000) + 86400 })
+        const payload = enc({ sub: 'dev_user', roles: ['admin', 'spm:admin', 'spm:auditor'], groups: [], exp: Math.floor(Date.now() / 1000) + 86400 })
         const token   = `${header}.${payload}.fakesig`
         res.setHeader('Content-Type', 'application/json')
         res.end(JSON.stringify({ token, expires_in: 86400 }))
@@ -44,6 +44,13 @@ export default defineConfig({
       '/api/v1': {
         target: 'http://localhost:8094',
         changeOrigin: true,
+      },
+      // SPM API (AI Security Posture Management) — model registry, compliance,
+      // audit export. Mounted at /api/spm and stripped before forwarding.
+      '/api/spm': {
+        target: 'http://localhost:8092',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/spm/, ''),
       },
       '/api': {
         target: 'http://localhost:8080',

@@ -1,5 +1,5 @@
 # ext/asyncio/base.py
-# Copyright (C) 2020-2026 the SQLAlchemy authors and contributors
+# Copyright (C) 2020-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
@@ -71,26 +71,26 @@ class ReversibleProxy(Generic[_PT]):
         cls._proxy_objects.pop(ref, None)
 
     @classmethod
-    def _regenerate_proxy_for_target(
-        cls, target: _PT, **additional_kw: Any
-    ) -> Self:
+    def _regenerate_proxy_for_target(cls, target: _PT) -> Self:
         raise NotImplementedError()
 
     @overload
     @classmethod
     def _retrieve_proxy_for_target(
-        cls, target: _PT, regenerate: Literal[True] = ..., **additional_kw: Any
+        cls,
+        target: _PT,
+        regenerate: Literal[True] = ...,
     ) -> Self: ...
 
     @overload
     @classmethod
     def _retrieve_proxy_for_target(
-        cls, target: _PT, regenerate: bool = True, **additional_kw: Any
+        cls, target: _PT, regenerate: bool = True
     ) -> Optional[Self]: ...
 
     @classmethod
     def _retrieve_proxy_for_target(
-        cls, target: _PT, regenerate: bool = True, **additional_kw: Any
+        cls, target: _PT, regenerate: bool = True
     ) -> Optional[Self]:
         try:
             proxy_ref = cls._proxy_objects[weakref.ref(target)]
@@ -102,7 +102,7 @@ class ReversibleProxy(Generic[_PT]):
                 return proxy  # type: ignore
 
         if regenerate:
-            return cls._regenerate_proxy_for_target(target, **additional_kw)
+            return cls._regenerate_proxy_for_target(target)
         else:
             return None
 
@@ -193,7 +193,7 @@ class GeneratorStartableContext(StartableContext[_T_co]):
                 # (see PEP 479 for sync generators; async generators also
                 # have this behavior). But do this only if the exception
                 # wrapped
-                # by the RuntimeError is actually Stop(Async)Iteration (see
+                # by the RuntimeError is actully Stop(Async)Iteration (see
                 # issue29692).
                 if (
                     isinstance(value, (StopIteration, StopAsyncIteration))
@@ -215,7 +215,7 @@ class GeneratorStartableContext(StartableContext[_T_co]):
 
 
 def asyncstartablecontext(
-    func: Callable[..., AsyncIterator[_T_co]],
+    func: Callable[..., AsyncIterator[_T_co]]
 ) -> Callable[..., GeneratorStartableContext[_T_co]]:
     """@asyncstartablecontext decorator.
 
@@ -224,9 +224,7 @@ def asyncstartablecontext(
     ``@contextlib.asynccontextmanager`` supports, and the usage pattern
     is different as well.
 
-    Typical usage:
-
-    .. sourcecode:: text
+    Typical usage::
 
         @asyncstartablecontext
         async def some_async_generator(<arguments>):

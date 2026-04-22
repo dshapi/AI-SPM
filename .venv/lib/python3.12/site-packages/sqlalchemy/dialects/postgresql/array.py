@@ -1,21 +1,18 @@
 # dialects/postgresql/array.py
-# Copyright (C) 2005-2026 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: https://www.opensource.org/licenses/mit-license.php
+# mypy: ignore-errors
 
 
 from __future__ import annotations
 
 import re
-from typing import Any as typing_Any
-from typing import Iterable
+from typing import Any
 from typing import Optional
-from typing import Sequence
-from typing import TYPE_CHECKING
 from typing import TypeVar
-from typing import Union
 
 from .operators import CONTAINED_BY
 from .operators import CONTAINS
@@ -24,53 +21,28 @@ from ... import types as sqltypes
 from ... import util
 from ...sql import expression
 from ...sql import operators
-from ...sql.visitors import InternalTraversal
-
-if TYPE_CHECKING:
-    from ...engine.interfaces import Dialect
-    from ...sql._typing import _ColumnExpressionArgument
-    from ...sql._typing import _TypeEngineArgument
-    from ...sql.elements import ColumnElement
-    from ...sql.elements import Grouping
-    from ...sql.expression import BindParameter
-    from ...sql.operators import OperatorType
-    from ...sql.selectable import _SelectIterable
-    from ...sql.type_api import _BindProcessorType
-    from ...sql.type_api import _LiteralProcessorType
-    from ...sql.type_api import _ResultProcessorType
-    from ...sql.type_api import TypeEngine
-    from ...sql.visitors import _TraverseInternalsType
-    from ...util.typing import Self
+from ...sql._typing import _TypeEngineArgument
 
 
-_T = TypeVar("_T", bound=typing_Any)
-_CT = TypeVar("_CT", bound=typing_Any)
+_T = TypeVar("_T", bound=Any)
 
 
-def Any(
-    other: typing_Any,
-    arrexpr: _ColumnExpressionArgument[_T],
-    operator: OperatorType = operators.eq,
-) -> ColumnElement[bool]:
+def Any(other, arrexpr, operator=operators.eq):
     """A synonym for the ARRAY-level :meth:`.ARRAY.Comparator.any` method.
     See that method for details.
 
     """
 
-    return arrexpr.any(other, operator)  # type: ignore[no-any-return, union-attr]  # noqa: E501
+    return arrexpr.any(other, operator)
 
 
-def All(
-    other: typing_Any,
-    arrexpr: _ColumnExpressionArgument[_T],
-    operator: OperatorType = operators.eq,
-) -> ColumnElement[bool]:
+def All(other, arrexpr, operator=operators.eq):
     """A synonym for the ARRAY-level :meth:`.ARRAY.Comparator.all` method.
     See that method for details.
 
     """
 
-    return arrexpr.all(other, operator)  # type: ignore[no-any-return, union-attr]  # noqa: E501
+    return arrexpr.all(other, operator)
 
 
 class array(expression.ExpressionClauseList[_T]):
@@ -82,43 +54,20 @@ class array(expression.ExpressionClauseList[_T]):
         from sqlalchemy.dialects import postgresql
         from sqlalchemy import select, func
 
-        stmt = select(array([1, 2]) + array([3, 4, 5]))
+        stmt = select(array([1,2]) + array([3,4,5]))
 
         print(stmt.compile(dialect=postgresql.dialect()))
 
-    Produces the SQL:
-
-    .. sourcecode:: sql
+    Produces the SQL::
 
         SELECT ARRAY[%(param_1)s, %(param_2)s] ||
             ARRAY[%(param_3)s, %(param_4)s, %(param_5)s]) AS anon_1
 
     An instance of :class:`.array` will always have the datatype
-    :class:`_types.ARRAY`.  The "inner" type of the array is inferred from the
-    values present, unless the :paramref:`_postgresql.array.type_` keyword
-    argument is passed::
+    :class:`_types.ARRAY`.  The "inner" type of the array is inferred from
+    the values present, unless the ``type_`` keyword argument is passed::
 
-        array(["foo", "bar"], type_=CHAR)
-
-    When constructing an empty array, the :paramref:`_postgresql.array.type_`
-    argument is particularly important as PostgreSQL server typically requires
-    a cast to be rendered for the inner type in order to render an empty array.
-    SQLAlchemy's compilation for the empty array will produce this cast so
-    that::
-
-        stmt = array([], type_=Integer)
-        print(stmt.compile(dialect=postgresql.dialect()))
-
-    Produces:
-
-    .. sourcecode:: sql
-
-        ARRAY[]::INTEGER[]
-
-    As required by PostgreSQL for empty arrays.
-
-    .. versionadded:: 2.0.40 added support to render empty PostgreSQL array
-       literals with a required cast.
+        array(['foo', 'bar'], type_=CHAR)
 
     Multidimensional arrays are produced by nesting :class:`.array` constructs.
     The dimensionality of the final :class:`_types.ARRAY`
@@ -127,21 +76,16 @@ class array(expression.ExpressionClauseList[_T]):
     type::
 
         stmt = select(
-            array(
-                [array([1, 2]), array([3, 4]), array([column("q"), column("x")])]
-            )
+            array([
+                array([1, 2]), array([3, 4]), array([column('q'), column('x')])
+            ])
         )
         print(stmt.compile(dialect=postgresql.dialect()))
 
-    Produces:
+    Produces::
 
-    .. sourcecode:: sql
-
-        SELECT ARRAY[
-            ARRAY[%(param_1)s, %(param_2)s],
-            ARRAY[%(param_3)s, %(param_4)s],
-            ARRAY[q, x]
-        ] AS anon_1
+        SELECT ARRAY[ARRAY[%(param_1)s, %(param_2)s],
+        ARRAY[%(param_3)s, %(param_4)s], ARRAY[q, x]] AS anon_1
 
     .. versionadded:: 1.3.6 added support for multidimensional array literals
 
@@ -149,38 +93,23 @@ class array(expression.ExpressionClauseList[_T]):
 
         :class:`_postgresql.ARRAY`
 
-    """  # noqa: E501
+    """
 
     __visit_name__ = "array"
 
     stringify_dialect = "postgresql"
+    inherit_cache = True
 
-    _traverse_internals: _TraverseInternalsType = [
-        ("clauses", InternalTraversal.dp_clauseelement_tuple),
-        ("type", InternalTraversal.dp_type),
-    ]
-
-    def __init__(
-        self,
-        clauses: Iterable[_T],
-        *,
-        type_: Optional[_TypeEngineArgument[_T]] = None,
-        **kw: typing_Any,
-    ):
-        r"""Construct an ARRAY literal.
-
-        :param clauses: iterable, such as a list, containing elements to be
-         rendered in the array
-        :param type\_: optional type.  If omitted, the type is inferred
-         from the contents of the array.
-
-        """
+    def __init__(self, clauses, **kw):
+        type_arg = kw.pop("type_", None)
         super().__init__(operators.comma_op, *clauses, **kw)
 
+        self._type_tuple = [arg.type for arg in self.clauses]
+
         main_type = (
-            type_
-            if type_ is not None
-            else self.clauses[0].type if self.clauses else sqltypes.NULLTYPE
+            type_arg
+            if type_arg is not None
+            else self._type_tuple[0] if self._type_tuple else sqltypes.NULLTYPE
         )
 
         if isinstance(main_type, ARRAY):
@@ -191,21 +120,15 @@ class array(expression.ExpressionClauseList[_T]):
                     if main_type.dimensions is not None
                     else 2
                 ),
-            )  # type: ignore[assignment]
+            )
         else:
-            self.type = ARRAY(main_type)  # type: ignore[assignment]
+            self.type = ARRAY(main_type)
 
     @property
-    def _select_iterable(self) -> _SelectIterable:
+    def _select_iterable(self):
         return (self,)
 
-    def _bind_param(
-        self,
-        operator: OperatorType,
-        obj: typing_Any,
-        type_: Optional[TypeEngine[_T]] = None,
-        _assume_scalar: bool = False,
-    ) -> BindParameter[_T]:
+    def _bind_param(self, operator, obj, _assume_scalar=False, type_=None):
         if _assume_scalar or operator is operators.getitem:
             return expression.BindParameter(
                 None,
@@ -224,18 +147,16 @@ class array(expression.ExpressionClauseList[_T]):
                     )
                     for o in obj
                 ]
-            )  # type: ignore[return-value]
+            )
 
-    def self_group(
-        self, against: Optional[OperatorType] = None
-    ) -> Union[Self, Grouping[_T]]:
+    def self_group(self, against=None):
         if against in (operators.any_op, operators.all_op, operators.getitem):
             return expression.Grouping(self)
         else:
             return self
 
 
-class ARRAY(sqltypes.ARRAY[_T]):
+class ARRAY(sqltypes.ARRAY):
     """PostgreSQL ARRAY type.
 
     The :class:`_postgresql.ARRAY` type is constructed in the same way
@@ -245,11 +166,9 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
         from sqlalchemy.dialects import postgresql
 
-        mytable = Table(
-            "mytable",
-            metadata,
-            Column("data", postgresql.ARRAY(Integer, dimensions=2)),
-        )
+        mytable = Table("mytable", metadata,
+                Column("data", postgresql.ARRAY(Integer, dimensions=2))
+            )
 
     The :class:`_postgresql.ARRAY` type provides all operations defined on the
     core :class:`_types.ARRAY` type, including support for "dimensions",
@@ -285,7 +204,6 @@ class ARRAY(sqltypes.ARRAY[_T]):
             from sqlalchemy.dialects.postgresql import ARRAY
             from sqlalchemy.ext.mutable import MutableList
 
-
             class SomeOrmClass(Base):
                 # ...
 
@@ -309,7 +227,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
     def __init__(
         self,
-        item_type: _TypeEngineArgument[_T],
+        item_type: _TypeEngineArgument[Any],
         as_tuple: bool = False,
         dimensions: Optional[int] = None,
         zero_indexes: bool = False,
@@ -318,7 +236,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
         E.g.::
 
-          Column("myarray", ARRAY(Integer))
+          Column('myarray', ARRAY(Integer))
 
         Arguments are:
 
@@ -358,7 +276,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
         self.dimensions = dimensions
         self.zero_indexes = zero_indexes
 
-    class Comparator(sqltypes.ARRAY.Comparator[_CT]):
+    class Comparator(sqltypes.ARRAY.Comparator):
         """Define comparison operations for :class:`_types.ARRAY`.
 
         Note that these operations are in addition to those provided
@@ -368,9 +286,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
         """
 
-        def contains(
-            self, other: typing_Any, **kwargs: typing_Any
-        ) -> ColumnElement[bool]:
+        def contains(self, other, **kwargs):
             """Boolean expression.  Test if elements are a superset of the
             elements of the argument array expression.
 
@@ -379,7 +295,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
             """
             return self.operate(CONTAINS, other, result_type=sqltypes.Boolean)
 
-        def contained_by(self, other: typing_Any) -> ColumnElement[bool]:
+        def contained_by(self, other):
             """Boolean expression.  Test if elements are a proper subset of the
             elements of the argument array expression.
             """
@@ -387,7 +303,7 @@ class ARRAY(sqltypes.ARRAY[_T]):
                 CONTAINED_BY, other, result_type=sqltypes.Boolean
             )
 
-        def overlap(self, other: typing_Any) -> ColumnElement[bool]:
+        def overlap(self, other):
             """Boolean expression.  Test if array has elements in common with
             an argument array expression.
             """
@@ -395,26 +311,35 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
     comparator_factory = Comparator
 
+    @property
+    def hashable(self):
+        return self.as_tuple
+
+    @property
+    def python_type(self):
+        return list
+
+    def compare_values(self, x, y):
+        return x == y
+
     @util.memoized_property
-    def _against_native_enum(self) -> bool:
+    def _against_native_enum(self):
         return (
             isinstance(self.item_type, sqltypes.Enum)
             and self.item_type.native_enum
         )
 
-    def literal_processor(
-        self, dialect: Dialect
-    ) -> Optional[_LiteralProcessorType[_T]]:
+    def literal_processor(self, dialect):
         item_proc = self.item_type.dialect_impl(dialect).literal_processor(
             dialect
         )
         if item_proc is None:
             return None
 
-        def to_str(elements: Iterable[typing_Any]) -> str:
+        def to_str(elements):
             return f"ARRAY[{', '.join(elements)}]"
 
-        def process(value: Sequence[typing_Any]) -> str:
+        def process(value):
             inner = self._apply_item_processor(
                 value, item_proc, self.dimensions, to_str
             )
@@ -422,16 +347,12 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
         return process
 
-    def bind_processor(
-        self, dialect: Dialect
-    ) -> Optional[_BindProcessorType[Sequence[typing_Any]]]:
+    def bind_processor(self, dialect):
         item_proc = self.item_type.dialect_impl(dialect).bind_processor(
             dialect
         )
 
-        def process(
-            value: Optional[Sequence[typing_Any]],
-        ) -> Optional[list[typing_Any]]:
+        def process(value):
             if value is None:
                 return value
             else:
@@ -441,16 +362,12 @@ class ARRAY(sqltypes.ARRAY[_T]):
 
         return process
 
-    def result_processor(
-        self, dialect: Dialect, coltype: object
-    ) -> _ResultProcessorType[Sequence[typing_Any]]:
+    def result_processor(self, dialect, coltype):
         item_proc = self.item_type.dialect_impl(dialect).result_processor(
             dialect, coltype
         )
 
-        def process(
-            value: Sequence[typing_Any],
-        ) -> Optional[Sequence[typing_Any]]:
+        def process(value):
             if value is None:
                 return value
             else:
@@ -465,13 +382,11 @@ class ARRAY(sqltypes.ARRAY[_T]):
             super_rp = process
             pattern = re.compile(r"^{(.*)}$")
 
-            def handle_raw_string(value: str) -> Sequence[Optional[str]]:
-                inner = pattern.match(value).group(1)  # type: ignore[union-attr]  # noqa: E501
+            def handle_raw_string(value):
+                inner = pattern.match(value).group(1)
                 return _split_enum_values(inner)
 
-            def process(
-                value: Sequence[typing_Any],
-            ) -> Optional[Sequence[typing_Any]]:
+            def process(value):
                 if value is None:
                     return value
                 # isinstance(value, str) is required to handle
@@ -486,13 +401,10 @@ class ARRAY(sqltypes.ARRAY[_T]):
         return process
 
 
-def _split_enum_values(array_string: str) -> Sequence[Optional[str]]:
+def _split_enum_values(array_string):
     if '"' not in array_string:
         # no escape char is present so it can just split on the comma
-        return [
-            r if r != "NULL" else None
-            for r in (array_string.split(",") if array_string else [])
-        ]
+        return array_string.split(",") if array_string else []
 
     # handles quoted strings from:
     # r'abc,"quoted","also\\\\quoted", "quoted, comma", "esc \" quot", qpr'
@@ -509,11 +421,5 @@ def _split_enum_values(array_string: str) -> Sequence[Optional[str]]:
         elif in_quotes:
             result.append(tok.replace("_$ESC_QUOTE$_", '"'))
         else:
-            # interpret NULL (without quotes!) as None
-            result.extend(
-                [
-                    r if r != "NULL" else None
-                    for r in re.findall(r"([^\s,]+),?", tok)
-                ]
-            )
+            result.extend(re.findall(r"([^\s,]+),?", tok))
     return result

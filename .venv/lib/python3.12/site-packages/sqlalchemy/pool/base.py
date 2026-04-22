@@ -1,12 +1,14 @@
 # pool/base.py
-# Copyright (C) 2005-2026 the SQLAlchemy authors and contributors
+# Copyright (C) 2005-2024 the SQLAlchemy authors and contributors
 # <see AUTHORS file>
 #
 # This module is part of SQLAlchemy and is released under
 # the MIT License: https://www.opensource.org/licenses/mit-license.php
 
 
-"""Base constructs for connection pools."""
+"""Base constructs for connection pools.
+
+"""
 
 from __future__ import annotations
 
@@ -34,7 +36,6 @@ from .. import log
 from .. import util
 from ..util.typing import Literal
 from ..util.typing import Protocol
-from ..util.typing import Self
 
 if TYPE_CHECKING:
     from ..engine.interfaces import DBAPIConnection
@@ -467,7 +468,6 @@ class Pool(log.Identified, event.EventTarget):
         raise NotImplementedError()
 
     def status(self) -> str:
-        """Returns a brief description of the state of this pool."""
         raise NotImplementedError()
 
 
@@ -600,7 +600,7 @@ class ConnectionPoolEntry(ManagesConnection):
     connection on behalf of a :class:`_pool.Pool` instance.
 
     The :class:`.ConnectionPoolEntry` object represents the long term
-    maintenance of a particular connection for a pool, including expiring or
+    maintainance of a particular connection for a pool, including expiring or
     invalidating that connection to have it replaced with a new one, which will
     continue to be maintained by that same :class:`.ConnectionPoolEntry`
     instance. Compared to :class:`.PoolProxiedConnection`, which is the
@@ -1074,11 +1074,9 @@ class PoolProxiedConnection(ManagesConnection):
 
         def commit(self) -> None: ...
 
-        def cursor(self, *args: Any, **kwargs: Any) -> DBAPICursor: ...
+        def cursor(self) -> DBAPICursor: ...
 
         def rollback(self) -> None: ...
-
-        def __getattr__(self, key: str) -> Any: ...
 
     @property
     def is_valid(self) -> bool:
@@ -1124,13 +1122,6 @@ class PoolProxiedConnection(ManagesConnection):
 
         """
         raise NotImplementedError()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type: Any, exc_value: Any, traceback: Any) -> None:
-        self.close()
-        return None
 
 
 class _AdhocProxiedConnection(PoolProxiedConnection):

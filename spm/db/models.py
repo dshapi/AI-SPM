@@ -19,17 +19,28 @@ class Base(DeclarativeBase):
 
 
 class ModelProvider(str, enum.Enum):
+    # Legacy / conceptual values (kept for back-compat with existing rows + callers)
     local = "local"
     openai = "openai"
     anthropic = "anthropic"
     other = "other"
+    # Cloud-provider values surfaced by the admin UI (Inventory → Models)
+    aws = "aws"
+    azure = "azure"
+    gcp = "gcp"
+    internal = "internal"
 
 
 class ModelRiskTier(str, enum.Enum):
+    # Legacy EU-AI-Act-style values (kept for back-compat)
     minimal = "minimal"
     limited = "limited"
     high = "high"
     unacceptable = "unacceptable"
+    # UI-taxonomy values surfaced in the admin Inventory table
+    low = "low"
+    medium = "medium"
+    critical = "critical"
 
 
 class ModelStatus(str, enum.Enum):
@@ -38,6 +49,24 @@ class ModelStatus(str, enum.Enum):
     approved = "approved"
     deprecated = "deprecated"
     retired = "retired"
+
+
+class ModelType(str, enum.Enum):
+    """Coarse functional classification of the model, surfaced as the 'Type' column in the UI."""
+    llm = "llm"
+    open_source_llm = "open_source_llm"
+    embedding_model = "embedding_model"
+    audio_model = "audio_model"
+    vision_model = "vision_model"
+    multimodal = "multimodal"
+    other = "other"
+
+
+class PolicyCoverage(str, enum.Enum):
+    """Policy coverage level surfaced as the 'Policy' column in the Inventory table."""
+    full = "full"         # → "Covered"
+    partial = "partial"   # → "Partial"
+    none = "none"         # → "None"
 
 
 class ComplianceStatus(str, enum.Enum):
@@ -59,19 +88,26 @@ MODEL_TRANSITIONS: Dict[ModelStatus, set] = {
 class ModelRegistry(Base):
     __tablename__ = "model_registry"
 
-    model_id    = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    name        = Column(Text, nullable=False)
-    version     = Column(Text, nullable=False)
-    provider    = Column(Enum(ModelProvider, name="model_provider"), nullable=False, default=ModelProvider.local)
-    purpose     = Column(Text)
-    risk_tier   = Column(Enum(ModelRiskTier, name="model_risk_tier"), nullable=False, default=ModelRiskTier.limited)
-    tenant_id   = Column(Text, nullable=False, default="global")
-    status      = Column(Enum(ModelStatus, name="model_status"), nullable=False, default=ModelStatus.registered)
-    approved_by = Column(Text)
-    approved_at = Column(DateTime(timezone=True))
-    ai_sbom     = Column(JSONB, default=dict)
-    created_at  = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at  = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    model_id      = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name          = Column(Text, nullable=False)
+    version       = Column(Text, nullable=False)
+    provider      = Column(Enum(ModelProvider, name="model_provider"), nullable=False, default=ModelProvider.local)
+    purpose       = Column(Text)
+    risk_tier     = Column(Enum(ModelRiskTier, name="model_risk_tier"), nullable=False, default=ModelRiskTier.limited)
+    model_type    = Column(Enum(ModelType, name="model_type"), nullable=True)
+    # Inventory-table fields (surfaced as Owner / Policy / Alerts columns)
+    owner         = Column(Text, nullable=True)
+    policy_status = Column(Enum(PolicyCoverage, name="policy_coverage"), nullable=True)
+    alerts_count  = Column(Integer, nullable=False, default=0, server_default="0")
+    last_seen_at  = Column(DateTime(timezone=True), nullable=True)
+    tenant_id     = Column(Text, nullable=False, default="global")
+    status        = Column(Enum(ModelStatus, name="model_status"), nullable=False, default=ModelStatus.registered)
+    approved_by   = Column(Text)
+    approved_at   = Column(DateTime(timezone=True))
+    notes         = Column(Text, nullable=True)
+    ai_sbom       = Column(JSONB, default=dict)
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at    = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         UniqueConstraint("name", "version", "tenant_id", name="uq_model_name_version_tenant"),
