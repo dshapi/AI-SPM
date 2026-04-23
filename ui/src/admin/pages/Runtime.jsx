@@ -165,11 +165,21 @@ function _eventTitle(eventType) {
 
 function _eventDescription(event) {
   const p = event.payload ?? event
-  if (p.summary)       return p.summary
-  if (p.reason)        return p.reason
-  if (p.decision)      return `Decision: ${p.decision}`
-  if (p.tool_name)     return `Tool: ${p.tool_name}`
-  if (p.score != null) return `Risk score: ${Math.round(p.score * 100)}`
+  // String guards — some events ship structured objects in these fields
+  // (e.g. simulation.completed has payload.summary = {result, categories,
+  // duration_ms}). Rendering the raw object would crash React with
+  // error #31 ("objects are not valid as a React child"). Stringify only
+  // when the field actually IS a string; otherwise project to a label.
+  if (typeof p.summary === 'string')           return p.summary
+  if (p.summary && typeof p.summary === 'object') {
+    const s = p.summary
+    if (s.result) return `Result: ${s.result}${s.duration_ms != null ? ` (${s.duration_ms}ms)` : ''}`
+    return event.event_type ?? '—'
+  }
+  if (typeof p.reason === 'string')            return p.reason
+  if (typeof p.decision === 'string')          return `Decision: ${p.decision}`
+  if (typeof p.tool_name === 'string')         return `Tool: ${p.tool_name}`
+  if (typeof p.score === 'number')             return `Risk score: ${Math.round(p.score * 100)}`
   return event.event_type ?? '—'
 }
 
@@ -237,7 +247,22 @@ function _enrichSession(session, rawEvents) {
     : session.risk
 
   const policyPayload = lastPolicy?.payload ?? {}
-  const policyDec     = (policyPayload.decision ?? session.lastDecision.action).toLowerCase()
+  const policyDec     = (policyPayload.decision ?? session.lastDecision.action ?? 'allow').toLowerCase()
+
+  // Coerce any value that flows into JSX text into a string. Some events ship
+  // structured objects in fields that historically were strings (e.g. a
+  // payload.reason that's actually a {result, categories, duration_ms} guard
+  // result). Rendering an object here crashes the page with React error #31.
+  const _str = (v, fallback = '—') => {
+    if (v == null) return fallback
+    if (typeof v === 'string') return v
+    if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+    try { return JSON.stringify(v) } catch { return fallback }
+  }
+
+  const policyValue = policyPayload.policy_version ?? policyPayload.policy ?? session.lastDecision.policy
+  const reasonValue = policyPayload.reason ?? session.lastDecision.reason
+  const promptValue = lastPrompt?.payload?.text ?? lastPrompt?.payload?.prompt
 
   return {
     ...session,
@@ -246,10 +271,10 @@ function _enrichSession(session, rawEvents) {
     risk:         riskTier,
     lastDecision: {
       action: policyDec,
-      policy: policyPayload.policy_version ?? policyPayload.policy ?? session.lastDecision.policy,
-      reason: policyPayload.reason ?? session.lastDecision.reason,
+      policy: _str(policyValue, '—'),
+      reason: _str(reasonValue, '—'),
     },
-    lastPrompt:   lastPrompt?.payload?.text ?? lastPrompt?.payload?.prompt ?? null,
+    lastPrompt:   promptValue == null ? null : _str(promptValue, null),
     lastToolCall: lastTool
       ? `${lastTool.payload?.tool_name ?? ''}${lastTool.payload?.tool_args ? ': ' + JSON.stringify(lastTool.payload.tool_args) : ''}`
       : null,
