@@ -112,12 +112,34 @@ export function lineageFromEvents(events) {
         break
       }
 
+      // LLM invocation — emitted by api-chat right before the model stream is
+      // opened (and by simulation runners). Renders a dedicated "LLM Call" node
+      // downstream of policy so the graph clearly shows: prompt → … → policy
+      //  → llm → output.
+      case 'llm.invoked':
+      case 'llm.response':
+      case EVENT_TYPES.AGENT_RESPONSE_READY: {
+        const provider = d.provider || d.model_name || d.model || ''
+        const sub      = provider
+          ? String(provider)
+          : (d.tokens_in != null ? `${d.tokens_in} in / ${d.tokens_out ?? '…'} out` : 'invoked')
+        addNode('llm', 'llm', 'LLM Call', sub)
+        const fromId = nodeMap.has('policy') ? 'policy'
+          : nodeMap.has('model') ? 'model'
+          : nodeMap.has('context') ? 'context' : 'prompt'
+        addEdge(fromId, 'llm', 'data', 'invoke')
+        break
+      }
+
       case EVENT_TYPES.OUTPUT_GENERATED:
       case EVENT_TYPES.OUTPUT_SCANNED: {
         const sub = d.pii_redacted ? 'Redacted · ' : ''
         addNode('output', 'output', 'Output',
           `${sub}${d.response_latency_ms ? `${d.response_latency_ms}ms` : 'generated'}`)
-        const fromId = nodeMap.has('policy') ? 'policy'
+        // Prefer the most-downstream upstream node we have so the chain reads
+        // policy → llm → output when both exist.
+        const fromId = nodeMap.has('llm') ? 'llm'
+          : nodeMap.has('policy') ? 'policy'
           : nodeMap.has('model') ? 'model' : 'prompt'
         addEdge(fromId, 'output', 'output', 'gated')
         break
@@ -141,35 +163,129 @@ export function lineageFromEvents(events) {
 }
 
 // ── Layout helpers ────────────────────────────────────────────────────────────
-
-// Static pixel positions per node type.
-// Designed for NW=55, NH=28, CW=790, CH=300 canvas (matches Lineage.jsx).
-const _LAYOUT = {
-  prompt:  { cx: 65,  cy: 150 },
-  context: { cx: 210, cy: 78  },
-  rag:     { cx: 210, cy: 222 },
-  model:   { cx: 380, cy: 150 },
-  tool:    { cx: 520, cy: 72  },
-  policy:  { cx: 570, cy: 228 },
-  output:  { cx: 710, cy: 150 },
-}
+//
+// Dynamic left-packed layout. Earlier versions used STATIC per-type x-positions
+// (prompt at 65, model at 360, policy at 700 …) which left a huge empty gutter
+// on the left whenever upstream nodes (prompt / context / model) were missing
+// from the event stream — the user reported "graph starts in the middle of the
+// canvas, I have to scroll". Now every present node type gets a column index
+// based on flow order, and we pack them left-to-right starting at x=65.
+//
+// Lanes (y-positions) per node type are kept stable so the visual structure
+// (context above, RAG below, model centre, policy lower-right, etc.) is
+// preserved regardless of which columns are occupied.
 
 const _NW = 55   // node half-width
 
+// Vertical lanes — y positions per node type. These NEVER change; only x is
+// computed dynamically.
+const _LANE_Y = {
+  prompt:  150,
+  context: 78,
+  rag:     222,
+  model:   150,
+  tool:    150,   // overridden per-tool below for fan-out
+  policy:  230,
+  llm:     150,
+  output:  150,
+}
+
+// Flow order — left-to-right. Tools are interleaved between model and policy
+// because tools fan out from the model in the canonical agent pipeline.
+const _FLOW_ORDER = ['prompt', 'context', 'rag', 'model', 'tool', 'policy', 'llm', 'output']
+
+// Horizontal spacing knobs.
+const _COL_GAP        = 145   // pixels between adjacent column centres
+const _LEFT_MARGIN    = 65    // x-position of the first column
+
+// Tool fan-out knobs (when many tools exist they wrap into a second column).
+const _TOOL_COL_BASE_Y = 70
+const _TOOL_ROW_GAP    = 70
+const _TOOLS_PER_COL   = 3
+
+/**
+ * Compute (cw, ch) for the canvas given the set of present node types and the
+ * tool count. Width grows with the number of occupied columns; height grows
+ * only when many tools wrap into multiple rows.
+ */
+export function graphDimensions(toolCountOrNodes = 0, presentTypes = null) {
+  // Backwards-compatible call shape: graphDimensions(toolCount) — derive a
+  // sensible default `presentTypes` so existing callers (e.g. tests) keep
+  // working without passing the second arg.
+  let toolCount, types
+  if (Array.isArray(toolCountOrNodes)) {
+    // Caller passed nodes[]
+    types     = new Set(toolCountOrNodes.map(n => n.type))
+    toolCount = toolCountOrNodes.filter(n => n.type === 'tool').length
+  } else {
+    toolCount = toolCountOrNodes
+    types     = presentTypes
+      ? new Set(presentTypes)
+      : new Set(['prompt', 'context', 'model', 'policy', 'output']) // assume canonical 5-step
+    if (toolCount > 0) types.add('tool')
+  }
+
+  const colCount = _FLOW_ORDER.filter(t => types.has(t)).length || 1
+  // Tool wrapping — extra horizontal slot if 4+ tools.
+  const toolWrapCols = toolCount > _TOOLS_PER_COL ? 1 : 0
+
+  const cw = Math.max(
+    790,
+    _LEFT_MARGIN + (colCount + toolWrapCols - 1) * _COL_GAP + 80,
+  )
+
+  const toolRows = Math.min(_TOOLS_PER_COL, Math.max(1, toolCount))
+  const toolMaxY = _TOOL_COL_BASE_Y + (toolRows - 1) * _TOOL_ROW_GAP
+  const ch = Math.max(300, toolMaxY + 50)
+
+  return { cw, ch, cols: colCount }
+}
+
 /**
  * Assign SVG cx/cy coordinates to nodes for rendering.
- * Multiple tool nodes stack vertically (60px apart).
+ *
+ * x-positions are computed by walking _FLOW_ORDER and giving each PRESENT
+ * type the next column slot. Missing types collapse — no gutters. y-positions
+ * come from _LANE_Y so the visual lane structure is preserved.
+ *
+ * Tools fan out vertically (and wrap to a second column when many) so 6-tool
+ * agent flows still fit.
  *
  * @param {object[]} nodes — from lineageFromEvents
  * @returns {object[]} nodes with cx, cy added
  */
 export function assignCoords(nodes) {
-  let toolCount = 0
+  const presentTypes = new Set(nodes.map(n => n.type))
+  const toolCount    = nodes.filter(n => n.type === 'tool').length
+
+  // Compute x for each present type by left-packing in flow order.
+  const colX = {}
+  let col = 0
+  for (const t of _FLOW_ORDER) {
+    if (!presentTypes.has(t)) continue
+    colX[t] = _LEFT_MARGIN + col * _COL_GAP
+    col++
+    // Tools that wrap into 2 columns consume one extra horizontal slot so
+    // policy/llm/output don't sit on top of the second tool column.
+    if (t === 'tool' && toolCount > _TOOLS_PER_COL) col++
+  }
+
+  let toolIdx = 0
   return nodes.map(n => {
-    let pos = _LAYOUT[n.type] ?? { cx: 400, cy: 150 }
+    let pos
     if (n.type === 'tool') {
-      pos = { cx: _LAYOUT.tool.cx, cy: _LAYOUT.tool.cy + toolCount * 60 }
-      toolCount++
+      const subCol = Math.floor(toolIdx / _TOOLS_PER_COL)
+      const subRow = toolIdx % _TOOLS_PER_COL
+      pos = {
+        cx: colX.tool + subCol * _COL_GAP,
+        cy: _TOOL_COL_BASE_Y + subRow * _TOOL_ROW_GAP,
+      }
+      toolIdx++
+    } else {
+      pos = {
+        cx: colX[n.type] ?? _LEFT_MARGIN,
+        cy: _LANE_Y[n.type] ?? 150,
+      }
     }
     return { ...n, ...pos }
   })

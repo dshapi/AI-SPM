@@ -26,6 +26,7 @@ Or via Docker:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -41,6 +42,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from clients.policy_client import PolicyClient
+from consumers.lineage_consumer import LineageEventConsumer
 from db.base import make_engine, make_session_factory, Base
 from events.publisher import EventPublisher
 from events.store import EventStore
@@ -51,6 +53,7 @@ from threat_findings.router import router as threat_findings_router
 from threat_findings.service import ThreatFindingsService
 from api.findings_router import router as findings_api_router
 from routers import sessions as sessions_router
+from routers.lineage import router as lineage_router
 from policies.router import router as policies_router
 from services.risk_engine import RiskEngine
 
@@ -222,6 +225,34 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await publisher.start()
     app.state.event_publisher = publisher
 
+    # -- Lineage Kafka consumer (replaces the legacy HTTP dual-write) --------
+    # Drains GlobalTopics.LINEAGE_EVENTS and persists each event into
+    # session_events using services/lineage_ingest.py — the SAME persistence
+    # path the POST /api/v1/lineage/events handler uses, so the row inserted
+    # is byte-identical regardless of whether the event arrived via HTTP
+    # (legacy) or Kafka (current). End-result parity asserted by
+    # tests/test_lineage_kafka_parity.py.
+    try:
+        from platform_shared.topics import GlobalTopics
+        lineage_consumer = LineageEventConsumer(
+            bootstrap_servers = KAFKA_BOOTSTRAP,
+            topic             = GlobalTopics.LINEAGE_EVENTS,
+            group_id          = "agent-orchestrator-lineage",
+            session_factory   = session_factory,
+        )
+        await lineage_consumer.start()
+        app.state.lineage_consumer = lineage_consumer
+        logger.info("Lineage Kafka consumer started topic=%s",
+                    GlobalTopics.LINEAGE_EVENTS)
+    except Exception as _consumer_err:
+        # Don't crash startup if Kafka is unavailable; the HTTP endpoint at
+        # POST /api/v1/lineage/events still works as a manual fallback.
+        app.state.lineage_consumer = None
+        logger.warning(
+            "Lineage Kafka consumer failed to start (will not persist via Kafka): %s",
+            _consumer_err,
+        )
+
     # -- Stateless services (constructed once, reused across requests) -------
     app.state.risk_engine   = RiskEngine()
     app.state.policy_client = PolicyClient()
@@ -290,6 +321,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # -- Teardown ------------------------------------------------------------
     logger.info("=== %s shutting down ===", SERVICE_NAME)
+    lc = getattr(app.state, "lineage_consumer", None)
+    if lc is not None:
+        try:
+            await lc.stop()
+        except Exception as _lc_err:
+            logger.warning("Lineage consumer stop error: %s", _lc_err)
     await publisher.stop()
     await engine.dispose()
     logger.info("=== %s stopped ===", SERVICE_NAME)
@@ -401,6 +438,7 @@ def create_app() -> FastAPI:
 
     # ── Routers ─────────────────────────────────────────────────────────────
     app.include_router(sessions_router.router)
+    app.include_router(lineage_router)
     from results.router import router as results_router
     app.include_router(results_router)
     app.include_router(cases_router)

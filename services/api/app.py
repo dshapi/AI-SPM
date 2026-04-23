@@ -299,6 +299,14 @@ async def _check_model_gate(model_id: str, tenant_id: str) -> bool:
         return False  # fail-closed on timeout/network error
 
 
+# NOTE: The previous HTTP dual-write to POST /api/v1/lineage/events has been
+# removed. UI-lineage events are now published to GlobalTopics.LINEAGE_EVENTS
+# on Kafka and consumed by the orchestrator (services/agent-orchestrator-service
+# /consumers/lineage_consumer.py) which calls the SAME persistence path the
+# old HTTP handler used — so the persisted EventRecord is byte-identical and
+# the rendered Lineage graph is unchanged. See platform_shared/lineage_events.py.
+
+
 async def _report_to_orchestrator(
     raw_token: str,
     prompt: str,
@@ -988,6 +996,87 @@ async def chat_stream(
     guard_categories = _stream_decision.signals.get("guard_categories", [])
     guard_verdict    = "block" if _stream_decision.is_blocked else "allow"
 
+    # ── Chat → WS lineage emitter (defined BEFORE the blocked branch so
+    #    both allow and block paths can emit canonical session events) ───────
+    _ws_mgr  = getattr(request.app.state, "ws_manager", None)
+    event_id = str(uuid.uuid4())
+
+    async def _emit_ws(event_type: str, payload: dict) -> None:
+        # Build the envelope once — identical shape used for both the hot
+        # in-memory broadcast (ConnectionManager → browser) and the durable
+        # publish to Kafka (orchestrator drains into Postgres session_events,
+        # source of truth for Lineage-page replay after LRU eviction).
+        _ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        envelope = {
+            "session_id":     req.session_id,
+            "event_type":     event_type,
+            "source_service": "api-chat",
+            "correlation_id": event_id,
+            "timestamp":      _ts,
+            "payload":        payload,
+        }
+
+        # 1. Hot path — in-memory broadcast (cheap, sync with request).
+        if _ws_mgr is not None:
+            try:
+                await _ws_mgr.broadcast(req.session_id, envelope)
+            except Exception as _exc:
+                log.warning("chat ws emit failed event_type=%s err=%s",
+                            event_type, _exc)
+
+        # 2. Durable path — Kafka publish to GlobalTopics.LINEAGE_EVENTS.
+        #    The orchestrator's lineage_consumer drains this topic and calls
+        #    the SAME persistence path the legacy HTTP endpoint used, so the
+        #    persisted EventRecord is byte-identical to the pre-Kafka path.
+        #    KafkaProducer.send is non-blocking; we offload the flush+wait to
+        #    a thread executor so the SSE stream is never stalled by broker
+        #    latency. Best-effort — failures are logged inside the helper.
+        try:
+            from platform_shared.lineage_events import publish_lineage_event
+            _producer_local = get_producer()
+            asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: publish_lineage_event(
+                    _producer_local,
+                    session_id     = req.session_id,
+                    event_type     = event_type,
+                    payload        = payload,
+                    timestamp      = _ts,
+                    correlation_id = event_id,
+                    agent_id       = "chat-agent",
+                    user_id        = claims.get("sub", "anonymous"),
+                    tenant_id      = claims.get("tenant_id"),
+                    source         = "api-chat",
+                ),
+            )
+        except Exception as _exc:
+            log.warning(
+                "chat lineage publish schedule failed event_type=%s err=%s",
+                event_type, _exc,
+            )
+
+    # Always emit session.started — even for blocked prompts the Lineage
+    # graph needs an origin node to attach the policy.blocked decision to.
+    await _emit_ws("session.started", {"prompt": req.prompt})
+
+    # ── Lineage: chat-history READ (Redis) ───────────────────────────────────
+    # Load the user's prior turns BEFORE the policy gate so even blocked
+    # prompts show the data-store read on the graph.  context.retrieved is
+    # the canonical event the Lineage renderer maps to a "Session Context"
+    # node — and it MUST fire before risk.calculated, otherwise the
+    # prompt → context → model edge can't be drawn (the renderer wires the
+    # context node only if it already exists when the model node is added).
+    _redis  = _get_gate_redis()
+    history = _load_history(_redis, tenant_id, user_id)
+    await _emit_ws("context.retrieved", {
+        "source":        "chat_history_redis",
+        "context_count": len(history),
+        "tenant_id":     tenant_id,
+        "user_id":       user_id,
+    })
+
+    await _emit_ws("risk.calculated", {"risk_score": guard_score})
+
     if _stream_decision.is_blocked:
         _lex_label = _stream_decision.signals.get("lexical_label", "")
         if _stream_decision.blocked_by == "lexical" and "obfuscation" in _lex_label:
@@ -1014,6 +1103,17 @@ async def chat_stream(
             claims=claims, guard_verdict="block", guard_score=guard_score,
             guard_categories=guard_categories, decision="blocked", tool_uses=[],
         ))
+        # Lineage: terminal block + completion (so the graph closes cleanly).
+        await _emit_ws("policy.blocked", {
+            "reason":      _stream_decision.reason,
+            "blocked_by":  _stream_decision.blocked_by,
+            "categories":  _stream_decision.categories,
+            "guard_score": guard_score,
+        })
+        await _emit_ws("session.completed", {
+            "event_id":    event_id,
+            "decision":    "blocked",
+        })
         raise HTTPException(
             status_code=400,
             detail=_stream_decision.to_block_detail(req.session_id),
@@ -1029,8 +1129,8 @@ async def chat_stream(
     if not async_client:
         raise HTTPException(status_code=503, detail="LLM not configured")
 
-    _redis = _get_gate_redis()
-    history = _load_history(_redis, tenant_id, user_id)
+    # _redis + history already loaded above (before the policy gate) so the
+    # context.retrieved lineage event could fire even for blocked prompts.
     messages = history + [{"role": "user", "content": req.prompt}]
 
     system_prompt = (
@@ -1040,17 +1140,38 @@ async def chat_stream(
         "about current events, real-time data, or provides a URL to read."
     )
 
+    # ── Lineage: pre-flight policy decision ──────────────────────────────────
+    # session.started + risk.calculated were emitted up-front (above the
+    # blocked branch) so the graph has an origin node either way.  Now that
+    # we know the prompt was allowed, emit the policy.allowed decision.
+    await _emit_ws("policy.allowed", {
+        "reason":      "pre-flight screening passed",
+        "guard_score": guard_score,
+        "categories":  guard_categories,
+    })
+
     async def generate():
         tool_uses: list[str] = []
         current_messages = list(messages)
         full_text = ""
-        event_id = str(uuid.uuid4())
 
         try:
             # ── Up to 3 fully-streamed rounds ────────────────────────────────
             # Each round streams text tokens live. If Claude requests tools,
             # we emit badges, run them, then kick off the next streaming round.
             for _round in range(3):
+                # Lineage: LLM invocation. Emitted BEFORE every streaming round
+                # so the graph shows: prompt → context → policy → llm → output
+                # (and a fresh llm.invoked for each tool-use round). Without
+                # this event the lineage graph stops at policy.allowed and the
+                # final output node has no upstream LLM Call to attach to.
+                await _emit_ws("llm.invoked", {
+                    "provider":   "anthropic",
+                    "model":      ANTHROPIC_MODEL,
+                    "round":      _round + 1,
+                    "tools":      [t["name"] for t in _TOOLS],
+                    "msg_count":  len(current_messages),
+                })
                 async with async_client.messages.stream(
                     model=ANTHROPIC_MODEL,
                     max_tokens=1024,
@@ -1079,15 +1200,29 @@ async def chat_stream(
                         badge = f"🔍 Searched: \"{query}\""
                         tool_uses.append(badge)
                         yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
+                        await _emit_ws("tool.invoked", {
+                            "tool_name": "web_search",
+                            "query":     query,
+                            "status":    "invoked",
+                        })
                         result = await _run_web_search(query)
                     elif block.name == "web_fetch":
                         url = block.input.get("url", "")
                         badge = f"🌐 Fetched: {url}"
                         tool_uses.append(badge)
                         yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
+                        await _emit_ws("tool.invoked", {
+                            "tool_name": "web_fetch",
+                            "url":       url,
+                            "status":    "invoked",
+                        })
                         result = await _run_web_fetch(url)
                     else:
                         result = f"Unknown tool: {block.name}"
+                        await _emit_ws("tool.invoked", {
+                            "tool_name": block.name,
+                            "status":    "unknown",
+                        })
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
@@ -1104,10 +1239,30 @@ async def chat_stream(
                 emit_audit(tenant_id, "api", "output_redacted", principal=user_id,
                            details={"session_id": req.session_id})
 
+            # Lineage: output produced (with redaction status).
+            await _emit_ws("output.generated", {
+                "output_length":  len(full_text),
+                "pii_redacted":   contains_pii,
+                "secrets_found":  contains_secret,
+                "tool_count":     len(tool_uses),
+            })
+
             # ── Save to memory ───────────────────────────────────────────────
             history.append({"role": "user",      "content": req.prompt})
             history.append({"role": "assistant",  "content": full_text})
             _save_history(_redis, tenant_id, user_id, history)
+
+            # Lineage: chat-history WRITE (Redis).  Modelled as a tool.invoked
+            # with tool_name="chat_history_store" so the renderer places it on
+            # the tool track downstream of the model — there's no dedicated
+            # "datastore" node type in lineageFromEvents.js.
+            await _emit_ws("tool.invoked", {
+                "tool_name":  "chat_history_store",
+                "operation":  "write",
+                "store":      "redis",
+                "turn_count": len(history),
+                "status":     "ok",
+            })
 
             # ── Audit ────────────────────────────────────────────────────────
             emit_audit(tenant_id, "api", "event_ingested", event_id=event_id,
@@ -1116,6 +1271,12 @@ async def chat_stream(
                        details={"guard_verdict": guard_verdict, "guard_score": guard_score,
                                 "llm_used": True, "tool_calls": tool_uses,
                                 "tool_count": len(tool_uses), "streaming": True})
+
+            # Lineage: session wrap-up (graph's terminal node).
+            await _emit_ws("session.completed", {
+                "event_id":    event_id,
+                "tool_count":  len(tool_uses),
+            })
 
             yield f"data: {json.dumps({'type': 'done', 'event_id': event_id})}\n\n"
 
@@ -1150,6 +1311,132 @@ async def rate_limit_status(authorization: str = Header(None)):
     tenant_id = claims.get("tenant_id", "t1")
     user_id = claims.get("sub", "unknown")
     return get_rate_limit_status(tenant_id, user_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Session event log  (backs Lineage "recent sessions" picker + reload survival)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# The ConnectionManager keeps a bounded, in-memory log of every event passed to
+# broadcast() — independent of whether a WebSocket was connected. These two
+# endpoints expose it so the admin Lineage page can:
+#
+#   • backfill the graph on reload / direct-link navigation, and
+#   • offer a recent-sessions dropdown to inspect previous chats.
+#
+# Retention is bounded (see LOG_MAX_SESSIONS / LOG_MAX_EVENTS_PER_SESSION in
+# ws/connection_manager.py). Persistence is process-lifetime only; a restart
+# clears the log.
+
+async def _orchestrator_list_sessions() -> list[dict]:
+    """
+    Fetch lineage-eligible sessions from the orchestrator's persistent store.
+    Returns the summary shape the UI picker expects (matches ConnectionManager.
+    list_sessions()). Best-effort — returns [] on any error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{ORCHESTRATOR_URL}/api/v1/lineage/sessions")
+            if resp.status_code != 200:
+                log.debug(
+                    "lineage fallback list_sessions status=%d body=%s",
+                    resp.status_code, resp.text[:200],
+                )
+                return []
+            data = resp.json() or {}
+            return data.get("sessions") or []
+    except Exception as exc:
+        log.debug("lineage fallback list_sessions error: %s", exc)
+        return []
+
+
+async def _orchestrator_session_events(session_id: str) -> list[dict]:
+    """
+    Fetch a single session's persisted events in WS-wire shape from the
+    orchestrator. Used when the api service's in-memory log has no record
+    for *session_id* (never seen or evicted). Best-effort — returns [] on error.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                f"{ORCHESTRATOR_URL}/api/v1/lineage/sessions/{session_id}/events"
+            )
+            if resp.status_code != 200:
+                log.debug(
+                    "lineage fallback events session=%s status=%d body=%s",
+                    session_id, resp.status_code, resp.text[:200],
+                )
+                return []
+            data = resp.json() or {}
+            return data.get("events") or []
+    except Exception as exc:
+        log.debug(
+            "lineage fallback events error session=%s err=%s",
+            session_id, exc,
+        )
+        return []
+
+
+def _merge_session_summaries(
+    in_memory: list[dict],
+    persisted: list[dict],
+) -> list[dict]:
+    """
+    Union the in-memory and persisted session-summary streams, de-duplicating
+    by session_id (in-memory wins because it has the freshest event count +
+    timestamps for active sessions). Result is sorted most-recent-activity
+    first by last_timestamp.
+    """
+    merged: dict[str, dict] = {}
+    for s in persisted:
+        sid = s.get("session_id")
+        if sid:
+            merged[sid] = s
+    for s in in_memory:
+        sid = s.get("session_id")
+        if sid:
+            merged[sid] = s   # in-memory overrides
+    # Sort by last_timestamp desc; fall back to first_timestamp, then sid.
+    return sorted(
+        merged.values(),
+        key=lambda x: (x.get("last_timestamp") or x.get("first_timestamp") or ""),
+        reverse=True,
+    )
+
+
+@app.get("/sessions")
+async def list_sessions(request: Request):
+    """
+    Return a summary of every session eligible for Lineage replay. Unions the
+    api service's hot in-memory log (bounded LRU) with the orchestrator's
+    persistent session_events store, so the picker survives both restarts and
+    cache evictions.
+    """
+    mgr = getattr(request.app.state, "ws_manager", None)
+    in_memory = await mgr.list_sessions() if mgr is not None else []
+    persisted = await _orchestrator_list_sessions()
+    return {"sessions": _merge_session_summaries(in_memory, persisted)}
+
+
+@app.get("/sessions/{session_id}/events")
+async def get_session_events(session_id: str, request: Request):
+    """
+    Return the full recorded event stream for *session_id* in WS-wire shape.
+
+    Resolution order:
+      1. In-memory ConnectionManager log (hot path, live sessions).
+      2. Orchestrator persistent store (fallback after LRU eviction / restart).
+
+    The UI feeds both sources through the same normaliser, so clients never
+    need to know which path served the request.
+    """
+    mgr = getattr(request.app.state, "ws_manager", None)
+    events: list[dict] = []
+    if mgr is not None:
+        events = await mgr.get_session_events(session_id)
+    if not events:
+        events = await _orchestrator_session_events(session_id)
+    return {"session_id": session_id, "events": events}
 
 
 # ─────────────────────────────────────────────────────────────────────────────

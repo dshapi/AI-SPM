@@ -155,6 +155,52 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
   }
 }
 
+// ── Session event log (Lineage backfill + session picker) ────────────────────
+// Surfaces the ConnectionManager's in-memory persistent log so the admin
+// Lineage page can hydrate after reload / direct-link navigation, and offer
+// a recent-sessions dropdown to re-inspect prior runs.
+
+/**
+ * List recent sessions (most-recent-first) from the backend's persistent log.
+ * Returns [] on failure — the caller can silently fall back to live state or
+ * to localStorage.
+ */
+export async function listSessions() {
+  try {
+    const token = await getToken()
+    const headers = token ? { Authorization: `Bearer ${token}` } : {}
+    const res = await fetch(`${BASE}/sessions`, { headers })
+    if (!res.ok) return []
+    const data = await res.json()
+    return Array.isArray(data.sessions) ? data.sessions : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Fetch the recorded event stream for a single session. Returns the events
+ * in WS-wire shape (`session_id`, `event_type`, `correlation_id`, `timestamp`,
+ * `payload`, ...) — identical to what /ws/sessions/{sid} streams live, so
+ * the caller can feed them straight through normalizeEvent().
+ */
+export async function fetchSessionEvents(sessionId) {
+  if (!sessionId) return []
+  try {
+    const token = await getToken()
+    const headers = token ? { Authorization: `Bearer ${token}` } : {}
+    const res = await fetch(
+      `${BASE}/sessions/${encodeURIComponent(sessionId)}/events`,
+      { headers },
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return Array.isArray(data.events) ? data.events : []
+  } catch {
+    return []
+  }
+}
+
 // ── Mock responses for offline / no-API mode ─────────────────────────────────
 const MOCK = [
   "I'm here to help. What would you like to know?",

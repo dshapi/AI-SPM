@@ -41,6 +41,60 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { useSessionSocket } from './useSessionSocket'
 import { normalizeEvent } from '../lib/eventSchema.js'
 
+// ── localStorage persistence ────────────────────────────────────────────────
+// Survives reload and cross-tab navigation on the same browser. The backend
+// /sessions endpoints provide the authoritative copy; localStorage is the
+// zero-latency fallback for the current user's recent runs.
+const LS_EVENTS_PREFIX = 'orbyx.simEvents.'
+const LS_LAST_SESSION  = 'orbyx.lastSessionId'
+const LS_MAX_EVENTS_PER_SESSION = 200
+
+function _lsAvailable() {
+  try {
+    return typeof window !== 'undefined' && !!window.localStorage
+  } catch {
+    return false
+  }
+}
+
+function _writeEventsToLocalStorage(sessionId, events) {
+  if (!_lsAvailable() || !sessionId) return
+  try {
+    // Cap per-session size so a runaway stream never bloats localStorage.
+    const capped = events.length > LS_MAX_EVENTS_PER_SESSION
+      ? events.slice(events.length - LS_MAX_EVENTS_PER_SESSION)
+      : events
+    window.localStorage.setItem(
+      `${LS_EVENTS_PREFIX}${sessionId}`,
+      JSON.stringify(capped)
+    )
+    window.localStorage.setItem(LS_LAST_SESSION, sessionId)
+  } catch {
+    /* QuotaExceeded etc. — silently skip; in-memory state still works */
+  }
+}
+
+export function readPersistedEvents(sessionId) {
+  if (!_lsAvailable() || !sessionId) return []
+  try {
+    const raw = window.localStorage.getItem(`${LS_EVENTS_PREFIX}${sessionId}`)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+export function readLastSessionId() {
+  if (!_lsAvailable()) return null
+  try {
+    return window.localStorage.getItem(LS_LAST_SESSION) || null
+  } catch {
+    return null
+  }
+}
+
 // Session-wide canonical event types that fire AT MOST ONCE per session.
 // Duplicates of these are always double-emits, never legitimate.
 const _SESSION_WIDE_TYPES = new Set([
@@ -87,6 +141,9 @@ export function useSimulationStream() {
   const { connectionStatus, liveEvents, connectWs, disconnectWs } = useSessionSocket()
   const [simEvents, setSimEvents] = useState([])
   const seenRef = useRef(new Set())
+  // Current active session_id — set when startStream() is called. We need it
+  // in the persistence effect below; ref (not state) so writes don't re-render.
+  const activeSessionIdRef = useRef(null)
 
   // Transform incoming WsEvents → SimulationEvents.
   //
@@ -131,7 +188,19 @@ export function useSimulationStream() {
     })
   }, [liveEvents])
 
+  // Persist simEvents to localStorage keyed by active sessionId so a reload of
+  // /admin/lineage (or any page consuming simEvents) can rehydrate without a
+  // backend round-trip. Only write when we have a valid sessionId AND events;
+  // otherwise we'd clobber a valid entry with an empty list on route changes
+  // that briefly reset state.
+  useEffect(() => {
+    const sid = activeSessionIdRef.current
+    if (!sid || simEvents.length === 0) return
+    _writeEventsToLocalStorage(sid, simEvents)
+  }, [simEvents])
+
   const startStream = useCallback((sessionId) => {
+    activeSessionIdRef.current = sessionId || null
     seenRef.current = new Set()
     setSimEvents([])
     connectWs(sessionId)
@@ -140,8 +209,36 @@ export function useSimulationStream() {
   const stopStream = useCallback(() => {
     seenRef.current = new Set()
     setSimEvents([])
+    // Keep activeSessionIdRef — a stopStream that precedes a route unmount
+    // should NOT wipe the localStorage pointer to the most recent session.
     disconnectWs()
   }, [disconnectWs])
 
-  return { connectionStatus, simEvents, startStream, stopStream }
+  /**
+   * Load a previously-recorded session's events into simEvents WITHOUT
+   * opening a WebSocket. Accepts either a session_id (reads from
+   * localStorage) or an explicit pre-normalised event array.
+   *
+   * Useful for Lineage backfill: the page fetches /sessions/{sid}/events
+   * from the backend, normalises each event, then hands the array to
+   * loadEvents() to render the graph.
+   */
+  const loadEvents = useCallback((eventsOrSessionId) => {
+    let events
+    let sessionId = null
+    if (Array.isArray(eventsOrSessionId)) {
+      events = eventsOrSessionId
+    } else if (typeof eventsOrSessionId === 'string') {
+      sessionId = eventsOrSessionId
+      events = readPersistedEvents(eventsOrSessionId)
+    } else {
+      return
+    }
+    // Swap to the loaded session so further events (if any) don't collide.
+    activeSessionIdRef.current = sessionId || activeSessionIdRef.current
+    seenRef.current = new Set(events.map(e => e?.id).filter(Boolean))
+    setSimEvents(events)
+  }, [])
+
+  return { connectionStatus, simEvents, startStream, stopStream, loadEvents }
 }

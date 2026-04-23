@@ -641,7 +641,19 @@ function ControlPanel({ session }) {
               />
             )}
             <Button variant="outline" size="sm"
-              className="w-full justify-start gap-2 text-[12px] h-8">
+              className="w-full justify-start gap-2 text-[12px] h-8"
+              onClick={() => {
+                // Direct-link form: /admin/lineage/:sessionId — the Lineage
+                // page will backfill from /sessions/{id}/events, which unions
+                // the api service's in-memory LRU log with the orchestrator's
+                // persistent session_events store, so the real recorded run
+                // is always served (no synthetic reconstruction).
+                if (session?.id) {
+                  navigate(`/admin/lineage/${encodeURIComponent(session.id)}`)
+                } else {
+                  navigate('/admin/lineage')
+                }
+              }}>
               <ArrowUpRight size={11} strokeWidth={2} /> Open Lineage
             </Button>
           </div>

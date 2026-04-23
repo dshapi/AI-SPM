@@ -117,9 +117,13 @@ function adaptApiCase(c) {
     notes: [],
     linkedEntities: { agents: [c.session_id], models: [], tools: [], data: [] },
     recommendedActions: [
-      { icon: Eye,    label: 'Inspect Session',  desc: 'View session events in Runtime monitor', route: 'runtime'  },
-      { icon: Shield, label: 'Review Policy',    desc: 'Check triggered policy and thresholds',   route: 'policies' },
+      { icon: Eye,       label: 'Inspect Session',    desc: 'View session events in Runtime monitor',  route: 'runtime'  },
+      { icon: GitBranch, label: 'View Lineage Graph', desc: 'Trace context flow for this session',     route: 'lineage'  },
+      { icon: Shield,    label: 'Review Policy',      desc: 'Check triggered policy and thresholds',   route: 'policies' },
     ],
+    // Session ID lifted out of the transform for downstream navigation
+    // (recommended actions + clickable EntityChip).
+    sessionId: c.session_id,
   }
 }
 
@@ -211,16 +215,34 @@ function PriorityPip({ priority }) {
   )
 }
 
-function EntityChip({ label, type }) {
+function EntityChip({ label, type, onClick }) {
   const cfg = {
-    Agent: { bg: 'bg-violet-50 border-violet-200 text-violet-700', icon: Bot    },
-    Model: { bg: 'bg-blue-50   border-blue-200   text-blue-700',   icon: Cpu    },
-    Tool:  { bg: 'bg-amber-50  border-amber-200  text-amber-700',  icon: Wrench },
-    Data:  { bg: 'bg-cyan-50   border-cyan-200   text-cyan-700',   icon: Database },
+    Agent:   { bg: 'bg-violet-50 border-violet-200 text-violet-700', icon: Bot      },
+    Model:   { bg: 'bg-blue-50   border-blue-200   text-blue-700',   icon: Cpu      },
+    Tool:    { bg: 'bg-amber-50  border-amber-200  text-amber-700',  icon: Wrench   },
+    Data:    { bg: 'bg-cyan-50   border-cyan-200   text-cyan-700',   icon: Database },
+    Session: { bg: 'bg-indigo-50 border-indigo-200 text-indigo-700', icon: GitBranch },
   }
   const { bg, icon: Icon } = cfg[type] ?? { bg: 'bg-gray-50 border-gray-200 text-gray-600', icon: Layers }
+  const base = cn(
+    'inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold',
+    bg,
+  )
+  if (typeof onClick === 'function') {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        className={cn(base, 'hover:shadow-sm hover:brightness-95 cursor-pointer transition')}
+        title="Open Lineage graph for this session"
+      >
+        <Icon size={9} strokeWidth={2} />
+        {label}
+      </button>
+    )
+  }
   return (
-    <span className={cn('inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10px] font-semibold', bg)}>
+    <span className={base}>
       <Icon size={9} strokeWidth={2} />
       {label}
     </span>
@@ -574,7 +596,18 @@ function CaseDetailPanel({ caseData, onClose }) {
                 <p className="text-[10px] font-bold uppercase tracking-[0.08em] text-gray-400 mb-2">Affected Assets</p>
                 <div className="flex flex-wrap gap-1.5">
                   {caseData.affectedAssets.map(a => (
-                    <EntityChip key={a.name} label={a.name} type={a.type} />
+                    <EntityChip
+                      key={a.name}
+                      label={a.name}
+                      type={a.type}
+                      // Session chips deep-link into the Lineage graph for the
+                      // case's session_id — by far the most common follow-up.
+                      onClick={
+                        a.type === 'Session' && a.name
+                          ? () => navigate(`/admin/lineage/${encodeURIComponent(a.name)}`)
+                          : undefined
+                      }
+                    />
                   ))}
                 </div>
               </div>
@@ -860,9 +893,20 @@ function CaseDetailPanel({ caseData, onClose }) {
               {caseData.recommendedActions.map((action, i) => {
                 const Icon = action.icon
                 const handleActionClick = () => {
+                  // Session id lives in three places after the transform — prefer
+                  // the explicit one, fall back to linkedEntities/affectedAssets
+                  // so navigation still works for older/mocked case shapes.
+                  const sessionId = caseData.sessionId
+                               ?? caseData.linkedEntities.agents[0]
+                               ?? caseData.affectedAssets[0]?.name
                   if (action.route === 'runtime') {
-                    const sessionId = caseData.linkedEntities.agents[0] ?? caseData.affectedAssets[0]?.name
-                    if (sessionId) navigate(`/admin/runtime?session_id=${sessionId}`)
+                    if (sessionId) navigate(`/admin/runtime?session_id=${encodeURIComponent(sessionId)}`)
+                  } else if (action.route === 'lineage') {
+                    // Direct-link form: /admin/lineage/:sessionId — the Lineage
+                    // page backfills events from the backend log, and with the
+                    // session picker always rendered the user can switch runs.
+                    if (sessionId) navigate(`/admin/lineage/${encodeURIComponent(sessionId)}`)
+                    else           navigate('/admin/lineage')
                   } else if (action.route === 'policies') {
                     const policyName = mapCategoryToPolicy(caseData.categories)
                     navigate(`/admin/policies?policy=${encodeURIComponent(policyName)}`)

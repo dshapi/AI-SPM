@@ -4,6 +4,8 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import App                 from './App.jsx'
 import { AppShell as DashboardLayout } from './admin/shell/AppShell.jsx'
+import { SimulationContext } from './context/SimulationContext.jsx'
+import { useSimulationState } from './hooks/useSimulationState.js'
 import Overview      from './admin/pages/Overview.jsx'
 import Dashboard     from './admin/pages/Dashboard.jsx'
 import Posture       from './admin/pages/Posture.jsx'
@@ -21,9 +23,49 @@ import Data          from './admin/pages/Data.jsx'
 import Placeholder   from './admin/pages/Placeholder.jsx'
 import './index.css'
 
+/**
+ * SimulationRoot
+ * ──────────────
+ * Owns the single `useSimulationState()` instance and exposes it via
+ * SimulationContext to every route — both the chat (/) and the admin
+ * dashboard (/admin/*).  This MUST wrap both route trees so that events
+ * produced on one page (e.g. a chat session at /) are visible on another
+ * (e.g. the Lineage graph at /admin/lineage) without a full reload.
+ *
+ * Calling useSimulationState() anywhere else creates a second, isolated
+ * instance and breaks cross-route event sharing.
+ */
+function SimulationRoot({ children }) {
+  const {
+    simState,
+    startSimulation,
+    resetSimulation,
+    subscribeToSession,
+    unsubscribeFromSession,
+    loadSessionEvents,
+  } = useSimulationState()
+
+  return (
+    <SimulationContext.Provider
+      value={{
+        simEvents: simState.simEvents,
+        simState,
+        startSimulation,
+        resetSimulation,
+        subscribeToSession,
+        unsubscribeFromSession,
+        loadSessionEvents,
+      }}
+    >
+      {children}
+    </SimulationContext.Provider>
+  )
+}
+
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
     <BrowserRouter>
+      <SimulationRoot>
       <Routes>
           {/* Chat UI */}
           <Route path="/" element={<App />} />
@@ -70,6 +112,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
           {/* Any unknown path → Overview */}
           <Route path="*" element={<Navigate to="/admin/overview" replace />} />
         </Routes>
+      </SimulationRoot>
     </BrowserRouter>
   </React.StrictMode>
 )

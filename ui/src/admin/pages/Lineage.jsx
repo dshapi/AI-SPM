@@ -1,12 +1,12 @@
-import { useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useState, useEffect } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   MessageSquare, Layers, FileText, Cpu, Wrench,
   Shield, CheckCircle2,
-  Play, Download, RotateCcw,
+  Play, Download,
   AlertTriangle, Clock, ChevronRight, Tag,
   Database, Globe, Terminal, Lock,
-  AlertCircle, Info, Zap,
+  AlertCircle, Zap,
   ArrowRight, Code2, FileSearch, GitBranch,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
@@ -15,7 +15,26 @@ import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { useSimulationContext } from '../../context/SimulationContext.jsx'
-import { lineageFromEvents, assignCoords, assignEdgePaths } from '../../lib/lineageFromEvents.js'
+import { lineageFromEvents, assignCoords, assignEdgePaths, graphDimensions } from '../../lib/lineageFromEvents.js'
+import { normalizeEvent } from '../../lib/eventSchema.js'
+import { listSessions, fetchSessionEvents } from '../../api.js'
+import { useFinding } from '../../hooks/useFindings.js'
+
+// ── replayPromptFromFinding ─────────────────────────────────────────────────
+// Resolve a usable REPLAY prompt from a Finding. Used when navigation lands
+// on Lineage with ?finding_id=… — Run Simulation then re-runs the hunter's
+// actual hypothesis (not a synthesised evidence join). Returns null when no
+// replayable text exists so we can disable the Run button.
+function replayPromptFromFinding(finding) {
+  if (!finding) return null
+  const h = finding.hypothesis
+  if (typeof h === 'string' && h.trim()) return h.trim()
+  const p = finding.prompt
+  if (typeof p === 'string' && p.trim()) return p.trim()
+  const t = finding.title
+  if (typeof t === 'string' && t.trim()) return t.trim()
+  return null
+}
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -26,6 +45,7 @@ const NODE_CFG = {
   model:   { label: 'LLM Model', icon: Cpu,           iconBg: 'bg-violet-50',   iconTxt: 'text-violet-600',  bg: 'bg-white',       border: 'border-violet-100', accent: '#a78bfa', typeTxt: 'text-violet-500'  },
   tool:    { label: 'Tool Call', icon: Wrench,        iconBg: 'bg-indigo-50',   iconTxt: 'text-indigo-600',  bg: 'bg-white',       border: 'border-indigo-100', accent: '#818cf8', typeTxt: 'text-indigo-500'  },
   policy:  { label: 'Policy',    icon: Shield,        iconBg: 'bg-amber-50',    iconTxt: 'text-amber-600',   bg: 'bg-amber-50/30', border: 'border-amber-200',  accent: '#fbbf24', typeTxt: 'text-amber-600'   },
+  llm:     { label: 'LLM Call',  icon: Zap,           iconBg: 'bg-fuchsia-50',  iconTxt: 'text-fuchsia-600', bg: 'bg-white',       border: 'border-fuchsia-100',accent: '#e879f9', typeTxt: 'text-fuchsia-500' },
   output:  { label: 'Output',    icon: CheckCircle2,  iconBg: 'bg-emerald-50',  iconTxt: 'text-emerald-600', bg: 'bg-white',       border: 'border-emerald-100',accent: '#34d399', typeTxt: 'text-emerald-500' },
 }
 
@@ -40,13 +60,14 @@ const EDGE_CFG = {
 }
 
 // ── Graph dimensions ───────────────────────────────────────────────────────────
-// Layout designed to fit the 8-col panel (~680px visible) with minimal scroll.
-// 5 column positions: n1 | n2/n3 | n4 | n5/n6 | n7
+// Node sizing is fixed; canvas size is derived dynamically from how many tool
+// nodes need to be rendered (see graphDimensions() in lineageFromEvents.js).
+// This keeps the canonical 5-step graph compact (790×300) while letting
+// 6-tool fan-outs (e.g. the threat-hunting agent) wrap into a second column
+// with a wider/taller canvas — no overflow, no overlap with the policy node.
 
 const NW = 55   // node half-width  → node 110px wide
 const NH = 28   // node half-height → node 56px tall
-const CW = 790  // canvas width (≈680px visible + small scroll margin)
-const CH = 300  // canvas height
 
 
 // ── LineageGraph ───────────────────────────────────────────────────────────────
@@ -131,8 +152,10 @@ function GraphNode({ node, selected, hovered, dimmed, onSelect, onHover, onLeave
   )
 }
 
-function LineageGraph({ selectedId, onSelect, nodes, edges, nodeEdges }) {
+function LineageGraph({ selectedId, onSelect, nodes, edges, nodeEdges, cw, ch }) {
   const [hoveredId, setHoveredId] = useState(null)
+  const CW = cw
+  const CH = ch
 
   // Hover → dim non-connected nodes (investigation mode)
   // Selection → highlight edges only; never dim the whole graph
@@ -185,11 +208,32 @@ function LineageGraph({ selectedId, onSelect, nodes, edges, nodeEdges }) {
           {/* Dot-grid fill */}
           <rect width={CW} height={CH} fill="url(#dot-grid)" />
 
-          {/* Column zone labels — positioned at each column centroid */}
-          <text x="210" y="22" fontSize="9" fontWeight="700" fill="#d1d5db" letterSpacing="0.08em" textAnchor="middle" style={{ userSelect: 'none' }}>CONTEXT / RAG</text>
-          <text x="380" y="22" fontSize="9" fontWeight="700" fill="#d1d5db" letterSpacing="0.08em" textAnchor="middle" style={{ userSelect: 'none' }}>MODEL</text>
-          <text x="545" y="22" fontSize="9" fontWeight="700" fill="#d1d5db" letterSpacing="0.08em" textAnchor="middle" style={{ userSelect: 'none' }}>TOOLS &amp; POLICY</text>
-          <text x="710" y="22" fontSize="9" fontWeight="700" fill="#d1d5db" letterSpacing="0.08em" textAnchor="middle" style={{ userSelect: 'none' }}>OUTPUT</text>
+          {/* Column zone labels — positioned dynamically over each present
+              node column so they line up regardless of which event types
+              actually fired. Computed by the parent and passed in via `cols`. */}
+          {(nodes ?? []).reduce((acc, n) => {
+            // One label per column position; first node we see at a given cx wins.
+            if (!acc.seen.has(n.cx) && n.type !== 'tool') {
+              acc.seen.add(n.cx)
+              const cfg = NODE_CFG[n.type]
+              if (cfg) acc.labels.push(
+                <text
+                  key={`zone-${n.cx}`}
+                  x={n.cx}
+                  y={22}
+                  fontSize="9"
+                  fontWeight="700"
+                  fill="#d1d5db"
+                  letterSpacing="0.08em"
+                  textAnchor="middle"
+                  style={{ userSelect: 'none' }}
+                >
+                  {cfg.label.toUpperCase()}
+                </text>
+              )
+            }
+            return acc
+          }, { seen: new Set(), labels: [] }).labels}
 
           {edges.map(edge => {
             const cfg         = EDGE_CFG[edge.type] ?? EDGE_CFG.data
@@ -436,23 +480,34 @@ function TraceTimeline({ selectedId, onSelect, nodes }) {
 function Breadcrumb({ nodeId, nodes }) {
   // Build a simple breadcrumb path from root to the selected node
   // by traversing the first edge connected to the node
-  const path = []
+  const full = []
   if (nodeId && nodes && nodes.length > 0) {
     const selectedIdx = nodes.findIndex(n => n.id === nodeId)
     if (selectedIdx >= 0) {
       // Include all nodes up to and including the selected one
       for (let i = 0; i <= selectedIdx; i++) {
-        path.push(nodes[i].label)
+        full.push(nodes[i].label)
       }
     }
   }
 
+  // Collapse long paths (e.g. threat-hunter's 6-tool fan-out) into
+  // "first … last-3" so the panel header stays on one line.
+  const MAX = 4
+  const path = full.length > MAX
+    ? [full[0], '…', ...full.slice(-3)]
+    : full
+
   return (
-    <div className="flex items-center gap-1 text-[10.5px] text-gray-400 flex-wrap">
+    <div className="flex items-center gap-1 text-[10.5px] text-gray-400 min-w-0 overflow-hidden whitespace-nowrap">
       {path.map((label, i) => (
-        <span key={`${label}-${i}`} className="flex items-center gap-1">
+        <span key={`${label}-${i}`} className="flex items-center gap-1 shrink-0">
           {i > 0 && <ChevronRight size={10} strokeWidth={2} className="text-gray-300 shrink-0" />}
-          <span className={cn('font-medium', i === path.length - 1 ? 'text-gray-700' : 'text-gray-400')}>
+          <span className={cn(
+            'font-medium truncate max-w-[120px]',
+            label === '…' ? 'text-gray-300' :
+            i === path.length - 1 ? 'text-gray-700' : 'text-gray-400',
+          )}>
             {label}
           </span>
         </span>
@@ -475,18 +530,247 @@ function KpiCard({ label, value, sub, accentClass }) {
   )
 }
 
+// ── Session picker ────────────────────────────────────────────────────────────
+
+function _formatSessionLabel(s) {
+  const sid = s.session_id || ''
+  const shortSid = sid.length > 16 ? `${sid.slice(0, 6)}…${sid.slice(-6)}` : sid
+  const promptPreview = typeof s.prompt === 'string' && s.prompt.length > 0
+    ? ` — ${s.prompt.slice(0, 36)}${s.prompt.length > 36 ? '…' : ''}`
+    : ''
+  return `${shortSid}${promptPreview}`
+}
+
+function LineageSessionPicker({ sessions, value, loading, onChange }) {
+  const list     = Array.isArray(sessions) ? sessions : []
+  const isEmpty  = list.length === 0
+  // Always render the picker so the control is discoverable even before the
+  // first /sessions fetch resolves (or when the backend has no recorded
+  // sessions yet). The dropdown is disabled in that case and shows a hint.
+  return (
+    <div className="flex items-center gap-1.5">
+      <span className="text-[11px] font-medium text-gray-500">Session:</span>
+      <select
+        value={value || ''}
+        onChange={e => onChange(e.target.value)}
+        disabled={loading || isEmpty}
+        title={isEmpty ? 'No recorded sessions yet — run a simulation to populate' : undefined}
+        className={cn(
+          'text-[12px] border border-gray-200 rounded-lg px-2 py-1',
+          'bg-white text-gray-700 min-w-[180px] max-w-[340px]',
+          'focus:outline-none focus:ring-1 focus:ring-blue-400',
+          (loading || isEmpty) && 'opacity-60 cursor-not-allowed',
+        )}
+      >
+        {isEmpty ? (
+          <option value="">No recent sessions</option>
+        ) : (
+          <>
+            <option value="">Live (current)</option>
+            {list.map(s => (
+              <option key={s.session_id} value={s.session_id}>
+                {_formatSessionLabel(s)}
+              </option>
+            ))}
+          </>
+        )}
+      </select>
+    </div>
+  )
+}
+
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Lineage({ simEvents: simEventsProp } = {}) {
   // Support both direct prop (for tests) and context (for live use)
-  const { simEvents: simEventsCtx } = useSimulationContext()
-  const simEvents = simEventsProp ?? simEventsCtx
+  const { simEvents: simEventsCtx, startSimulation } = useSimulationContext()
+
+  // ── Entry points & traceability ──────────────────────────────────────────
+  // The Lineage page can be reached MANY ways — every action in the system
+  // should land here with a renderable graph. Since session lineage events
+  // are now persisted in Postgres (orchestrator session_events table) and
+  // the api service transparently falls back to that store when its in-memory
+  // LRU evicts a session, we have a single source of truth: the backfill
+  // endpoint. No more synthetic reconstruction from finding evidence.
+  //
+  // Resolution chain (in priority):
+  //   1. simEventsProp  (explicit test prop)
+  //   2. backfillEvents (HTTP /sessions/{id}/events — unions in-memory log +
+  //                      persistent session_events)
+  //   3. simEventsCtx   (live WebSocket stream for current chat)
+  //
+  // Entry routes:
+  //   /admin/lineage                                  → live
+  //   /admin/lineage/:sessionId                       → backfill
+  //   /admin/lineage?finding_id=…                     → finding-linked replay
+  //                                                     (hypothesis used as
+  //                                                     Run Simulation prompt)
+  //   /admin/lineage/:sessionId?finding_id=…          → backfill + finding ctx
+  const { sessionId: routeSessionId } = useParams()
+  const navigate = useNavigate()
+  const location        = useLocation()
+  const _params         = new URLSearchParams(location.search)
+  const ctxAsset        = _params.get('asset')
+  const ctxFindingId    = _params.get('finding_id')
+  const [sessions, setSessions]           = useState([])
+  const [pickedSession, setPickedSession] = useState(routeSessionId || '')
+  const [backfillEvents, setBackfillEvents] = useState(null)
+  const [backfillLoading, setBackfillLoading] = useState(false)
+
+  // Fetch the list of recent sessions on mount. Re-fetched when simEvents gets
+  // non-empty (a fresh session completed) so the dropdown stays current.
+  useEffect(() => {
+    let cancelled = false
+    listSessions().then(list => {
+      if (!cancelled) setSessions(list)
+    })
+    return () => { cancelled = true }
+  }, [simEventsCtx.length])
+
+  // If the URL contains a :sessionId, treat it as the picked session.
+  useEffect(() => {
+    if (routeSessionId && routeSessionId !== pickedSession) {
+      setPickedSession(routeSessionId)
+    }
+  }, [routeSessionId, pickedSession])
+
+  // When a session is picked, fetch its events from the backend and normalise
+  // them into SimulationEvent shape for lineageFromEvents(). We keep the
+  // backfilled events in LOCAL state (not shared context) so switching back to
+  // "Live" cleanly restores the current session without leftover history.
+  useEffect(() => {
+    if (!pickedSession) { setBackfillEvents(null); return }
+    let cancelled = false
+    setBackfillLoading(true)
+    fetchSessionEvents(pickedSession).then(raw => {
+      if (cancelled) return
+      const normalised = raw.map(normalizeEvent)
+      setBackfillEvents(normalised)
+      setBackfillLoading(false)
+    })
+    return () => { cancelled = true }
+  }, [pickedSession])
+
+  // Finding context (if arrived with ?finding_id=…) — used ONLY to seed the
+  // Run Simulation prompt with the hunter's actual hypothesis. The graph
+  // itself is rendered from persisted session events (never synthesised).
+  const { finding: ctxFinding } = useFinding(ctxFindingId)
+  const hasBackfillEvents = Array.isArray(backfillEvents) && backfillEvents.length > 0
+
+  // Resolution order: test prop → backfill (when non-empty) → empty backfill
+  // (drives the "no events" message) → live context.
+  const simEvents =
+    simEventsProp
+    ?? (hasBackfillEvents ? backfillEvents : null)
+    ?? backfillEvents
+    ?? simEventsCtx
+
+  const handleSessionChange = (sid) => {
+    setPickedSession(sid)
+    // Keep the URL in sync so the selection survives reload / is shareable.
+    if (sid) {
+      navigate(`/admin/lineage/${encodeURIComponent(sid)}`, { replace: true })
+    } else {
+      navigate('/admin/lineage', { replace: true })
+    }
+  }
+
+  // ── Run Simulation → replay current session ─────────────────────────────────
+  // Re-executes the same investigation that produced the currently-viewed
+  // lineage, kicking off a fresh live run. We stay on the Lineage page and let
+  // the new session's events stream in through the shared context (clearing
+  // pickedSession so the graph switches from backfilled → live).
+  //
+  // All findings in this system come from the threat-hunting agent, so when
+  // a finding is in context, the replay prompt IS the finding's hypothesis —
+  // the actual question the hunter asked — never the evidence-joined
+  // contextSnippet.
+  //
+  // Prompt resolution order (highest priority first):
+  //   1. finding hypothesis/prompt/title — when a finding is in context
+  //      (Alerts → Lineage entry), use the real replayable query.
+  //   2. sessions[] summary row matching pickedSession (fast path — already
+  //      surfaced by the backend's list_sessions() summary).
+  //   3. normalised simEvents (`session.started` event's details.prompt).
+  const _findReplayPrompt = () => {
+    // 1. Prefer the finding's own prompt when a finding is in context.
+    if (ctxFinding) {
+      const p = replayPromptFromFinding(ctxFinding)
+      if (p) return p
+    }
+    // 2. Backend session summary row
+    if (pickedSession) {
+      const row = sessions.find(s => s.session_id === pickedSession)
+      if (row && typeof row.prompt === 'string' && row.prompt.trim()) {
+        return row.prompt.trim()
+      }
+    }
+    // 3. session.started event in whatever event list we're rendering
+    for (const ev of simEvents || []) {
+      if (ev?.event_type === 'session.started') {
+        const p = ev.details?.prompt
+        if (typeof p === 'string' && p.trim()) return p.trim()
+      }
+    }
+    return null
+  }
+
+  const replayPrompt = _findReplayPrompt()
+  const canReplay    = typeof replayPrompt === 'string' && replayPrompt.trim().length > 0
+
+  const handleRunSimulation = () => {
+    if (!canReplay) return
+    // Switch the GRAPH source to the LIVE context so new events stream in,
+    // but DON'T reset the session selector — the user wants to see which
+    // session is being replayed. Clearing backfillEvents (without clearing
+    // pickedSession or navigating away) makes the resolution chain
+    // `backfill ?? simEventsCtx` fall through to the live stream.
+    setBackfillEvents(null)
+
+    startSimulation({
+      attackType:  'exfiltration',
+      prompt:      replayPrompt,
+      execMode:    'live',
+      customMode:  'single',
+      garakConfig: null,
+    })
+  }
+
+  // Export whatever events are currently being rendered as a JSON file the
+  // user can attach to bug reports / postmortems.
+  const handleExportTrace = () => {
+    if (!simEvents || simEvents.length === 0) return
+    try {
+      const blob = new Blob([JSON.stringify(simEvents, null, 2)], {
+        type: 'application/json',
+      })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const sid = pickedSession || 'live'
+      const safe = String(sid).replace(/[^A-Za-z0-9._-]/g, '_')
+      a.download = `lineage-${safe}-${Date.now()}.json`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      console.error('[Lineage] Export failed:', err)
+    }
+  }
 
   // Derive graph from events
   const { nodes: rawNodes, edges: rawEdges } = lineageFromEvents(simEvents)
   const positionedNodes = assignCoords(rawNodes)
   const nodeById        = new Map(positionedNodes.map(n => [n.id, n]))
   const positionedEdges = assignEdgePaths(rawEdges, nodeById)
+
+  // Compute the canvas size from actually-present node types (and tool count).
+  // Passing nodes[] uses graphDimensions' overload that auto-derives both
+  // toolCount and presentTypes — so the canvas only sizes for the columns we
+  // actually render, eliminating the empty left gutter when upstream nodes
+  // (prompt / context / model) are missing.
+  const { cw: CW, ch: CH } = graphDimensions(positionedNodes)
 
   // Build dynamic nodeEdges map (replaces hardcoded NODE_EDGES)
   const nodeEdges = {}
@@ -498,11 +782,13 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
   const [selectedId,    setSelectedId]    = useState(positionedNodes[0]?.id ?? null)
 
   // ── Context banner from query params (set by ActionPanel navigation) ──────
-  const location        = useLocation()
-  const _params         = new URLSearchParams(location.search)
-  const ctxAsset        = _params.get('asset')
-  const ctxFindingId    = _params.get('finding_id')
-  const [bannerVisible, setBannerVisible] = useState(!!(ctxAsset || ctxFindingId))
+  // Shown when navigation landed here with asset / finding context so the
+  // user sees *why* this graph is on screen. With persistent session_events
+  // the graph is ALWAYS the real recorded run, never synthesised — so the
+  // banner only surfaces navigation context, never a "reconstructed" warning.
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+  const bannerVisible = !bannerDismissed && (!!ctxAsset || !!ctxFindingId)
+  const bannerFindingId = ctxFindingId || null
 
   const handleSelect = (id) => setSelectedId(id)
 
@@ -515,23 +801,23 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
   return (
     <PageContainer>
 
-      {/* ── Context banner (shown when navigated from ActionPanel) ── */}
-      {bannerVisible && (ctxAsset || ctxFindingId) && (
+      {/* ── Context banner (shown when navigated from ActionPanel with
+            asset / finding context) ── */}
+      {bannerVisible && (
         <div
           data-testid="lineage-context-banner"
-          className="flex items-center gap-3 px-4 py-2.5 bg-blue-50 border border-blue-200
-                     rounded-xl text-[12px] text-blue-700 font-medium"
+          className="flex items-center gap-3 px-4 py-2.5 border rounded-xl text-[12px] font-medium bg-blue-50 border-blue-200 text-blue-700"
         >
           <GitBranch size={13} className="text-blue-400 shrink-0" />
           <span className="flex-1">
-            Viewing lineage context
-            {ctxAsset     && <> for asset: <strong>{ctxAsset}</strong></>}
-            {ctxFindingId && <> · Finding: <strong>{ctxFindingId}</strong></>}
+            <>Viewing lineage context</>
+            {ctxAsset        && <> · asset: <strong>{ctxAsset}</strong></>}
+            {bannerFindingId && <> · Finding: <strong>{bannerFindingId}</strong></>}
           </span>
           <button
             data-testid="lineage-banner-dismiss"
-            onClick={() => setBannerVisible(false)}
-            className="text-blue-400 hover:text-blue-600 transition-colors"
+            onClick={() => setBannerDismissed(true)}
+            className="transition-colors text-blue-400 hover:text-blue-600"
           >
             ✕
           </button>
@@ -544,13 +830,38 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
         subtitle="Trace context flow and understand how AI decisions are formed"
         actions={
           <>
-            <Button variant="outline" size="sm" className="gap-1.5">
-              <RotateCcw size={13} strokeWidth={2} /> Replay
-            </Button>
-            <Button variant="outline" size="sm" className="gap-1.5">
+            <LineageSessionPicker
+              sessions={sessions}
+              value={pickedSession}
+              loading={backfillLoading}
+              onChange={handleSessionChange}
+            />
+            <Button
+              variant="outline"
+              size="sm"
+              className="gap-1.5"
+              onClick={handleExportTrace}
+              disabled={simEvents.length === 0}
+              title={
+                simEvents.length === 0
+                  ? 'No events to export'
+                  : 'Download the event stream as JSON'
+              }
+            >
               <Download size={13} strokeWidth={2} /> Export Trace
             </Button>
-            <Button variant="default" size="sm" className="gap-1.5">
+            <Button
+              variant="default"
+              size="sm"
+              className="gap-1.5"
+              onClick={handleRunSimulation}
+              disabled={!canReplay}
+              title={
+                canReplay
+                  ? 'Replay this session — re-runs the same prompt through the live pipeline'
+                  : 'Pick a session (or load one with events) to replay its prompt'
+              }
+            >
               <Play size={13} strokeWidth={2} /> Run Simulation
             </Button>
           </>
@@ -558,8 +869,35 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
       />
 
       {isEmpty ? (
-        <div className="flex items-center justify-center h-64 text-gray-400 text-sm">
-          No simulation data yet — run a simulation to populate the graph.
+        <div className="flex flex-col items-center justify-center h-64 text-gray-500 text-sm gap-2">
+          {backfillLoading ? (
+            <span className="text-gray-400">Loading session events…</span>
+          ) : pickedSession ? (
+            <>
+              <span className="text-gray-500">
+                No events recorded for this session.
+              </span>
+              <span className="text-[11px] text-gray-400">
+                Session id: <code className="font-mono">{pickedSession}</code>
+              </span>
+              <span className="text-[11px] text-gray-400">
+                If this session ran but events were never persisted, the
+                orchestrator's session_events store was likely unreachable
+                at the time.
+              </span>
+            </>
+          ) : sessions.length > 0 ? (
+            <>
+              <span>No live simulation — pick a recent session above to inspect it.</span>
+              <span className="text-[11px] text-gray-400">
+                {sessions.length} recent session{sessions.length === 1 ? '' : 's'} available.
+              </span>
+            </>
+          ) : (
+            <span className="text-gray-400">
+              No simulation data yet — run a simulation to populate the graph.
+            </span>
+          )}
         </div>
       ) : (
         <>
@@ -579,14 +917,14 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
         {/* LEFT/CENTER — graph panel (8 cols) */}
         <div className="col-span-8 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
           {/* Panel header */}
-          <div className="h-10 px-4 flex items-center justify-between border-b border-gray-100 shrink-0">
-            <div className="flex items-center gap-2">
-              <ArrowRight size={13} className="text-gray-400" strokeWidth={1.75} />
-              <span className="text-[12px] font-semibold text-gray-700">Context Flow Graph</span>
+          <div className="h-10 px-4 flex items-center justify-between gap-3 border-b border-gray-100 shrink-0">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <ArrowRight size={13} className="text-gray-400 shrink-0" strokeWidth={1.75} />
+              <span className="text-[12px] font-semibold text-gray-700 whitespace-nowrap shrink-0">Context Flow Graph</span>
               <Breadcrumb nodeId={selectedId} nodes={positionedNodes} />
             </div>
             {/* Legend */}
-            <div className="flex items-center gap-3 text-[10px] text-gray-400">
+            <div className="flex items-center gap-3 text-[10px] text-gray-400 shrink-0">
               {[
                 { label: 'data flow',   color: '#d1d5db', dash: false },
                 { label: 'sensitive',   color: '#fca5a5', dash: true  },
@@ -605,7 +943,7 @@ export default function Lineage({ simEvents: simEventsProp } = {}) {
 
           {/* Graph area */}
           <div className="flex-1 overflow-auto p-4">
-            <LineageGraph selectedId={selectedId} onSelect={handleSelect} nodes={positionedNodes} edges={positionedEdges} nodeEdges={nodeEdges} />
+            <LineageGraph selectedId={selectedId} onSelect={handleSelect} nodes={positionedNodes} edges={positionedEdges} nodeEdges={nodeEdges} cw={CW} ch={CH} />
           </div>
 
           {/* Graph footer — edge type + node selection stats */}

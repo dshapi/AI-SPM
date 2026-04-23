@@ -23,8 +23,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import deque
-from typing import Deque, Dict, Set, Tuple
+from collections import OrderedDict, deque
+from typing import Deque, Dict, List, Set, Tuple
 
 from fastapi import WebSocket
 
@@ -45,6 +45,18 @@ QUEUE_MAX_SIZE: int = 256
 # lazily on each broadcast.
 BUFFER_MAX_PER_SESSION: int = 64
 BUFFER_TTL_S: float = 120.0
+
+# ── Persistent event log ─────────────────────────────────────────────────────
+# Independent of the pre-connect buffer. Every event passed to broadcast() is
+# appended here regardless of WS state, and entries are NOT cleared on connect.
+# Enables GET /sessions/{sid}/events for the Lineage session picker so recent
+# runs can be re-inspected after the chat page unmounts or the browser reloads.
+#
+# Retention is bounded: at most LOG_MAX_SESSIONS sessions, each capped at
+# LOG_MAX_EVENTS_PER_SESSION events. Oldest session is evicted LRU-style when
+# the cap is exceeded.
+LOG_MAX_SESSIONS: int = 50
+LOG_MAX_EVENTS_PER_SESSION: int = 200
 
 
 # Internal entry: (ws_object_id, WebSocket, asyncio.Queue)
@@ -68,6 +80,9 @@ class ConnectionManager:
         self._connections: Dict[str, Set[_Entry]] = {}
         # session_id → deque[(monotonic_ts, event_dict)] for pre-connect buffering
         self._pending: Dict[str, Deque[Tuple[float, dict]]] = {}
+        # session_id → list[event_dict] — persistent log, survives disconnect.
+        # OrderedDict so we can LRU-evict the oldest session when we hit the cap.
+        self._log: "OrderedDict[str, List[dict]]" = OrderedDict()
         self._lock = asyncio.Lock()
 
     # ── Internal pending-buffer helpers ──────────────────────────────────────
@@ -166,6 +181,11 @@ class ConnectionManager:
         """
         now = time.monotonic()
         async with self._lock:
+            # ── Persistent log (independent of WS state) ─────────────────────
+            # Append every event so the Lineage page / session picker can
+            # backfill from the server even if the browser disconnected.
+            self._append_log_locked(session_id, event)
+
             entries = set(self._connections.get(session_id, set()))
             if not entries:
                 # No live connection — buffer for later flush.
@@ -193,6 +213,87 @@ class ConnectionManager:
                     session_id,
                     event.get("event_type", "?"),
                 )
+
+    # ── Persistent log helpers ───────────────────────────────────────────────
+
+    def _append_log_locked(self, session_id: str, event: dict) -> None:
+        """
+        Append *event* to the persistent log for *session_id*. Must hold lock.
+
+        Uses LRU ordering: touching a session moves it to the MRU end; the
+        oldest session is evicted when LOG_MAX_SESSIONS is exceeded. Each
+        session's log is capped at LOG_MAX_EVENTS_PER_SESSION (oldest dropped).
+        """
+        log_for_session = self._log.get(session_id)
+        if log_for_session is None:
+            log_for_session = []
+            self._log[session_id] = log_for_session
+        else:
+            # Move to MRU end on every append.
+            self._log.move_to_end(session_id)
+
+        log_for_session.append(event)
+        if len(log_for_session) > LOG_MAX_EVENTS_PER_SESSION:
+            # Trim from the front — preserve the most recent events.
+            del log_for_session[0 : len(log_for_session) - LOG_MAX_EVENTS_PER_SESSION]
+
+        while len(self._log) > LOG_MAX_SESSIONS:
+            # Evict the least-recently-updated session.
+            self._log.popitem(last=False)
+
+    async def get_session_events(self, session_id: str) -> List[dict]:
+        """
+        Return all persisted events for *session_id* (may be empty).
+
+        The returned list is a shallow copy — safe to iterate or serialise
+        without holding the lock. Event dicts themselves are shared; callers
+        should treat them as read-only.
+        """
+        async with self._lock:
+            events = self._log.get(session_id)
+            return list(events) if events else []
+
+    async def list_sessions(self) -> List[dict]:
+        """
+        Return a summary of every session currently in the persistent log,
+        ordered by most recent activity first.
+
+        Each entry: {
+            "session_id": str,
+            "event_count": int,
+            "first_timestamp": str | None,
+            "last_timestamp": str | None,
+            "first_event_type": str | None,
+            "last_event_type": str | None,
+            "prompt": str | None,   # from session.started payload, if present
+        }
+        """
+        out: List[dict] = []
+        async with self._lock:
+            # Iterate from MRU → LRU.
+            for sid, events in reversed(self._log.items()):
+                if not events:
+                    continue
+                first = events[0]
+                last  = events[-1]
+                # Try to surface the prompt from session.started; fall back to
+                # any event whose payload has a "prompt" key (e.g. policy.*).
+                prompt = None
+                for ev in events:
+                    payload = ev.get("payload") if isinstance(ev, dict) else None
+                    if isinstance(payload, dict) and payload.get("prompt"):
+                        prompt = payload["prompt"]
+                        break
+                out.append({
+                    "session_id":        sid,
+                    "event_count":       len(events),
+                    "first_timestamp":   first.get("timestamp") if isinstance(first, dict) else None,
+                    "last_timestamp":    last.get("timestamp")  if isinstance(last, dict)  else None,
+                    "first_event_type":  first.get("event_type") if isinstance(first, dict) else None,
+                    "last_event_type":   last.get("event_type")  if isinstance(last, dict)  else None,
+                    "prompt":            prompt,
+                })
+        return out
 
     # ── Observability ─────────────────────────────────────────────────────────
 

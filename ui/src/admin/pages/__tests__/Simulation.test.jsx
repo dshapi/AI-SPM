@@ -39,6 +39,8 @@ vi.mock('../../../hooks/useSimulationStream.js', () => ({
 import * as simApi     from '../../../api/simulationApi.js'
 import * as streamMod  from '../../../hooks/useSimulationStream.js'
 import Simulation      from '../Simulation.jsx'
+import { SimulationContext }   from '../../../context/SimulationContext.jsx'
+import { useSimulationState }  from '../../../hooks/useSimulationState.js'
 
 // ── Shared state refs (mutate in tests, reset in beforeEach) ──────────────────
 
@@ -51,14 +53,55 @@ const _stopStream  = vi.fn()
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function renderSim() {
-  return render(
+/**
+ * Mirrors `SimulationRoot` from src/index.jsx — owns the single
+ * useSimulationState() instance and exposes it via SimulationContext. The test
+ * MUST render through this wrapper; without it, Simulation.jsx's
+ * useSimulationContext() returns the default no-op value and clickRun() does
+ * nothing (regression introduced when SimulationContext replaced the local
+ * useSimulationState call in commit 33bd692).
+ */
+function SimulationRoot({ children }) {
+  const {
+    simState,
+    startSimulation,
+    resetSimulation,
+    subscribeToSession,
+    unsubscribeFromSession,
+    loadSessionEvents,
+  } = useSimulationState()
+  return (
+    <SimulationContext.Provider
+      value={{
+        simEvents: simState.simEvents,
+        simState,
+        startSimulation,
+        resetSimulation,
+        subscribeToSession,
+        unsubscribeFromSession,
+        loadSessionEvents,
+      }}
+    >
+      {children}
+    </SimulationContext.Provider>
+  )
+}
+
+/** Router + SimulationRoot wrapper — reused by render() and rerender(). */
+function TestWrapper({ children }) {
+  return (
     <MemoryRouter initialEntries={['/admin/simulation']}>
-      <Routes>
-        <Route path="/admin/simulation" element={<Simulation />} />
-      </Routes>
+      <SimulationRoot>
+        <Routes>
+          <Route path="/admin/simulation" element={children} />
+        </Routes>
+      </SimulationRoot>
     </MemoryRouter>
   )
+}
+
+function renderSim() {
+  return render(<Simulation />, { wrapper: TestWrapper })
 }
 
 /** Click the first "Run Simulation" button (there are two in the DOM). */
@@ -150,13 +193,7 @@ describe('Simulation lifecycle — leaves running state on terminal event', () =
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     await waitFor(() => {
       expect(screen.queryByText('Simulating attack…')).not.toBeInTheDocument()
@@ -176,13 +213,7 @@ describe('Simulation lifecycle — leaves running state on terminal event', () =
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     await waitFor(() => {
       expect(screen.queryByText('Simulating attack…')).not.toBeInTheDocument()
@@ -201,13 +232,7 @@ describe('Simulation lifecycle — leaves running state on terminal event', () =
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     await waitFor(() => {
       expect(screen.queryByText('Simulating attack…')).not.toBeInTheDocument()
@@ -231,13 +256,7 @@ describe('Simulation lifecycle — leaves running state on terminal event', () =
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     await waitFor(() => {
       expect(screen.queryByText('Simulating attack…')).not.toBeInTheDocument()
@@ -276,13 +295,7 @@ describe('Result built from simEvents — not from fetchSessionResults (Bug 3 fi
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     // Result tabs become visible once result is populated from simEvents
     await waitFor(() => {
@@ -318,13 +331,7 @@ describe('useSessionSocket dedup — allows duplicate event_types with different
       ]
     })
 
-    rerender(
-      <MemoryRouter initialEntries={['/admin/simulation']}>
-        <Routes>
-          <Route path="/admin/simulation" element={<Simulation />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    rerender(<Simulation />)
 
     // Both events should appear in the simulation events list
     // (component receives 4 events, not 3 deduplicated to 3 unique types)

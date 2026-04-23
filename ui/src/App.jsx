@@ -1,8 +1,9 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import Header from './components/Header.jsx'
 import ChatView from './components/ChatView.jsx'
 import ChatInput from './components/ChatInput.jsx'
 import { sendMessageStream } from './api.js'
+import { useSimulationContext } from './context/SimulationContext.jsx'
 
 const MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku' },
@@ -10,7 +11,9 @@ const MODELS = [
   { id: 'claude-opus-4-6', label: 'Claude Opus' },
 ]
 
-let _sessionId = `session-${Date.now()}`
+function _freshSessionId() {
+  return `session-${Date.now()}`
+}
 
 export default function App() {
   const [messages, setMessages] = useState([])
@@ -18,7 +21,31 @@ export default function App() {
   const [model, setModel] = useState(MODELS[0].id)
   const [inChat, setInChat] = useState(false)
   const [error, setError] = useState(null)
+  const [sessionId, setSessionId] = useState(_freshSessionId)
   const inputRef = useRef(null)
+
+  // ── Wire chat session events into the shared SimulationContext ──
+  // The backend emits platform session events (session.started, policy.*,
+  // output.generated, etc.) to /ws/sessions/{sessionId}.  By subscribing
+  // whenever the chat's sessionId changes, those events flow into the same
+  // simEvents array that Lineage / Alerts read from — so a live chat at /
+  // populates the Lineage graph at /admin/lineage without a reload.
+  //
+  // IMPORTANT — no cleanup that calls unsubscribeFromSession():
+  // stopStream() inside the context resets simEvents to []. If we invoked
+  // it on unmount, simply navigating from / (chat) to /admin/lineage would
+  // wipe the event stream the chat just produced — exactly what we want to
+  // display.  Swapping sessions is still safe: the next
+  // subscribeToSession(newSessionId) internally tears down the prior socket
+  // via connectWs → _closeSocket, so there's no leak.
+  //
+  // subscribeToSession is a no-op stub on the context default value, so this
+  // safely degrades if the provider isn't mounted (e.g. test renders).
+  const { subscribeToSession } = useSimulationContext()
+  useEffect(() => {
+    if (!sessionId || typeof subscribeToSession !== 'function') return
+    subscribeToSession(sessionId)
+  }, [sessionId, subscribeToSession])
 
   const appendMessage = useCallback((role, text, streaming = false) => {
     setMessages(prev => [...prev, { id: Date.now() + Math.random(), role, text, streaming }])
@@ -91,7 +118,7 @@ export default function App() {
     setLoading(true)
     appendMessage('assistant', '', true)
 
-    sendMessageStream(text, _sessionId, {
+    sendMessageStream(text, sessionId, {
       onToken: (chunk) => {
         // Append the token directly and coalesce renders via rAF.
         displayedRef.current += chunk
@@ -113,14 +140,16 @@ export default function App() {
         setLoading(false)
       },
     })
-  }, [loading, inChat, appendMessage, updateLastAssistant, scheduleRender, flushRender])
+  }, [loading, inChat, sessionId, appendMessage, updateLastAssistant, scheduleRender, flushRender])
 
   const handleNewChat = useCallback(() => {
     setMessages([])
     setInChat(false)
     setError(null)
     setLoading(false)
-    _sessionId = `session-${Date.now()}`
+    // Generating a fresh sessionId triggers the subscribeToSession effect,
+    // which closes the previous WS and opens a new one for the new session.
+    setSessionId(_freshSessionId())
     setTimeout(() => inputRef.current?.focus(), 100)
   }, [])
 

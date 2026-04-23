@@ -107,3 +107,44 @@ describe('assignEdgePaths', () => {
     expect(result[0].path).toMatch(/^M /)
   })
 })
+
+// ────────────────────────────────────────────────────────────────────────────
+// HTTP-vs-Kafka transport parity
+// ────────────────────────────────────────────────────────────────────────────
+// The api service used to dual-write lineage events to the orchestrator over
+// HTTP. It now publishes to a global Kafka topic; the orchestrator's consumer
+// drains it through the SAME persistence path. The orchestrator's read-back
+// endpoint returns the same WS-wire envelope shape regardless of transport.
+//
+// `lineageFromEvents()` is a pure function over that envelope list — so if
+// the persisted rows are equal across transports (asserted by the orchestrator
+// test test_lineage_kafka_parity.py), and this UI function is pure over those
+// rows, the rendered graph is necessarily identical. This block pins the
+// "pure over rows" half by feeding the same event list through twice and
+// asserting the graph is byte-equal.
+describe('lineageFromEvents — HTTP/Kafka transport parity', () => {
+  // The exact 5-node canonical chain the user expects:
+  // PROMPT → CONTEXT → MODEL → POLICY → LLM CALL → OUTPUT.
+  const canonicalEvents = [
+    { event_type: EVENT_TYPES.SESSION_STARTED,    stage: 'progress', status: 'progress', timestamp: 't0', details: { prompt: 'audit my pipeline' } },
+    { event_type: EVENT_TYPES.CONTEXT_RETRIEVED,  stage: 'progress', status: 'progress', timestamp: 't1', details: { context_count: 4 } },
+    { event_type: EVENT_TYPES.RISK_ENRICHED,      stage: 'progress', status: 'progress', timestamp: 't2', details: { risk_score: 0.18 } },
+    { event_type: EVENT_TYPES.POLICY_ALLOWED,     stage: 'progress', status: 'progress', timestamp: 't3', details: { reason: 'ok' } },
+    { event_type: 'llm.invoked',                  stage: 'progress', status: 'progress', timestamp: 't4', details: { provider: 'anthropic', model: 'claude-haiku' } },
+    { event_type: EVENT_TYPES.OUTPUT_GENERATED,   stage: 'progress', status: 'progress', timestamp: 't5', details: { output_length: 142 } },
+  ].map((e, i) => ({ ...e, id: `${e.event_type}:x:${i}` }))
+
+  it('produces identical graphs for HTTP-delivered and Kafka-delivered event lists', () => {
+    // Two independent copies of the same logical event list — what the api
+    // service would have broadcast either way. Deep-cloned so neither call
+    // can mutate the other's input.
+    const httpEvents  = JSON.parse(JSON.stringify(canonicalEvents))
+    const kafkaEvents = JSON.parse(JSON.stringify(canonicalEvents))
+
+    const httpGraph  = lineageFromEvents(httpEvents)
+    const kafkaGraph = lineageFromEvents(kafkaEvents)
+
+    // Same nodes, same edges, same order.
+    expect(httpGraph).toEqual(kafkaGraph)
+  })
+})

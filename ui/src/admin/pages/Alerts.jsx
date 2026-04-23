@@ -868,10 +868,22 @@ function FindingDetailPanel({ finding, onClose, onMarkStatus, onLinkCase }) {
                 label:  'Open Lineage Graph',
                 icon:   GitBranch,
                 testId: 'quick-link-lineage',
-                // Pass asset context only when real; always pass finding_id for the banner
-                href: finding.hasRealAsset
-                  ? `/admin/lineage?asset=${encodeURIComponent(finding.asset.name)}&finding_id=${finding.id}`
-                  : `/admin/lineage?finding_id=${finding.id}`,
+                // Prefer the finding's correlated session_id: that's what the
+                // Lineage page needs to backfill the actual event history from
+                // the backend. Without it the page lands on the live (usually
+                // empty) context and shows the empty state.
+                // Asset + finding_id query params are still appended so the
+                // Lineage context banner can render.
+                href: (() => {
+                  const sid    = finding.correlated_events?.[0]
+                  const base   = sid ? `/admin/lineage/${encodeURIComponent(sid)}` : '/admin/lineage'
+                  const params = []
+                  if (finding.hasRealAsset && finding.asset?.name) {
+                    params.push(`asset=${encodeURIComponent(finding.asset.name)}`)
+                  }
+                  if (finding.id) params.push(`finding_id=${finding.id}`)
+                  return params.length ? `${base}?${params.join('&')}` : base
+                })(),
                 disabled: !finding.asset?.name,
               },
               {

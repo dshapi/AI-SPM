@@ -64,4 +64,10 @@ def all_topics_for_tenants(tenant_ids: list[str]) -> list[str]:
 
 @dataclass(frozen=True)
 class GlobalTopics:
-    MODEL_EVENTS: str = "cpm.global.model_events"
+    MODEL_EVENTS:   str = "cpm.global.model_events"
+    # UI-lineage events emitted by the api service (chat + simulation) and
+    # consumed by the agent-orchestrator for persistence in session_events.
+    # Global (not per-tenant) because the orchestrator runs one consumer
+    # group across all tenants and we don't want it to subscribe to a
+    # dynamic topic list. tenant_id travels in the envelope payload.
+    LINEAGE_EVENTS: str = "cpm.global.lineage_events"

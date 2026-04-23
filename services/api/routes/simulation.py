@@ -66,36 +66,72 @@ async def _ws_emit(
     correlation_id: str = "",
 ) -> str:
     """
-    Send a simulation event directly to the browser via the WS ConnectionManager.
+    Send a simulation event directly to the browser via the WS ConnectionManager
+    AND publish it to the global lineage Kafka topic for durable persistence.
 
     Returns the ISO-8601 timestamp actually stamped on the event so callers
     that also mirror the same event to Kafka (publish_*) can reuse it —
     otherwise the two paths stamp independent timestamps, the frontend
     dedup key (event_type:correlation_id:timestamp) fails to collide, and
-    the browser renders every event twice (Timeline, Decision Trace, and
-    Recommendations all duplicated).  See fix C in task #13.
+    the browser renders every event twice.
 
-    This bypasses Kafka entirely so events flow even when the broker is
-    unavailable.  Kafka publishing (if producer != None) remains additive
-    for persistence/analytics, but MUST reuse the returned timestamp.
+    Persistence rationale: without persisting simulation events the Replay
+    button on the Lineage page cannot reconstruct the graph after the
+    in-memory ConnectionManager log evicts the session.  We publish to
+    GlobalTopics.LINEAGE_EVENTS; the orchestrator's lineage_consumer drains
+    the topic and writes session_events using the SAME persistence call the
+    legacy HTTP endpoint used, so the persisted row is byte-identical and
+    the rendered graph is unchanged.
     """
     ts = timestamp or _now()
     try:
         import ws.session_ws as _sw
         manager = getattr(_sw, "_manager", None)
-        if manager is None:
-            return ts
-        event = {
-            "session_id":     session_id,
-            "event_type":     event_type,
-            "source_service": "api-simulation",
-            "correlation_id": correlation_id,
-            "timestamp":      ts,
-            "payload":        payload,
-        }
-        await manager.broadcast(session_id, event)
+        if manager is not None:
+            event = {
+                "session_id":     session_id,
+                "event_type":     event_type,
+                "source_service": "api-simulation",
+                "correlation_id": correlation_id,
+                "timestamp":      ts,
+                "payload":        payload,
+            }
+            await manager.broadcast(session_id, event)
     except Exception as exc:
         log.warning("_ws_emit error event_type=%s error=%s", event_type, exc)
+
+    # Durable path — Kafka publish (best-effort, fire-and-forget).
+    # Producer is fetched lazily from the api app module so simulation runs
+    # share the singleton with the chat path. KafkaProducer.send is
+    # non-blocking; we offload the flush+wait to a thread executor so the
+    # simulation pipeline is never stalled by broker latency.
+    try:
+        from platform_shared.lineage_events import publish_lineage_event
+        app_mod = sys.modules.get("app")
+        producer = getattr(app_mod, "_producer", None) if app_mod else None
+        if producer is None and app_mod is not None:
+            try:
+                producer = app_mod.get_producer()
+            except Exception:
+                producer = None
+        asyncio.get_event_loop().run_in_executor(
+            None,
+            lambda: publish_lineage_event(
+                producer,
+                session_id     = session_id,
+                event_type     = event_type,
+                payload        = payload,
+                timestamp      = ts,
+                correlation_id = correlation_id or None,
+                agent_id       = "sim-agent",
+                user_id        = "sim-user",
+                tenant_id      = "t1",
+                source         = "api-simulation",
+            ),
+        )
+    except Exception as exc:
+        log.warning("_ws_emit lineage publish schedule failed event_type=%s err=%s",
+                    event_type, exc)
     return ts
 
 
@@ -293,6 +329,33 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
                                 response_preview="",
                                 correlation_id=correlation_id,
                                 timestamp=ts_term)
+
+            # ── Lineage: emit the downstream pipeline stages so the graph
+            # shows the full canonical chain (prompt → risk → policy → llm →
+            # output) when the prompt is allowed. A simulation does NOT
+            # actually invoke a real LLM — these events describe what the
+            # live pipeline WOULD do, giving users the full lineage view.
+            _guard_score = (
+                result.signals.get("guard_score", 0.0)
+                if hasattr(result, "signals") else 0.0
+            )
+            await _ws_emit(session_id, "risk.calculated", {
+                "risk_score":     _guard_score,
+                "guard_score":    _guard_score,
+                "correlation_id": correlation_id,
+            }, correlation_id=correlation_id)
+            await _ws_emit(session_id, "llm.invoked", {
+                "provider":       "simulation",
+                "model":          "simulated",
+                "correlation_id": correlation_id,
+            }, correlation_id=correlation_id)
+            await _ws_emit(session_id, "output.generated", {
+                "output_length":   0,
+                "pii_redacted":    False,
+                "secrets_found":   False,
+                "simulated":       True,
+                "correlation_id":  correlation_id,
+            }, correlation_id=correlation_id)
 
         _eval_ms = int((datetime.datetime.utcnow() - _eval_start).total_seconds() * 1000)
         _total_ms = int((datetime.datetime.utcnow() - t0).total_seconds() * 1000)

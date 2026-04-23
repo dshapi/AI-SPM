@@ -300,7 +300,7 @@ export function simReducer(state, action) {
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 export function useSimulationState() {
-  const { connectionStatus, simEvents, startStream, stopStream } =
+  const { connectionStatus, simEvents, startStream, stopStream, loadEvents } =
     useSimulationStream()
 
   const [simState, dispatch] = useReducer(simReducer, makeIdle())
@@ -478,6 +478,15 @@ export function useSimulationState() {
     },
     startSimulation,
     resetSimulation,
+    // Low-level WS subscription — opens /ws/sessions/{sessionId} and starts
+    // collecting session events into `simEvents` WITHOUT going through the
+    // simulation API.  Used by the Chat page so chat-originated sessions
+    // populate the shared event stream (and thus the Lineage graph).
+    subscribeToSession: startStream,
+    unsubscribeFromSession: stopStream,
+    // Hydrate simEvents from a prior session (localStorage or explicit array)
+    // WITHOUT opening a WebSocket. Used by Lineage session picker for backfill.
+    loadSessionEvents: loadEvents,
   }
 }
 

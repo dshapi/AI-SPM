@@ -30,10 +30,13 @@ const _noop = () => {}
  * }>}
  */
 export const SimulationContext = createContext({
-  simEvents:       [],
-  simState:        { simEvents: [], status: 'idle', steps: [], partialResults: [], finalResults: null, sessionId: null, connectionStatus: 'idle' },
-  startSimulation: _noop,
-  resetSimulation: _noop,
+  simEvents:           [],
+  simState:            { simEvents: [], status: 'idle', steps: [], partialResults: [], finalResults: null, sessionId: null, connectionStatus: 'idle' },
+  startSimulation:     _noop,
+  resetSimulation:     _noop,
+  subscribeToSession:  _noop,
+  unsubscribeFromSession: _noop,
+  loadSessionEvents:   _noop,
 })
 
 /** Convenience hook — use inside any admin route component */
