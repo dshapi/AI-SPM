@@ -42,6 +42,230 @@ _SEVERITY_MAP = {
 class ThreatFindingsService:
     """Stateless — one shared instance on app.state."""
 
+    # ── Lineage events for agent-opened (threat-hunt) cases ───────────────────
+    #
+    # Threat-hunt cases use a session_id of the form ``threat-hunt:{rec.id}``.
+    # The hunt was not a chat session, but the threat-hunting agent really
+    # did perform steps that map onto the lineage event vocabulary:
+    #
+    #   • collected evidence            → context.retrieved
+    #   • scored risk / severity        → risk.calculated
+    #   • triggered detection policies  → policy.allowed/escalated/blocked
+    #   • produced finding + recs       → output.generated
+    #
+    # Every value below is read straight off the FindingRecord — hypothesis,
+    # risk_score, severity, ttps, triggered_policies, asset, evidence,
+    # recommended_actions. We project the agent's hunt into the same
+    # session_events shape every other run uses, so the Lineage page renders it.
+    #
+    # Transport: Kafka (GlobalTopics.LINEAGE_EVENTS) — same path the api
+    # service uses. The orchestrator's own LineageEventConsumer drains the
+    # topic and writes the rows into session_events via the shared
+    # persist_lineage_event service. Same wire envelope as
+    # platform_shared/lineage_events.py, just emitted with the orchestrator's
+    # async producer.
+    @staticmethod
+    def _build_threat_hunt_lineage_events(
+        *,
+        session_id: str,
+        finding:    FindingRecord,
+        decision:   str,
+    ) -> list[dict]:
+        """
+        Build the canonical 5-event lineage track for a threat-hunt session
+        from a FindingRecord. Returns a list of dicts each with keys:
+          session_id, event_type, payload, timestamp, correlation_id,
+          agent_id, user_id (optional), tenant_id, source
+
+        Pure function — no I/O. Shared by:
+          • _emit_threat_hunt_lineage       — publishes them via Kafka on
+                                               case creation.
+          • backfill_threat_hunt_lineage    — persists them in-process the
+                                               first time the Lineage page
+                                               asks for events of an
+                                               existing threat-hunt session.
+        """
+        now_iso        = datetime.now(timezone.utc).isoformat()
+        correlation_id = str(uuid4())
+        tenant_id      = finding.tenant_id
+        asset          = finding.asset or None
+        hypothesis     = finding.hypothesis or finding.title or "(no hypothesis)"
+        risk_score     = float(finding.risk_score or 0.0)
+        severity       = (finding.severity or "low").lower()
+        ttps           = finding.ttps or []
+        triggered      = finding.triggered_policies or []
+        evidence       = finding.evidence or []
+        recs           = finding.recommended_actions or []
+
+        policy_event_type = {
+            "allow":    "policy.allowed",
+            "escalate": "policy.escalated",
+            "block":    "policy.blocked",
+        }.get(decision, "policy.escalated")
+
+        base = dict(
+            session_id     = session_id,
+            timestamp      = now_iso,
+            correlation_id = correlation_id,
+            agent_id       = "threat-hunting-agent",
+            tenant_id      = tenant_id,
+            source         = "threat-hunting-agent",
+        )
+
+        return [
+            # 1. session.started — the hypothesis the agent investigated
+            {**base,
+             "event_type": "session.started",
+             "user_id":    "threat-hunter",
+             "payload": {
+                 "prompt":     hypothesis,
+                 "agent_id":   "threat-hunting-agent",
+                 "asset":      asset,
+                 "finding_id": finding.id,
+             }},
+            # 2. context.retrieved — the evidence the hunt collected
+            {**base,
+             "event_type": "context.retrieved",
+             "payload": {
+                 "retrieved_contexts": evidence,
+                 "context_count":      len(evidence),
+             }},
+            # 3. risk.calculated — the agent's own risk score / severity
+            {**base,
+             "event_type": "risk.calculated",
+             "payload": {
+                 "risk_score": risk_score,
+                 "signals":    ttps,
+                 "severity":   severity,
+             }},
+            # 4. policy.<decision> — the detection policies that fired
+            {**base,
+             "event_type": policy_event_type,
+             "payload": {
+                 "decision":           decision,
+                 "reason":             f"{severity.upper()} · {finding.title}",
+                 "triggered_policies": triggered,
+             }},
+            # 5. output.generated — the finding + recommended actions
+            {**base,
+             "event_type": "output.generated",
+             "payload": {
+                 "verdict":             decision,
+                 "summary":             finding.title,
+                 "finding_id":          finding.id,
+                 "recommended_actions": recs,
+             }},
+        ]
+
+    @classmethod
+    async def _emit_threat_hunt_lineage(
+        cls,
+        *,
+        publisher:  "EventPublisher",
+        session_id: str,
+        finding:    FindingRecord,
+        decision:   str,
+    ) -> None:
+        """
+        Publish the threat-hunting agent's hunt steps as lineage events on
+        GlobalTopics.LINEAGE_EVENTS. All payload values come from the
+        FindingRecord. Best-effort — never raises.
+        """
+        try:
+            events = cls._build_threat_hunt_lineage_events(
+                session_id = session_id,
+                finding    = finding,
+                decision   = decision,
+            )
+            for ev in events:
+                try:
+                    await publisher.emit_lineage_event(**ev)
+                except Exception as exc:
+                    logger.warning(
+                        "threat_hunt_lineage publish_failed session=%s type=%s err=%s",
+                        session_id, ev.get("event_type"), exc,
+                    )
+            logger.info(
+                "threat_hunt_lineage published session=%s finding=%s events=%d",
+                session_id, finding.id, len(events),
+            )
+        except Exception as exc:
+            logger.warning(
+                "threat_hunt_lineage publish_failed finding=%s err=%s",
+                finding.id, exc,
+            )
+
+    @classmethod
+    async def backfill_threat_hunt_lineage(
+        cls,
+        *,
+        finding:      FindingRecord,
+        session_id:   str,
+        session_repo,                # SessionRepository
+        event_repo,                  # EventRepository
+    ) -> int:
+        """
+        Persist the canonical threat-hunt lineage track directly into
+        session_events for an EXISTING threat-hunt case that has no events
+        yet. Used by the lazy-backfill path on the
+        GET /sessions/{sid}/events endpoint so cases opened before the
+        Kafka-emit path was wired up — and cases that were created while
+        Kafka was unreachable — still render a graph.
+
+        Returns the number of events persisted.
+        """
+        # Local import keeps the publishing path import-light and avoids
+        # forcing services/lineage_ingest into the module-load graph.
+        from services.lineage_ingest import LineageEventInput, persist_lineage_event
+
+        # Decision is needed to pick the policy event type. Reconstruct it
+        # from the finding's severity, matching what create_finding does.
+        severity = (finding.severity or "low").lower()
+        _, decision = _SEVERITY_MAP.get(severity, (0.5, "escalate"))
+
+        events = cls._build_threat_hunt_lineage_events(
+            session_id = session_id,
+            finding    = finding,
+            decision   = decision,
+        )
+
+        persisted = 0
+        for ev in events:
+            try:
+                ts = ev.get("timestamp")
+                if isinstance(ts, str):
+                    try:
+                        ts_dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    except Exception:
+                        ts_dt = datetime.now(timezone.utc)
+                else:
+                    ts_dt = ts or datetime.now(timezone.utc)
+
+                body = LineageEventInput(
+                    session_id     = ev["session_id"],
+                    event_type     = ev["event_type"],
+                    payload        = ev["payload"],
+                    timestamp      = ts_dt,
+                    correlation_id = ev.get("correlation_id"),
+                    agent_id       = ev.get("agent_id"),
+                    user_id        = ev.get("user_id"),
+                    tenant_id      = ev.get("tenant_id"),
+                    source         = ev.get("source"),
+                )
+                await persist_lineage_event(session_repo, event_repo, body)
+                persisted += 1
+            except Exception as exc:
+                logger.warning(
+                    "threat_hunt_lineage backfill_event_failed session=%s type=%s err=%s",
+                    session_id, ev.get("event_type"), exc,
+                )
+
+        logger.info(
+            "threat_hunt_lineage backfilled session=%s finding=%s events=%d",
+            session_id, finding.id, persisted,
+        )
+        return persisted
+
     async def create_finding(
         self,
         req: CreateFindingRequest,
@@ -103,7 +327,7 @@ class ThreatFindingsService:
             ttps_str = ", ".join(req.ttps) if req.ttps else "none"
             case = CaseRecord(
                 case_id=str(uuid4()),
-                session_id=f"threat-hunt:{rec.id}",   # synthetic; agent hunts have no real session
+                session_id=f"threat-hunt:{rec.id}",   # threat-hunt scoped session id
                 reason=f"threat-hunt · {req.severity.upper()} · {req.title} · TTPs: {ttps_str}",
                 summary=f"Threat finding raised by the Threat-hunter agent — {req.description}",
                 risk_score=risk_score,
@@ -117,6 +341,18 @@ class ThreatFindingsService:
                 "Opened and linked case case_id=%s for finding id=%s",
                 case.case_id, rec.id,
             )
+            # Publish the threat-hunting agent's hunt steps as lineage
+            # events on the same Kafka topic the api service uses; the
+            # orchestrator's LineageEventConsumer drains them into
+            # session_events so the Lineage page renders the graph the
+            # same way it does for any other session.
+            if publisher is not None:
+                await self._emit_threat_hunt_lineage(
+                    publisher  = publisher,
+                    session_id = case.session_id,
+                    finding    = rec,
+                    decision   = decision,
+                )
 
         # ── Publish finding.created event to Kafka ────────────────────────────
         if publisher is not None:
@@ -238,6 +474,18 @@ class ThreatFindingsService:
                 "Opened and linked case case_id=%s for finding id=%s",
                 case.case_id, rec.id,
             )
+            # Publish the threat-hunting agent's hunt steps as lineage
+            # events on the same Kafka topic the api service uses; the
+            # orchestrator's LineageEventConsumer drains them into
+            # session_events so the Lineage page renders the graph the
+            # same way it does for any other session.
+            if publisher is not None:
+                await self._emit_threat_hunt_lineage(
+                    publisher  = publisher,
+                    session_id = case.session_id,
+                    finding    = rec,
+                    decision   = decision,
+                )
 
         # ── Publish finding.created event to Kafka ────────────────────────────
         if publisher is not None:

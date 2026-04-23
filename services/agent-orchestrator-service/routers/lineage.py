@@ -270,10 +270,49 @@ def _event_to_ws_wire(
 )
 async def replay_session_events(
     session_id: str,
-    event_repo: EventRepository = Depends(get_event_repo),
+    request:    Request,
+    event_repo:   EventRepository   = Depends(get_event_repo),
+    session_repo: SessionRepository = Depends(get_session_repo),
 ) -> SessionEventsResponse:
     records = await event_repo.get_by_session_id(session_id)
-    events  = [_event_to_ws_wire(r, session_id=session_id) for r in records]
+
+    # ── Lazy backfill for threat-hunt synthetic sessions ──────────────────
+    # Cases auto-opened by the threat-hunting agent use a session_id of
+    # ``threat-hunt:{finding_id}`` and weren't always populated with lineage
+    # events at create time (the Kafka emit path was added later, and any
+    # case opened while the broker was unreachable would have skipped the
+    # publish). When the Lineage page asks for one of these and we have no
+    # rows, look the finding up and persist the canonical event track from
+    # its real fields, then re-read.
+    if not records and session_id.startswith("threat-hunt:"):
+        finding_id = session_id.split(":", 1)[1]
+        try:
+            from threat_findings.models import ThreatFindingRepository
+            from threat_findings.service import ThreatFindingsService
+
+            db_session   = event_repo._session
+            finding_repo = ThreatFindingRepository(db_session)
+            finding      = await finding_repo.get_by_id(finding_id)
+            if finding is not None:
+                await ThreatFindingsService.backfill_threat_hunt_lineage(
+                    finding      = finding,
+                    session_id   = session_id,
+                    session_repo = session_repo,
+                    event_repo   = event_repo,
+                )
+                records = await event_repo.get_by_session_id(session_id)
+            else:
+                logger.info(
+                    "lineage_backfill: no finding found for session=%s — returning empty",
+                    session_id,
+                )
+        except Exception as exc:
+            logger.warning(
+                "lineage_backfill_failed session=%s err=%s",
+                session_id, exc,
+            )
+
+    events = [_event_to_ws_wire(r, session_id=session_id) for r in records]
     return SessionEventsResponse(session_id=session_id, events=events)
 
 

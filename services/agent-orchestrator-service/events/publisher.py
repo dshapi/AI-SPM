@@ -14,6 +14,7 @@ is down, which is critical for local development.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -22,6 +23,13 @@ from typing import Any, Dict, Optional
 from uuid import UUID, uuid4
 
 from events.store import EventStore
+# NOTE: platform_shared.lineage_events is intentionally NOT imported at module
+# load time. It pulls in platform_shared.kafka_utils, which imports the sync
+# `kafka` (kafka-python) package — and the orchestrator image only ships the
+# async aiokafka client. Importing it here would crash the orchestrator at
+# boot with `ModuleNotFoundError: No module named 'kafka'`. The helper is
+# imported lazily inside emit_lineage_event() instead.
+from platform_shared.topics import GlobalTopics
 from schemas.events import (
     EventEnvelope,
     EventType,
@@ -384,6 +392,60 @@ class EventPublisher:
             ),
             payload=payload,
         )
+
+    # ── UI-lineage events (cpm.global.lineage_events) ──────────────────────
+    #
+    # Mirrors platform_shared.lineage_events.publish_lineage_event but uses
+    # the orchestrator's async AIOKafkaProducer instead of the api service's
+    # sync KafkaProducer. The wire envelope is identical
+    # (build_lineage_envelope) so the existing LineageEventConsumer drains
+    # both producers transparently.
+
+    async def emit_lineage_event(
+        self,
+        *,
+        session_id:     str,
+        event_type:     str,
+        payload:        Dict[str, Any],
+        timestamp:      Optional[str]   = None,
+        correlation_id: Optional[str]   = None,
+        agent_id:       Optional[str]   = None,
+        user_id:        Optional[str]   = None,
+        tenant_id:      Optional[str]   = None,
+        source:         str             = "agent-orchestrator",
+    ) -> bool:
+        """
+        Publish one UI-lineage event to GlobalTopics.LINEAGE_EVENTS.
+        Best-effort — returns False on broker error or LOG-ONLY mode.
+        """
+        # Lazy-import to avoid pulling kafka-python at module load. See note
+        # at the top of this file.
+        from platform_shared.lineage_events import build_lineage_envelope
+        envelope = build_lineage_envelope(
+            session_id     = session_id,
+            event_type     = event_type,
+            payload        = payload or {},
+            timestamp      = timestamp,
+            correlation_id = correlation_id,
+            agent_id       = agent_id,
+            user_id        = user_id,
+            tenant_id      = tenant_id,
+            source         = source,
+        )
+        value_bytes = json.dumps(envelope, default=str).encode("utf-8")
+        try:
+            await self._publish_kafka(
+                GlobalTopics.LINEAGE_EVENTS,
+                key   = session_id,
+                value = value_bytes,
+            )
+            return True
+        except Exception as exc:
+            logger.warning(
+                "emit_lineage_event failed session=%s type=%s err=%s",
+                session_id, event_type, exc,
+            )
+            return False
 
     # ── Threat-finding events ──────────────────────────────────────────────
 
