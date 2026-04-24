@@ -181,3 +181,77 @@ should see `cache entries for vendor=int-003` after the configure POST.
 - No new dependencies. `redis` and `psycopg2` are already in every
   consuming service's requirements.
 
+
+---
+
+## Amendment — fail-closed cache (post-incident)
+
+### What prompted this
+
+Real-world test on `feature/live-credential-lookup` ran into two
+coupled failures on the same request:
+
+1. Redis's `/data` bind-mount went stale on the host → BGSAVE
+   repeatedly failed → Redis flipped into
+   `stop-writes-on-bgsave-error`, so every rate-limit ZADD started
+   raising MISCONF → 500 on `/chat` and `/chat/stream`.
+2. While Redis was rejecting writes, the configure endpoint's
+   `invalidate_credential_cache(vendor)` `DEL` silently failed
+   (correctly — a cache blip shouldn't undo a committed save). When
+   Redis came back, it served the *old* cached credential to
+   services/api, which 401'd against Anthropic.
+
+The spm-api Test button read the DB directly via SQLAlchemy and
+worked, which is how we narrowed this down: the cache was lying to one
+consumer while the DB held the truth.
+
+### The fix
+
+Move the cache from "trust until explicitly invalidated" to
+"trust briefly, then re-verify cheaply." See `platform_shared/credentials.py`
+for the implementation; the two-window model is:
+
+  * **`FRESHNESS_S`** (default 5s) — trust the cache unconditionally.
+    Hot path: one Redis GET, no DB hit.
+  * **`FRESHNESS_S < age < TTL_S`** — run a cheap
+    `SELECT updated_at` on the credential row (indexed PK lookup, no
+    value transfer, no decryption). Match → extend both windows.
+    Mismatch → refetch the full value. DB error → serve cached but
+    DO NOT extend TTL, so a prolonged outage can't pin a stale
+    credential forever.
+  * **Past `TTL_S`** — Redis has expired the key; do a full lookup.
+
+The writer's `invalidate_credential_cache` stays in place but is now
+purely an optimisation. Correctness no longer depends on it ever
+succeeding, which is what the Redis-MISCONF incident surfaced.
+
+### Cost
+
+Worst case one cheap version-check per credential per `freshness_s`
+per consumer. `SELECT updated_at` on an indexed (integration_id,
+credential_type) row is <1ms — negligible next to an Anthropic API
+call.
+
+### Belt-and-braces on Redis persistence
+
+Same worktree: baked `--save ""` and `--stop-writes-on-bgsave-error no`
+into the redis service command (see `docker-compose.yml`). Our use of
+Redis is purely ephemeral (rate-limit counters + 30s credential
+cache); there is nothing worth persisting through a restart, so RDB
+is off and AOF is belt-and-braces for in-flight burst loss. This
+forecloses the whole class of "disk hiccup cascades into 500s" that
+started this.
+
+### Tests
+
+`tests/test_credentials_live.py` now exercises 16 cases. Net-new over
+the baseline 11:
+
+  - Fresh window served without any DB hit
+  - Stale window, version match → cheap check only, TTL extended
+  - Stale window, version drift → full refetch, recache
+  - Stale window, DB down → serve cached, TTL NOT extended
+  - `freshness_s=0` forces revalidation on every read
+  - Legacy raw-string cache entries are dropped and migrated to JSON
+
+Full suite: 362 passed (+5 from the 357 baseline).
