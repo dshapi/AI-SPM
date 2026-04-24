@@ -45,3 +45,7 @@ DataVloliums/grafana/dashboards/
 __pycache__/
 *.pyc
 *.pyo
+
+__pycache__/
+*.pyc
+*.pyo
