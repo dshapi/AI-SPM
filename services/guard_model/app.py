@@ -27,6 +27,11 @@ from typing import List, Optional
 # platform_shared/integration_config.py for the ENV_EXPORT_MAP. ──────────────
 from platform_shared.integration_config import hydrate_env_from_db
 hydrate_env_from_db()
+# Boot-time hydration above is now a fallback — all managed-config reads
+# (GROQ_BASE_URL, LLM_MODEL, GUARD_PROMPT_MODE, OLLAMA_KEEP_ALIVE) go through
+# `get_credential_by_env`, which checks Redis (TTL ~30s) and falls back to
+# spm-db on miss.  This makes UI rotations propagate without restart.
+from platform_shared.credentials import get_credential_by_env
 
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -309,10 +314,25 @@ def _wrap_user_for_classification(text: str) -> str:
 
 # "json" = general chat model with JSON output (default — matches current llm svc)
 # "llama_guard" = real Llama-Guard model producing safe / unsafe\nSn
+#
+# Module-level value preserved as a *boot-time fallback* so existing tests and
+# `/health` reporters that read it directly keep working.  Runtime classification
+# uses _live_prompt_mode() so a UI flip propagates within one cache TTL.
 GUARD_PROMPT_MODE = os.getenv("GUARD_PROMPT_MODE", "json").lower()
 if GUARD_PROMPT_MODE not in ("json", "llama_guard"):
     log.warning("Unknown GUARD_PROMPT_MODE=%r, defaulting to 'json'", GUARD_PROMPT_MODE)
     GUARD_PROMPT_MODE = "json"
+
+
+def _live_prompt_mode() -> str:
+    raw = (get_credential_by_env("GUARD_PROMPT_MODE", default=GUARD_PROMPT_MODE) or GUARD_PROMPT_MODE).lower()
+    return raw if raw in ("json", "llama_guard") else "json"
+
+
+def _live_groq_model() -> str:
+    # Two env names map to the same DB field — UI stores it under int-017.config.model
+    # (LLM_MODEL).  Local override (GUARD_GROQ_MODEL) still wins via env fallback.
+    return get_credential_by_env("LLM_MODEL", default=GROQ_MODEL) or GROQ_MODEL
 
 # Set GUARD_DEBUG=1 to have every LLM request log the raw response — useful
 # when diagnosing parser-vs-model disagreements (e.g. model refuses to emit
@@ -341,7 +361,8 @@ def _llm_chat_completion(text: str) -> str:
     Raises on network/HTTP error — caller is responsible for falling back to
     regex. Uses the system prompt appropriate to GUARD_PROMPT_MODE.
     """
-    if GUARD_PROMPT_MODE == "json":
+    _mode = _live_prompt_mode()
+    if _mode == "json":
         system_prompt = _JSON_GUARD_SYSTEM
         user_content = _wrap_user_for_classification(text)
         # JSON mode needs modest headroom — {"verdict":"unsafe","categories":
@@ -362,7 +383,7 @@ def _llm_chat_completion(text: str) -> str:
         resp = _openai_client.post(
             "/chat/completions",
             json={
-                "model": GROQ_MODEL,
+                "model": _live_groq_model(),
                 "messages": messages,
                 "temperature": 0,
                 "max_tokens": max_tokens,
@@ -374,7 +395,7 @@ def _llm_chat_completion(text: str) -> str:
 
     # Groq cloud SDK
     response = _groq_client.chat.completions.create(
-        model=GROQ_MODEL,
+        model=_live_groq_model(),
         messages=messages,
         temperature=0,
         max_tokens=max_tokens,
@@ -489,11 +510,11 @@ def _groq_screen(text: str) -> "ScreenResult":
         # whether the model is producing JSON, a refusal, or something else.
         snippet = (raw or "").replace("\n", "\\n")[:800]
         _debug(
-            f"prompt_mode={GUARD_PROMPT_MODE} elapsed_ms={elapsed} "
+            f"prompt_mode={_live_prompt_mode()} elapsed_ms={elapsed} "
             f"raw_response={snippet!r}"
         )
 
-    if GUARD_PROMPT_MODE == "json":
+    if _live_prompt_mode() == "json":
         verdict_word, codes, reason = _parse_json_verdict(raw)
     else:
         verdict_word, codes, reason = _parse_llama_guard_verdict(raw)
@@ -602,7 +623,7 @@ def health():
         "service": "guard_model",
         "version": "3.0.0",
         "backend": backend,
-        "prompt_mode": GUARD_PROMPT_MODE if llm_active else "n/a",
+        "prompt_mode": _live_prompt_mode() if llm_active else "n/a",
         "llm_enabled": llm_active,
         "groq_enabled": _groq_client is not None,
         "openai_compat_enabled": _openai_client is not None,
@@ -619,9 +640,9 @@ def inventory():
     return {
         "service": "cpm-guard-model",
         "version": "3.0.0",
-        "model": GROQ_MODEL if llm_active else "keyword-classifier-v1",
+        "model": _live_groq_model() if llm_active else "keyword-classifier-v1",
         "backend": backend,
-        "prompt_mode": GUARD_PROMPT_MODE if llm_active else "n/a",
+        "prompt_mode": _live_prompt_mode() if llm_active else "n/a",
         "categories": [{"code": k, "name": v} for k, v in CATEGORY_NAMES.items()],
         "capabilities": ["content_screening", "category_classification", "batch_screening"],
     }
