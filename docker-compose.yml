@@ -95,7 +95,29 @@ services:
     platform: linux/arm64/v8
     container_name: cpm-redis
     ports: ["6379:6379"]
-    command: ["redis-server", "--appendonly", "yes", "--loglevel", "warning", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    # --save "" disables RDB snapshots entirely. Our use of Redis is purely
+    # ephemeral (rate-limit counters + short-TTL credential cache), so there
+    # is nothing worth persisting through a restart. AOF is left on as
+    # belt-and-braces against in-flight burst loss; if that ever causes the
+    # same disk-can't-persist -> stop-writes failure mode, drop --appendonly
+    # too and run pure in-memory.
+    # stop-writes-on-bgsave-error no = even if persistence does fail, keep
+    # serving writes; a 500 on the chat path because the disk hiccupped is
+    # strictly worse than dropping a rate-limit counter.
+    command:
+      - redis-server
+      - --save
+      - ""
+      - --appendonly
+      - "yes"
+      - --stop-writes-on-bgsave-error
+      - "no"
+      - --loglevel
+      - warning
+      - --maxmemory
+      - 512mb
+      - --maxmemory-policy
+      - allkeys-lru
     volumes:
       - ./DataVolums/redis:/data
     healthcheck:
