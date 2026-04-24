@@ -64,6 +64,11 @@ from spm.db.models import (
 )
 from spm.db.session import get_db
 
+# Live-credential cache invalidation. Imported at module scope so a missing
+# platform_shared package fails loud at boot rather than silently swallowing
+# rotation events at runtime.
+from platform_shared.credentials import invalidate_credential_cache
+
 log = logging.getLogger("spm-api.integrations")
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
@@ -1204,6 +1209,23 @@ async def configure_integration(
     )
     await db.commit()
     await db.refresh(row)
+
+    # Live-credential write-through: nuke any cached values for this vendor
+    # so the next get_credential() call for any consumer (api, orchestrator,
+    # guard) reads the freshly-committed value instead of waiting out the
+    # cache TTL.  Best-effort — failures here log a warning but don't fail
+    # the configure request, since the DB write already succeeded and the
+    # worst case is a TTL-window of stale reads.
+    if row.external_id:
+        try:
+            invalidate_credential_cache(row.external_id)
+        except Exception as exc:  # pragma: no cover — defence in depth
+            log.warning(
+                "configure: cache invalidation failed for vendor=%s (%s); "
+                "new credential will become visible after TTL expiry",
+                row.external_id, exc,
+            )
+
     return _detail(row)
 
 
