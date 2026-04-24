@@ -1519,8 +1519,8 @@ The auth overlay adds a full OIDC login flow in front of the admin portal, runni
 | Component | Role |
 |---|---|
 | **Traefik v3** | Reverse proxy. Routes `aispm.local` → admin UI via the ForwardAuth middleware. Uses a static file provider — no Docker socket required. |
-| **Keycloak 24** | OIDC identity provider running in dev mode. Realm config is persisted in a named Docker volume so it survives restarts. |
-| **traefik-forward-auth** | Sits in front of every protected route. Handles the OIDC redirect flow and sets a signed session cookie on `aispm.local`. |
+| **Keycloak 24** | OIDC identity provider running in dev mode. Realm config is persisted to `./DataVolums/keycloak/` (host bind mount) so it survives restarts and `docker compose down -v`. |
+| **traefik-forward-auth** | Sits in front of every protected route. Inspects every request via `X-Forwarded-Uri` — including `/_oauth` callbacks — and sets a signed session cookie on `aispm.local`. |
 
 ### One-time host setup
 
@@ -1534,44 +1534,122 @@ sudo sh -c 'echo "127.0.0.1  keycloak.local auth.local aispm.local" >> /etc/host
 
 ```bash
 ./start.sh   # full stack including auth
-./stop.sh    # tear everything down (volumes preserved)
+./stop.sh    # tear everything down (data preserved in ./DataVolums/)
 ```
 
 ### First-time Keycloak setup
 
-Only required once — Keycloak persists the realm to the `keycloak-data` Docker volume.
+Only required once — Keycloak persists the realm to `./DataVolums/keycloak/h2/`.
 
 1. `./start.sh` then open **http://keycloak.local:8180/admin/** (`admin` / `admin`)
 2. Top-left dropdown → **Create realm** → name: `aispm` → **Create**
-3. **Clients** → **Create client**
+3. **Realm Settings** → **General** tab → **Require SSL** → set to **none** → **Save**
+   - Required for local-dev HTTP. If left at the default (`external`), Keycloak rejects every non-localhost request with the page "We are sorry... HTTPS required" and traefik-forward-auth's token exchange silently fails.
+   - Repeat the same toggle on the **master** realm if you want to log into the admin UI via `keycloak.local` (master defaults to `external` too).
+4. **Clients** → **Create client**
    - Client ID: `traefik-forward-auth`
    - Turn ON **Client authentication** → **Next**
    - Valid redirect URIs: `http://aispm.local/_oauth`
    - Web origins: `http://aispm.local` → **Save**
-4. **Credentials** tab → copy **Client secret** → paste into `.env.auth`:
+5. **Credentials** tab → copy **Client secret** → paste into `.env.auth`:
    ```
    PROVIDERS_OIDC_CLIENT_SECRET=<paste here>
    ```
-5. **Users** → **Create user** → set username → **Create**
-6. **Credentials** tab → set password → turn OFF **Temporary** → **Save password**
-7. Restart forward-auth: `docker-compose -f docker-compose.yml -f docker-compose.auth.yml up -d traefik-forward-auth`
+6. **Realm roles** → **Create role** → name: `spm:admin` → **Save**. Repeat for `spm:auditor`.
+   - The spm-api enforces these via `require_admin` / `require_auditor`. Without `spm:admin` in the JWT roles claim, every integration write endpoint returns 403.
+7. **Users** → **Create user** → set username and email → **Create**
+8. **Credentials** tab → set password → turn OFF **Temporary** → **Save password**
+9. **Role mapping** tab → **Assign role** → tick `spm:admin` → **Assign**
+10. Restart forward-auth: `docker compose -f docker-compose.auth.yml up -d --force-recreate traefik-forward-auth`
+
+#### Scriptable equivalent (kcadm)
+
+If you'd rather skip the UI, the same setup via kcadm — useful when the master realm's "HTTPS required" gate is locking you out of the admin console:
+
+```bash
+KC=/opt/keycloak/bin/kcadm.sh
+
+docker compose exec keycloak $KC config credentials \
+  --server http://localhost:8080 --realm master --user admin --password admin
+
+# Disable SSL gate on both realms (master = admin console, aispm = the app)
+docker compose exec keycloak $KC update realms/master -s sslRequired=NONE
+docker compose exec keycloak $KC update realms/aispm  -s sslRequired=NONE
+
+# Create the two realm roles spm-api expects
+docker compose exec keycloak $KC create roles -r aispm -s name=spm:admin
+docker compose exec keycloak $KC create roles -r aispm -s name=spm:auditor
+
+# Create user, set password, assign admin role
+docker compose exec keycloak $KC create users -r aispm \
+  -s username=dany -s enabled=true -s email=dany@example.com
+docker compose exec keycloak $KC set-password -r aispm \
+  --username dany --new-password dany
+docker compose exec keycloak $KC add-roles -r aispm \
+  --uusername dany --rolename spm:admin
+```
 
 ### Access
 
 | URL | What |
 |---|---|
 | **http://aispm.local/admin** | Admin portal (SSO protected — redirects to Keycloak login) |
-| **http://keycloak.local:8180/admin/** | Keycloak admin console |
+| **http://keycloak.local:8180/admin/** | Keycloak admin console (master realm, `admin`/`admin`) |
 | **http://localhost:9091/dashboard/** | Traefik routing dashboard |
 
 ### Configuration files
 
 | File | Purpose |
 |---|---|
-| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth |
+| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth. Keycloak data is bind-mounted from `./DataVolums/keycloak/`. |
 | `auth/traefik.yml` | Traefik static config (file provider, entrypoints, dashboard on `:9091`) |
-| `auth/traefik-dynamic.yml` | Route and middleware definitions (aispm router + sso forwardAuth) |
+| `auth/traefik-dynamic.yml` | Route + middleware definitions. **Important:** there is a single `aispm` router covering every path — including `/_oauth`. The SSO middleware itself recognizes the OIDC callback via `X-Forwarded-Uri` and short-circuits it. Do **not** add a separate router that routes `/_oauth` directly to the forward-auth backend service (e.g. `aispm-oauth: service: auth-svc`) — that strips the `X-Forwarded-*` headers and forward-auth then can't tell it's a callback, falling into an infinite redirect loop. |
 | `.env.auth` | OIDC client ID, client secret, and cookie signing secret |
+
+### Troubleshooting auth
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Browser endlessly bounces between `aispm.local/_oauth?code=...` and Keycloak | `auth/traefik-dynamic.yml` has a router that sends `/_oauth` directly to forward-auth as a backend, skipping the middleware (drops `X-Forwarded-Uri`). | Remove the `/_oauth` router; let the catch-all `aispm` router with the `sso` middleware handle every path. |
+| Keycloak page: "We are sorry… HTTPS required" | Realm `sslRequired` is `external` (default). | `kcadm update realms/<realm> -s sslRequired=NONE` for both `master` and `aispm`, OR access the admin console via `http://localhost:8180/` (localhost bypasses the gate). |
+| Login succeeds but `/_oauth` returns "Cookie not found" | Stale `_forward_auth_csrf` cookies from a previous failed run. | Close all incognito windows (don't just open a new tab) and start a fresh session. |
+| spm-api returns 403 "spm:admin role required" after login | The JWT user has no `spm:admin` realm role. | In Keycloak: realm `aispm` → Users → user → **Role mapping** → assign `spm:admin`. |
+| `LOG_LEVEL=debug` doesn't take effect | Compose only reloads env on recreate. | `docker compose -f docker-compose.auth.yml up -d --force-recreate traefik-forward-auth` |
+
+### Persistent data — bind-mounted volumes
+
+Postgres, Keycloak, Redis, Grafana, and the agent-orchestrator all bind-mount their state under `./DataVolums/` instead of using Docker named volumes. Layout:
+
+```
+DataVolums/
+├── spm-db/                ← Postgres data dir (UID 999 inside container)
+├── keycloak/h2/           ← Keycloak embedded H2 DB (realms, users, secrets)
+├── redis/                 ← Redis AOF / dump
+├── grafana/               ← Grafana SQLite + dashboards
+└── agent-orchestrator/    ← Orchestrator SQLite session log
+```
+
+The directories are tracked via `.gitkeep`; their contents are gitignored (see `.gitignore`). To reset any one of them, stop the relevant service, `rm -rf` the directory contents, and restart.
+
+### Database migrations (alembic)
+
+Migrations live in `spm/alembic/versions/`. The CI workflow runs `alembic upgrade head` automatically, but local containers do **not** — if you pull new migrations, run them by hand:
+
+```bash
+cd spm
+SPM_DB_URL="postgresql://spm_rw:spmpass@localhost:5432/spm" alembic upgrade head
+```
+
+If the DB's `alembic_version` row points at a revision that no longer exists in `spm/alembic/versions/` (can happen after switching branches or restoring a snapshot), `alembic upgrade head` errors with `Can't locate revision identified by 'NNN'`. Reset the bookmark to the latest revision actually present, then re-run:
+
+```bash
+cd spm
+# Replace 003 with whatever is the highest revision file present
+SPM_DB_URL="..." alembic stamp --purge 003
+SPM_DB_URL="..." alembic upgrade head
+```
+
+The repo's migrations are written to be idempotent (`ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`), so re-running a stamped revision is safe.
 
 ---
 

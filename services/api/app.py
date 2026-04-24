@@ -1160,6 +1160,55 @@ async def chat_stream(
         "categories":  guard_categories,
     })
 
+    # ── Publish RawEvent → topics.raw → processor → posture_enriched ─────────
+    # Without this, the streaming chat path bypasses the entire CEP pipeline
+    # (processor, posture enrichment, flink-pyjob) — only the in-memory
+    # lineage stream and the durable GlobalTopics.LINEAGE_EVENTS path see
+    # the prompt. The non-streaming
+    # /chat handler does this at step 6 AFTER the LLM call (lines ~798-803);
+    # we publish HERE (post-screening, pre-LLM) so CEP processes the prompt
+    # in parallel with the user-facing token stream rather than serially
+    # behind it. CEP only reads `prompt` + guard signals from RawEvent — not
+    # the LLM response — so pre-LLM publish is semantically equivalent to
+    # the non-streaming pattern, just faster. Reuses the `event_id` already
+    # generated above so the WS lineage events and the Kafka envelope share
+    # a correlation id (Lineage page, audit, and posture trace all join on
+    # the same key).
+    auth_context = AuthContext(
+        sub=user_id,
+        tenant_id=tenant_id,
+        roles=claims.get("roles", []),
+        scopes=claims.get("scopes", []),
+        claims={k: v for k, v in claims.items()
+                if k not in ("sub", "tenant_id", "roles", "scopes")},
+        issued_at=claims.get("iat", int(time.time())),
+        expires_at=claims.get("exp"),
+    )
+    _raw_event = RawEvent(
+        event_id=event_id,
+        ts=int(time.time() * 1000),
+        tenant_id=tenant_id,
+        user_id=user_id,
+        session_id=req.session_id,
+        prompt=req.prompt,
+        metadata=req.metadata,
+        auth_context=auth_context,
+        guard_verdict=guard_verdict,
+        guard_score=guard_score,
+        guard_categories=guard_categories,
+        source_ip=request.client.host if request.client else None,
+        user_agent=request.headers.get("user-agent"),
+    )
+    try:
+        send_event(
+            get_producer(), topics_for_tenant(tenant_id).raw, _raw_event,
+            event_type="raw_event", source_service="api-stream",
+        )
+    except Exception as _kpe:
+        # Mirror the non-blocking semantics of the audit emitter — never
+        # break the user-facing stream just because Kafka is degraded.
+        log.warning("chat_stream: topics.raw publish failed: %s", _kpe)
+
     async def generate():
         tool_uses: list[str] = []
         current_messages = list(messages)

@@ -52,7 +52,7 @@
     "function": "MAP",
     "category": "MAP-2.1",
     "subcategory": "Adversarial threat mapping via MITRE ATLAS",
-    "cpm_control": "flink_cep:mitre_atlas_ttp_mapping",
+    "cpm_control": "flink_pyjob:mitre_atlas_ttp_mapping",
     "evaluation_rule": "risk_fusion_active"
   },
   {

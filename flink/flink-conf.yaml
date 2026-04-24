@@ -1,0 +1,47 @@
+# Flink cluster configuration — used by both JobManager and TaskManager.
+# Mounted read-only at /opt/flink/conf/flink-conf.yaml in both containers.
+#
+# See docs/plans/2026-04-24-pyflink-cep-migration.md Phase 0 for the
+# rationale behind every value here.
+
+# ── JobManager ───────────────────────────────────────────────────────────────
+jobmanager.rpc.address: flink-jobmanager
+jobmanager.rpc.port: 6123
+jobmanager.memory.process.size: 1600m
+jobmanager.bind-host: 0.0.0.0
+rest.address: flink-jobmanager
+rest.bind-address: 0.0.0.0
+rest.port: 8081
+
+# ── TaskManager ──────────────────────────────────────────────────────────────
+taskmanager.bind-host: 0.0.0.0
+taskmanager.host: flink-taskmanager
+taskmanager.numberOfTaskSlots: 3       # Matches KAFKA_NUM_PARTITIONS
+taskmanager.memory.process.size: 2048m
+
+# ── Default parallelism — overridden by the job at submit time ──────────────
+parallelism.default: 3
+
+# ── State backend: RocksDB with incremental checkpoints to local FS ──────────
+# Single-host deployment — JM and TM both bind-mount the same host dir
+# (./DataVolums/flink-checkpoints) at /flink/checkpoints. No external
+# blob store required. For multi-host K8s, swap file:// for s3:// here
+# and add the s3-fs-presto plugin.
+state.backend.type: rocksdb
+state.backend.incremental: true
+state.checkpoints.dir: file:///flink/checkpoints
+state.savepoints.dir: file:///flink/savepoints
+execution.checkpointing.interval: 60s
+execution.checkpointing.mode: EXACTLY_ONCE
+execution.checkpointing.timeout: 5min
+execution.checkpointing.min-pause: 10s
+execution.checkpointing.max-concurrent-checkpoints: 1
+execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
+# ── Restart strategy ─────────────────────────────────────────────────────────
+restart-strategy.type: exponential-delay
+restart-strategy.exponential-delay.initial-backoff: 10s
+restart-strategy.exponential-delay.max-backoff: 2min
+restart-strategy.exponential-delay.backoff-multiplier: 2.0
+restart-strategy.exponential-delay.reset-backoff-threshold: 10min
+restart-strategy.exponential-delay.jitter-factor: 0.1

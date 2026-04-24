@@ -1,0 +1,10 @@
+apache-flink==1.18.1
+# Transitive deps of platform_shared (imported by detection.py + state.py
+# via the audit emitter and risk engine):
+#   pydantic        — platform_shared/models.py defines AuditEvent etc.
+#   kafka-python-ng — platform_shared/kafka_utils.py + audit.py producer
+# boto3 stays for future S3 checkpoint backend (multi-host); harmless idle.
+pydantic==2.9.2
+boto3==1.34.0
+kafka-python-ng==2.2.3
+pytest==8.3.3

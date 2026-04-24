@@ -42,6 +42,7 @@ up:
 	@docker wait cpm-startup-orchestrator 2>/dev/null || true
 	@echo ""
 	@echo "✓ Platform started."
+	@echo"   Admin:             http://localhost:3001/admin"
 	@echo "  API:               http://localhost:8080"
 	@echo "  Guard Model:       http://localhost:8200"
 	@echo "  Freeze Controller: http://localhost:8090"
@@ -207,7 +208,7 @@ SECURITY_SERVICES = \
 	api policy-decider processor guard-model output-guard tool-parser \
 	retrieval-gateway agent agent-orchestrator memory-service \
 	executor freeze-controller policy-simulator threat-hunting-agent \
-	flink-cep spm-api spm-aggregator startup-orchestrator ui
+	spm-api spm-aggregator startup-orchestrator ui
 
 rebuild-security:
 	@echo "→ Rebuilding services that bundle platform_shared/ + ui..."
@@ -266,3 +267,52 @@ security-smoke: _install-mint
 	else echo "✗ Output-coercion NOT blocked (code=$$CODE)"; exit 1; fi
 	@echo ""
 	@echo "✓ security-smoke complete — all three jailbreak classes blocked."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PyFlink CEP job (services/flink_pyjob)
+#
+# These targets stand up / tear down the Apache Flink cluster and manage
+# the PyFlink CEP job (sole CEP producer). See services/flink_pyjob/README.md.
+# ─────────────────────────────────────────────────────────────────────────────
+.PHONY: flink-up flink-down flink-submit flink-cancel flink-savepoint flink-rebuild flink-test
+
+flink-up:
+	@echo "→ Creating checkpoint/savepoint directories (host bind mounts)..."
+	@mkdir -p ./DataVolums/flink-checkpoints ./DataVolums/flink-savepoints
+	@echo "→ Building flink-pyjob image and bringing up JobManager + TaskManager..."
+	docker compose up -d --build flink-jobmanager flink-taskmanager
+	@echo "→ JobManager UI: http://localhost:8081"
+
+flink-down:
+	docker compose stop flink-pyjob-submitter flink-taskmanager flink-jobmanager
+
+flink-submit:
+	@echo "→ Submitting PyFlink CEP job..."
+	docker compose up --build flink-pyjob-submitter
+	@echo "→ Watch progress at http://localhost:8081"
+
+flink-cancel:
+	@echo "→ Cancelling all CEP jobs (no savepoint)..."
+	@docker exec cpm-flink-jobmanager bash -c '\
+		for jid in $$(flink list -r 2>/dev/null | grep flink-pyjob-cep | awk "{print \$$4}"); do \
+			echo "  cancelling $$jid"; flink cancel $$jid; \
+		done'
+
+flink-savepoint:
+	@echo "→ Triggering savepoints for all CEP jobs (saved to /flink/savepoints)..."
+	@docker exec cpm-flink-jobmanager bash -c '\
+		for jid in $$(flink list -r 2>/dev/null | grep flink-pyjob-cep | awk "{print \$$4}"); do \
+			echo "  savepointing $$jid"; flink savepoint $$jid file:///flink/savepoints; \
+		done'
+
+flink-rebuild:
+	@echo "→ Rebuilding aispm-flink-pyjob image (Dockerfile/requirements changed)..."
+	@# Build via flink-jobmanager — it's the only service in the compose
+	@# file with a `build:` block. flink-taskmanager and flink-pyjob-
+	@# submitter just reference `image: aispm-flink-pyjob:latest`, so
+	@# they implicitly pick up the rebuilt image on next `up`/`run`.
+	docker compose build flink-jobmanager
+
+flink-test:
+	@echo "→ Running flink-pyjob unit tests (no Flink cluster required)..."
+	cd $$(pwd) && python -m pytest services/flink_pyjob/tests/ -v

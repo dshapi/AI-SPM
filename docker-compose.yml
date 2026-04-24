@@ -348,13 +348,85 @@ services:
     depends_on:
       <<: *depends-platform
 
-  flink-cep:
-    build: {context: ., dockerfile: services/flink_cep/Dockerfile}
-    container_name: cpm-flink-cep
-    environment: *common-env
-    volumes: *key-vol
+  # ── Apache Flink cluster (sole CEP producer) ──────────────────────────────
+  # A real JobManager + TaskManager pair running the PyFlink CEP job from
+  # services/flink_pyjob. Writes directly to cpm.<tenant>.audit.
+  #
+  # Storage: checkpoints write to a local bind-mounted directory
+  # (./DataVolums/flink-checkpoints). Same pattern as spm-db, kafka, etc.
+  # No new database, no MinIO. Fine for single-host docker-compose;
+  # multi-host K8s deployment would swap in S3 here.
+
+  flink-jobmanager:
+    build:
+      context: .
+      dockerfile: services/flink_pyjob/Dockerfile
+    image: aispm-flink-pyjob:latest
+    platform: linux/arm64/v8
+    container_name: cpm-flink-jobmanager
+    hostname: flink-jobmanager
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    # All cluster config (state backend, checkpointing, restart strategy,
+    # RPC address) lives in the bind-mounted flink-conf.yaml — no
+    # FLINK_PROPERTIES env var needed. Single source of truth, easier to
+    # diff in PRs, no risk of compose-vs-yaml drift.
+    volumes:
+      - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      - ./DataVolums/flink-checkpoints:/flink/checkpoints
+      - ./DataVolums/flink-savepoints:/flink/savepoints
+
+  flink-taskmanager:
+    image: aispm-flink-pyjob:latest
+    platform: linux/arm64/v8
+    container_name: cpm-flink-taskmanager
+    command: taskmanager
+    # Slot count, state backend, JM address — all in flink-conf.yaml.
+    volumes:
+      - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
+      # Bind-mount user code over the COPY-ed version so dev iteration
+      # doesn't require rebuilding the image.
+      - ./services/flink_pyjob:/opt/flink-pyjob/services/flink_pyjob:ro
+      - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
+      # Checkpoint dirs must be SHARED with the JobManager (single host
+      # deployment) — same bind mount on both.
+      - ./DataVolums/flink-checkpoints:/flink/checkpoints
+      - ./DataVolums/flink-savepoints:/flink/savepoints
     depends_on:
-      <<: *depends-platform
+      flink-jobmanager:
+        condition: service_started
+
+  flink-pyjob-submitter:
+    image: aispm-flink-pyjob:latest
+    container_name: cpm-flink-pyjob-submitter
+    entrypoint: ["/opt/flink-pyjob/submit.sh"]
+    # Bind-mount user code over the COPY-ed version so dev iteration on
+    # the job (cep_job.py, state.py, sinks.py) doesn't require rebuilding
+    # the image. Same pattern as flink-taskmanager above; keep the two in
+    # sync so the submitter and the workers always see the same source tree.
+    volumes:
+      - ./services/flink_pyjob:/opt/flink-pyjob/services/flink_pyjob:ro
+      - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
+    environment:
+      FLINK_JM_URL: http://flink-jobmanager:8081
+      KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+      CEP_TENANT_IDS: ${CEP_TENANT_IDS:-t1}
+      # Sink topic suffix — parameterized so a future shadow run (for
+      # example, before rolling out a CEP rule rewrite) can point this at
+      # a different topic without touching compose. Default is the live
+      # audit sink.
+      CEP_AUDIT_TOPIC_SUFFIX: ${CEP_AUDIT_TOPIC_SUFFIX:-audit}
+      CEP_PARALLELISM: ${CEP_PARALLELISM:-2}
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+      kafka-broker:
+        condition: service_healthy
+    # `restart: no` so we don't re-submit on success — the submitter exits
+    # cleanly once `flink run --detached` returns. The job itself runs in
+    # the cluster and survives container restarts.
+    restart: "no"
 
   # ── AI SPM Platform ──────────────────────────────────────────────────────────
 

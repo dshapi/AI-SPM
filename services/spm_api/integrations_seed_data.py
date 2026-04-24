@@ -666,13 +666,13 @@ def build_seed() -> List[Dict[str, Any]]:
             "vendor": "Confluent / Apache",
             "tags": ["kafka", "streaming", "events"],
             "config": {
-                # Seeded so the cert-archetype Configure modal renders a
-                # non-empty Bootstrap Servers field and the Test button has
-                # something to dial.  The hostname is intentionally
-                # unresolvable so Test surfaces a realistic connection-level
-                # error rather than the placeholder-free "no bootstrap
-                # servers configured" short-circuit.
-                "bootstrap_servers": "broker-1.example.com:9093,broker-2.example.com:9093",
+                # Points at the real broker hostname inside the
+                # aispm_default docker network (see docker-compose.yml
+                # service `kafka-broker`).  The Test button does a TCP
+                # dial against this — a placeholder hostname would just
+                # surface DNS / timeout noise instead of a useful signal.
+                # Override via Configure if your broker lives elsewhere.
+                "bootstrap_servers": "kafka-broker:9092",
             },
             "connection": {
                 "last_sync": "2d ago", "last_sync_full": "Apr 6 · 22:00 UTC",
@@ -849,15 +849,15 @@ def build_seed() -> List[Dict[str, Any]]:
         # ── Apache Flink (stream processor, downstream of Kafka) ──
         {
             "external_id": "int-019", "name": "Flink", "abbrev": "Fl",
-            "category": "Data / Storage", "status": "Warning", "auth_method": "Service Account",
+            "category": "Data / Storage", "status": "Disabled", "auth_method": "Service Account",
             "owner": "mike.torres", "owner_display": "Mike Torres",
-            "environment": "Production", "enabled": True,
-            "description": "Apache Flink stream-processing cluster. Runs the AI event-enrichment jobs that consume from Kafka topics and emit to the detection pipeline. Currently degraded — checkpointing is succeeding but source connectors are backing off because upstream Kafka (int-015) lost its broker TLS cert.",
+            "environment": "Production", "enabled": False,
+            "description": "Apache Flink stream-processing cluster. Disabled by default — enable after confirming the local JobManager (port 8081) is healthy and the PyFlink CEP job is RUNNING. Update `jobmanager_url` via Configure if you're pointing at a remote cluster.",
             "vendor": "Apache",
             "tags": ["flink", "streaming", "event-processing", "downstream"],
             "config": {
                 "jobmanager_url":      "http://flink-jobmanager:8081",
-                "bootstrap_servers":   "broker-1.example.com:9093,broker-2.example.com:9093",
+                "bootstrap_servers":   "kafka-broker:9092",
                 "parallelism":         4,
                 "checkpoint_interval": "60s",
                 "state_backend":       "rocksdb",

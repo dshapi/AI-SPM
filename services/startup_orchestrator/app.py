@@ -31,6 +31,16 @@ import requests
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError, KafkaError
 
+# Single source of truth for the topic registry — DO NOT inline the
+# topic list here. Adding new tenant or global topics is a one-line
+# change in platform_shared/topics.py and this orchestrator picks it
+# up automatically.
+from platform_shared.topics import (
+    GlobalTopics,
+    all_topics_for_tenants,
+    topics_for_tenant,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
@@ -58,20 +68,24 @@ ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "3.0.0")
 SPM_API_URL = os.getenv("SPM_API_URL", "http://spm-api:8092")
 
-# Topic suffixes to create for each tenant
-TOPIC_SUFFIXES = [
-    "raw", "retrieved", "posture_enriched", "decision",
-    "memory_request", "memory_result",
-    "tool_request", "tool_result", "tool_observation",
-    "final_response", "freeze_control", "audit",
-    "approval_request", "approval_result",
-]
+# Per-topic retention overrides keyed by the FULL topic name suffix
+# (the part after `cpm.<tenant>.`). Anything not listed here gets the
+# default 24h retention. The topic NAMES themselves are derived from
+# platform_shared/topics.py — we only own retention policy here.
+RETENTION_OVERRIDES_MS: dict[str, int] = {
+    "audit":            90 * 24 * 3600 * 1000,  # 90 days — compliance trail
+    "audit_shadow":     7  * 24 * 3600 * 1000,  # 7 days  — shadow-run window
+    "freeze_control":   7  * 24 * 3600 * 1000,
+    "approval_request": 7  * 24 * 3600 * 1000,
+    "approval_result":  7  * 24 * 3600 * 1000,
+}
+DEFAULT_RETENTION_MS = 24 * 3600 * 1000  # 24h
 
 # Consumer groups that must exist per tenant
 CONSUMER_GROUPS = [
     "cpm-api", "cpm-retrieval", "cpm-processor", "cpm-policy-decider",
     "cpm-agent", "cpm-memory", "cpm-executor", "cpm-tool-parser",
-    "cpm-output-guard", "cpm-flink-cep",
+    "cpm-output-guard",
 ]
 
 # Service registry entries (written to Redis at startup)
@@ -88,7 +102,7 @@ SERVICES = [
     {"service": "output_guard", "port": None, "capabilities": ["pii_redaction", "secret_detection"]},
     {"service": "freeze_controller", "port": 8090, "capabilities": ["control_plane"]},
     {"service": "policy_simulator", "port": 8091, "capabilities": ["policy_testing"]},
-    {"service": "flink_cep", "port": None, "capabilities": ["behavioral_cep", "ttp_mapping"]},
+    {"service": "flink_pyjob", "port": None, "capabilities": ["behavioral_cep", "ttp_mapping"]},
 ]
 
 
@@ -160,31 +174,45 @@ def wait_for_kafka(max_wait: int = 120) -> KafkaAdminClient:
 # Step 3: Create Kafka topics
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _retention_for(topic_name: str) -> int:
+    """Return retention.ms for a topic, looking up the suffix after the
+    final dot in `cpm.<tenant>.<suffix>` (or the whole name for global
+    topics)."""
+    suffix = topic_name.rsplit(".", 1)[-1] if topic_name.startswith("cpm.") else topic_name
+    return RETENTION_OVERRIDES_MS.get(suffix, DEFAULT_RETENTION_MS)
+
+
 def create_kafka_topics(admin: KafkaAdminClient) -> None:
     log.info("── Step 3: Creating Kafka topics ──")
+
+    # Per-tenant topics are derived from platform_shared/topics.py so
+    # adding a new topic there auto-provisions it on next boot. No
+    # hand-maintained suffix list to drift out of sync.
+    tenant_topic_names = all_topics_for_tenants(TENANTS)
+
+    # Global topics live alongside tenant topics on the same cluster.
+    # Currently just the UI-lineage stream consumed by the orchestrator.
+    global_topic_names = [
+        GlobalTopics.MODEL_EVENTS,
+        GlobalTopics.LINEAGE_EVENTS,
+    ]
+
+    all_names = tenant_topic_names + global_topic_names
     topics_to_create = []
-    for tenant_id in TENANTS:
-        for suffix in TOPIC_SUFFIXES:
-            name = f"cpm.{tenant_id}.{suffix}"
-
-            # Retention and cleanup policies per topic type
-            config = {"cleanup.policy": "delete"}
-            if suffix == "audit":
-                config["retention.ms"] = str(90 * 24 * 3600 * 1000)  # 90 days
-            elif suffix in ("freeze_control", "approval_request", "approval_result"):
-                config["retention.ms"] = str(7 * 24 * 3600 * 1000)   # 7 days
-            else:
-                config["retention.ms"] = str(24 * 3600 * 1000)        # 24 hours
-
-            topics_to_create.append(
-                NewTopic(
-                    name=name,
-                    num_partitions=NUM_PARTITIONS,
-                    replication_factor=REPLICATION_FACTOR,
-                    topic_configs=config,
-                )
+    for name in all_names:
+        config = {
+            "cleanup.policy": "delete",
+            "retention.ms":   str(_retention_for(name)),
+        }
+        topics_to_create.append(
+            NewTopic(
+                name=name,
+                num_partitions=NUM_PARTITIONS,
+                replication_factor=REPLICATION_FACTOR,
+                topic_configs=config,
             )
-            log.info("  Queued: %s", name)
+        )
+        log.info("  Queued: %s  (retention=%sh)", name, _retention_for(name) // 3600000)
 
     try:
         admin.create_topics(new_topics=topics_to_create, validate_only=False)
@@ -192,6 +220,8 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
     except TopicAlreadyExistsError:
         log.info("  Topics already exist — skipping")
     except Exception as e:
+        # Per-topic AlreadyExists is fine; log other failures without
+        # crashing the orchestrator (idempotent boot is the contract).
         log.warning("  Topic creation warning: %s", e)
 
 
@@ -212,8 +242,9 @@ def configure_kafka_acls() -> None:
 
     for tenant_id in TENANTS:
         principal = f"User:cpm-{tenant_id}"
-        for suffix in TOPIC_SUFFIXES:
-            topic = f"cpm.{tenant_id}.{suffix}"
+        # ACL set should match what create_kafka_topics() provisions —
+        # both pull from platform_shared.topics so they stay in lockstep.
+        for topic in topics_for_tenant(tenant_id).all_topics():
             for op in ["Read", "Write", "Describe"]:
                 cmd = [
                     kafka_acls_cmd,
@@ -424,7 +455,7 @@ def emit_startup_audit(r: redis.Redis) -> None:
                 "version": SERVICE_VERSION,
                 "environment": ENVIRONMENT,
                 "tenants": TENANTS,
-                "topics_created": [f"cpm.{tenant_id}.{s}" for s in TOPIC_SUFFIXES],
+                "topics_created": topics_for_tenant(tenant_id).all_topics(),
                 "acls_enabled": ENABLE_ACLS,
                 "opa_url": OPA_URL,
             },

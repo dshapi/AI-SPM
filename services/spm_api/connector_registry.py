@@ -491,11 +491,10 @@ CONNECTOR_TYPES: Dict[str, ConnectorType] = {
         "vendor": "Apache Software Foundation", "icon_hint": "activity",
         "description": "Stream processing. Probes GET /overview on the JobManager REST port.",
         "fields": [
-            # NOTE: the AI-SPM dev stack runs a custom 'flink-cep' Python
-            # consumer, not real Apache Flink, so this probe will fail in
-            # the default dev compose. Point it at your real Flink
-            # JobManager or ignore — the integration appearance + schema
-            # is still correct for customers running real Flink.
+            # The dev stack ships a real Flink JobManager at
+            # http://flink-jobmanager:8081 (see docker-compose.yml). The
+            # default below probes that. Override jobmanager_url to point
+            # at a remote/production cluster.
             {"key": "jobmanager_url", "label": "JobManager URL", "type": "url",
              "group": "Connection", "required": True,
              "default": "http://flink-jobmanager:8081",

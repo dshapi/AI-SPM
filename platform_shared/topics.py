@@ -19,6 +19,10 @@ class TenantTopics:
     final_response: str
     freeze_control: str
     audit: str
+    # Secondary sink used for shadow-run parity checks before rolling out
+    # CEP rule changes. Inert by default; the PyFlink job only writes to
+    # it when CEP_AUDIT_TOPIC_SUFFIX=audit_shadow.
+    audit_shadow: str
     approval_request: str
     approval_result: str
     simulation_events: str
@@ -29,6 +33,7 @@ class TenantTopics:
             self.decision, self.memory_request, self.memory_result,
             self.tool_request, self.tool_result, self.tool_observation,
             self.final_response, self.freeze_control, self.audit,
+            self.audit_shadow,
             self.approval_request, self.approval_result,
             self.simulation_events,
         ]
@@ -49,6 +54,7 @@ def topics_for_tenant(tenant_id: str) -> TenantTopics:
         final_response=f"{p}.final_response",
         freeze_control=f"{p}.freeze_control",
         audit=f"{p}.audit",
+        audit_shadow=f"{p}.audit_shadow",
         approval_request=f"{p}.approval_request",
         approval_result=f"{p}.approval_result",
         simulation_events=f"{p}.simulation.events",
