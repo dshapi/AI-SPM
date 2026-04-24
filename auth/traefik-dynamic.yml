@@ -1,18 +1,17 @@
 http:
 
   # ── Routers ──────────────────────────────────────────────────────────────────
+  #
+  # Single router for all aispm.local paths, including /_oauth.
+  # The `sso` middleware (forward-auth) inspects every request via
+  # X-Forwarded-Uri and short-circuits the OIDC callback itself —
+  # it must NOT be bypassed for /_oauth, otherwise forward-auth
+  # never sees the path (X-Forwarded-* headers are missing on direct
+  # backend routing) and falls into a redirect loop.
 
   routers:
 
-    # The OIDC callback — must NOT have the sso middleware (forward-auth handles it directly)
-    aispm-oauth:
-      rule: "Host(`aispm.local`) && PathPrefix(`/_oauth`)"
-      entryPoints:
-        - web
-      service: auth-svc
-      priority: 100   # Higher than the catch-all aispm router below
-
-    # The AISPM admin portal — all other paths are protected by SSO
+    # The AISPM admin portal — every path (incl. /_oauth) is protected by SSO
     aispm:
       rule: "Host(`aispm.local`)"
       entryPoints:
@@ -20,7 +19,6 @@ http:
       middlewares:
         - sso
       service: aispm
-      priority: 1
 
   # ── Middlewares ───────────────────────────────────────────────────────────────
 
@@ -42,9 +40,3 @@ http:
       loadBalancer:
         servers:
           - url: "http://ui:3001"
-
-    # traefik-forward-auth handles the /_oauth OIDC callback
-    auth-svc:
-      loadBalancer:
-        servers:
-          - url: "http://traefik-forward-auth:4181"

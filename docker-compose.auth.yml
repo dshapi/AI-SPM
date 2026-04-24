@@ -74,7 +74,7 @@ services:
       # No AUTH_HOST / COOKIE_DOMAIN — callback stays on aispm.local/_oauth,
       # so the cookie is set on aispm.local only. Avoids Safari .local mDNS issues.
       INSECURE_COOKIE: "true"
-      LOG_LEVEL: info
+      LOG_LEVEL: debug
     extra_hosts:
       - "keycloak.local:host-gateway"
     networks:

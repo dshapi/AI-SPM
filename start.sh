@@ -11,7 +11,6 @@ docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --remove-o
 
 echo ""
 echo "Stack is up."
-echo "  UI          → http://localhost:3001"
 echo "  API         → http://localhost:8080"
 echo "  SPM API     → http://localhost:8092"
 echo "  Grafana     → http://localhost:3000"
@@ -19,6 +18,7 @@ echo "  Prometheus  → http://localhost:9090"
 echo "  Traefik     → http://localhost:9091/dashboard/"
 echo "  Keycloak    → http://keycloak.local:8180"
 echo ""
-echo "  With auth:    http://aispm.local"
-echo ""
+echo "  With auth:            http://aispm.local/admin"
+echo "  OrbiX Chat Bot:       http://aispm.local"
+
 echo "Logs: docker compose logs -f [service]"
