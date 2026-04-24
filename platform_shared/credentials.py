@@ -42,8 +42,10 @@ Design notes
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import time
 from typing import Optional, Tuple
 
 from .integration_config import (
@@ -53,6 +55,33 @@ from .integration_config import (
 )
 
 log = logging.getLogger("platform_shared.credentials")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache freshness model — fail-closed on staleness.
+#
+# Two windows govern how long a cached credential is trusted:
+#
+#   * FRESHNESS_S  — within this many seconds of the last *full* DB read,
+#                    the cached value is served with no DB hit at all.
+#                    Cheap, hot path.
+#   * TTL_S        — absolute Redis expiry. Past this, the entry is gone
+#                    and the next read does a full lookup.
+#
+# Between FRESHNESS_S and TTL_S we run a *cheap* version check against
+# spm-db: a single indexed `SELECT updated_at` to ask "is what I have
+# still current?". On match we extend both windows; on mismatch we
+# refetch the full value; on DB error we serve the cached value but
+# refuse to extend, so a transient outage cannot pin a stale credential
+# in the cache forever.
+#
+# This makes the cache fail-closed on staleness without depending on
+# the writer's invalidation call ever succeeding — important because
+# during a Redis outage the configure endpoint's DEL silently fails
+# (correct behaviour: a successful save should not be undone by a cache
+# blip), and we still must not serve the old key from any consumer.
+# ─────────────────────────────────────────────────────────────────────────────
+DEFAULT_FRESHNESS_S = 5
+DEFAULT_TTL_S = 30
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Redis client (lazy, shared, decode_responses=True so cache values are str).
@@ -134,10 +163,15 @@ def _db_lookup(
     kind: str,
     field: str,
     timeout_s: float,
-) -> Optional[str]:
+) -> Optional[Tuple[str, str]]:
     """Pull one (kind, field) value for one integration external_id.
 
-    Returns None if anything goes wrong or the value is blank / unconfigured.
+    Returns ``(value, version)`` on success, where ``version`` is an
+    isoformat ``updated_at`` timestamp (the credential row's, or the
+    integrations row's for ``kind="config"``). Returns ``None`` if
+    anything goes wrong or the value is blank / unconfigured. The
+    version is used by ``get_credential`` to revalidate cached entries
+    against the DB without refetching the (potentially large) value.
     """
     url = _resolve_db_url()
     if not url:
@@ -164,7 +198,8 @@ def _db_lookup(
             if kind == "config":
                 cur.execute(
                     """
-                    SELECT COALESCE(config, '{}'::jsonb) -> %s AS v
+                    SELECT COALESCE(config, '{}'::jsonb) -> %s AS v,
+                           updated_at
                     FROM   integrations
                     WHERE  external_id = %s
                     """,
@@ -176,13 +211,13 @@ def _db_lookup(
                 v = row["v"]
                 # JSONB scalar is already deserialised by psycopg2 — strings
                 # come back wrapped, so unwrap; non-strings are stringified.
-                if isinstance(v, str):
-                    return v
-                return str(v)
+                value = v if isinstance(v, str) else str(v)
+                version = row["updated_at"].isoformat() if row["updated_at"] else ""
+                return value, version
             elif kind == "credential":
                 cur.execute(
                     """
-                    SELECT c.value_enc, c.is_configured
+                    SELECT c.value_enc, c.is_configured, c.updated_at
                     FROM   integration_credentials c
                     JOIN   integrations i ON i.id = c.integration_id
                     WHERE  i.external_id = %s
@@ -196,7 +231,11 @@ def _db_lookup(
                     return None
                 if not row["is_configured"] or not row["value_enc"]:
                     return None
-                return _decode_secret(row["value_enc"]) or None
+                value = _decode_secret(row["value_enc"]) or None
+                if not value:
+                    return None
+                version = row["updated_at"].isoformat() if row["updated_at"] else ""
+                return value, version
             else:
                 log.warning("credentials: unknown kind=%r (vendor=%s field=%s)",
                             kind, vendor, field)
@@ -215,23 +254,136 @@ def _db_lookup(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Cheap version check — used to revalidate cached entries past the
+# FRESHNESS_S window without refetching the (potentially large) value.
+# Single indexed lookup; no value transfer; no decryption.
+# ─────────────────────────────────────────────────────────────────────────────
+def _db_version_check(
+    vendor: str,
+    kind: str,
+    field: str,
+    timeout_s: float,
+) -> Optional[str]:
+    """Return the current ``updated_at`` for ``(vendor, kind, field)`` or None.
+
+    None means the row is gone / unconfigured / DB unreachable. Caller
+    distinguishes "stale and we know it" (mismatch with cached version)
+    from "we cannot tell" (DB error) by ALSO checking whether the
+    underlying connection succeeded — but the cheap path here treats
+    None as "cannot confirm freshness", and the caller chooses to either
+    serve cached without extending TTL (fail-soft) or to recheck via
+    full ``_db_lookup`` (fail-closed).
+    """
+    url = _resolve_db_url()
+    if not url:
+        return None
+    try:
+        import psycopg2
+        import psycopg2.extras
+    except Exception:  # pragma: no cover
+        return None
+    try:
+        conn = psycopg2.connect(url, connect_timeout=int(max(1, timeout_s)))
+    except Exception as exc:
+        log.warning("credentials: version-check connect failed (%s)", exc)
+        return None
+    try:
+        conn.set_session(readonly=True, autocommit=True)
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+            if kind == "credential":
+                cur.execute(
+                    """
+                    SELECT c.updated_at
+                    FROM   integration_credentials c
+                    JOIN   integrations i ON i.id = c.integration_id
+                    WHERE  i.external_id = %s
+                      AND  c.credential_type = %s
+                    LIMIT  1
+                    """,
+                    (vendor, field),
+                )
+            elif kind == "config":
+                # For config we use the parent integration's updated_at,
+                # which fires onupdate for any field change in config jsonb.
+                cur.execute(
+                    """
+                    SELECT updated_at
+                    FROM   integrations
+                    WHERE  external_id = %s
+                    """,
+                    (vendor,),
+                )
+            else:
+                return None
+            row = cur.fetchone()
+            if not row or not row["updated_at"]:
+                return None
+            return row["updated_at"].isoformat()
+    except Exception as exc:
+        log.warning("credentials: version-check query failed (%s)", exc)
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache value packing — JSON {"v": value, "ver": isoformat, "t": epoch_secs}.
+# Old raw-string entries fail json.loads -> _unpack_cache returns None ->
+# treated as a miss -> safe forward migration with no flush required.
+# ─────────────────────────────────────────────────────────────────────────────
+def _pack_cache(value: str, version: str) -> str:
+    return json.dumps(
+        {"v": value, "ver": version, "t": time.time()},
+        separators=(",", ":"),
+    )
+
+
+def _unpack_cache(blob: object) -> Optional[Tuple[str, str, float]]:
+    if not isinstance(blob, str):
+        return None
+    if not blob.startswith("{"):
+        return None
+    try:
+        d = json.loads(blob)
+    except Exception:
+        return None
+    if not isinstance(d, dict) or "v" not in d:
+        return None
+    return d["v"], str(d.get("ver", "")), float(d.get("t", 0.0))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public API
 # ─────────────────────────────────────────────────────────────────────────────
 def get_credential(
     vendor: str,
     field: str = "api_key",
     kind: str = "credential",
-    ttl: int = 30,
+    ttl: int = DEFAULT_TTL_S,
+    freshness_s: int = DEFAULT_FRESHNESS_S,
     timeout_s: float = 3.0,
     default: Optional[str] = None,
 ) -> Optional[str]:
     """Return the live value for ``(vendor, kind, field)`` or ``default``.
 
-    Lookup order: Redis cache → spm-db. Successful reads are cached
-    with the supplied TTL. Misses (blank value / missing row / DB or
-    Redis errors) all return ``default`` and are NOT cached, so a
-    freshly-configured credential becomes visible to the next caller
-    immediately even without explicit invalidation.
+    Lookup is **fail-closed on staleness**:
+
+    1. Cache MISS (or unreadable) → full DB lookup, cache the new value.
+    2. Cache HIT within ``freshness_s`` seconds of the last full read →
+       return immediately, no DB hit. Hot path.
+    3. Cache HIT older than ``freshness_s`` but still inside Redis TTL →
+       cheap ``SELECT updated_at`` against spm-db.
+       * Match → extend cache window, return cached value.
+       * Mismatch → full refetch, recache, return new value.
+       * DB error → serve cached (fail-soft) but DO NOT extend TTL,
+         so the key naturally expires and the next reader retries.
+
+    Misses (blank value / missing row / DB or Redis errors during full
+    lookup) all return ``default`` and are NOT cached, so a
+    freshly-configured credential becomes visible immediately.
 
     Parameters
     ----------
@@ -243,38 +395,84 @@ def get_credential(
     kind:
         ``"credential"`` (default) or ``"config"``.
     ttl:
-        Cache TTL in seconds. 30s by default — small enough that key
-        rotations propagate quickly, large enough to absorb burst
-        traffic without hammering Postgres.
+        Absolute Redis expiry in seconds. After this the cache entry
+        is gone and a full lookup is forced. Default 30s.
+    freshness_s:
+        Trust-without-verify window in seconds. Past this we run a
+        cheap version check against the DB before serving cached.
+        Default 5s. Set to 0 to revalidate on every read; set to
+        ``ttl`` to disable revalidation entirely (legacy behaviour).
     timeout_s:
-        psycopg2 connect_timeout for the fallback DB query.
+        psycopg2 connect_timeout for both DB queries.
     default:
         Value returned when no live credential is available. Useful
         for migrating env-reads with a fallback to ``os.environ``:
             get_credential("int-003", default=os.getenv("ANTHROPIC_API_KEY"))
     """
     key = _cache_key(vendor, kind, field)
+    r = _get_redis()
 
     # ── Try cache ─────────────────────────────────────────────────────────
-    r = _get_redis()
+    cached_value: Optional[str] = None
+    cached_version: str = ""
+    cached_age: float = 0.0
     if r is not None:
         try:
-            cached = r.get(key)
+            blob = r.get(key)
         except Exception as exc:
             log.warning("credentials: redis GET failed (%s); falling through", exc)
-            cached = None
-        if cached is not None:
-            return cached
+            blob = None
+        unpacked = _unpack_cache(blob) if blob is not None else None
+        if unpacked is not None:
+            cached_value, cached_version, cached_t = unpacked
+            cached_age = max(0.0, time.time() - cached_t)
+        elif blob is not None:
+            # Legacy raw-string entry from before this refactor — drop it,
+            # fall through to a full lookup that will recache as JSON.
+            try:
+                r.delete(key)
+            except Exception:
+                pass
 
-    # ── Fall back to DB ───────────────────────────────────────────────────
-    value = _db_lookup(vendor, kind, field, timeout_s)
-    if value is None or value == "":
+    # ── Hot path: cache HIT inside freshness window ───────────────────────
+    if cached_value is not None and cached_age <= max(0, freshness_s):
+        return cached_value
+
+    # ── Stale-but-cached: cheap version check ─────────────────────────────
+    if cached_value is not None:
+        live_version = _db_version_check(vendor, kind, field, timeout_s)
+        if live_version is None:
+            # Cannot confirm freshness (DB unreachable / row missing) —
+            # serve the cached value but DO NOT extend TTL so the entry
+            # expires naturally instead of getting pinned forever.
+            return cached_value
+        if live_version == cached_version and cached_version != "":
+            # Still current — repack with fresh `t` and extend Redis TTL.
+            if r is not None:
+                try:
+                    r.setex(key, max(1, int(ttl)),
+                            _pack_cache(cached_value, cached_version))
+                except Exception as exc:
+                    log.warning(
+                        "credentials: redis SETEX (revalidate) failed (%s)", exc,
+                    )
+            return cached_value
+        # Version drift — fall through to full refetch.
+
+    # ── Full DB lookup ────────────────────────────────────────────────────
+    result = _db_lookup(vendor, kind, field, timeout_s)
+    if result is None:
+        # Couldn't fetch fresh value. If we have a cached value we already
+        # returned it above (in the fail-soft branch). Otherwise → default.
+        return default
+    value, version = result
+    if not value:
         return default
 
     # ── Cache successful read ─────────────────────────────────────────────
     if r is not None:
         try:
-            r.setex(key, max(1, int(ttl)), value)
+            r.setex(key, max(1, int(ttl)), _pack_cache(value, version))
         except Exception as exc:
             log.warning("credentials: redis SETEX failed (%s); skipping cache", exc)
 
@@ -291,7 +489,8 @@ def _env_to_triple(env_name: str) -> Optional[Tuple[str, str, str]]:
 
 def get_credential_by_env(
     env_name: str,
-    ttl: int = 30,
+    ttl: int = DEFAULT_TTL_S,
+    freshness_s: int = DEFAULT_FRESHNESS_S,
     timeout_s: float = 3.0,
     default: Optional[str] = None,
 ) -> Optional[str]:
@@ -324,6 +523,7 @@ def get_credential_by_env(
         field=field,
         kind=kind,
         ttl=ttl,
+        freshness_s=freshness_s,
         timeout_s=timeout_s,
         default=effective_default,
     )
