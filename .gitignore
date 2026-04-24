@@ -41,3 +41,7 @@ __pycache__/
 # Docker runtime state (recreated on container start)
 DataVloliums/grafana/grafana.db
 DataVloliums/grafana/dashboards/
+
+__pycache__/
+*.pyc
+*.pyo
