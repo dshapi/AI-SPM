@@ -120,6 +120,15 @@ jobs:
           # must be installed in the platform-tests venv as well.
           pip install python-multipart==0.0.17
 
+          # Same import-time chain as above: services/spm_api/app.py:834 does
+          # `from prometheus_fastapi_instrumentator import Instrumentator` at
+          # module top-level. Any test that lazy-imports services.spm_api.app
+          # (via verify_jwt() in integrations_routes.py) will fail at import
+          # without this. The dep lives in services/spm_api/requirements.txt
+          # but CI only installs services/api/requirements.txt, so we mirror
+          # it here. Pin matches services/spm_api/requirements.txt.
+          pip install prometheus-fastapi-instrumentator==7.0.0
+
       # ── 4. Readiness gate — deterministic, no race conditions ─────────────
       - name: Wait for PostgreSQL
         run: |
