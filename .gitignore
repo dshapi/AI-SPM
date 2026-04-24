@@ -27,6 +27,6 @@ __pycache__/
 #   - grafana/  contains API tokens + dashboard state
 #   - redis/    contains session tokens + cached creds
 # We keep the directory structure via .gitkeep but ignore everything else.
-#/DataVolums/*/*
-#!/DataVolums/*/.gitkeep
+/DataVolums/*/*
+!/DataVolums/*/.gitkeep
 
