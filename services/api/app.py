@@ -36,6 +36,11 @@ for _p in (_HERE, _ROOT):
 # platform_shared/integration_config.py for the full ENV_EXPORT_MAP.
 from platform_shared.integration_config import hydrate_env_from_db  # noqa: E402
 hydrate_env_from_db()
+# Boot-time hydration above is now a *fallback* — every credential read in this
+# module is wrapped through `get_credential_by_env`, which checks Redis first
+# (TTL ~30s), then queries spm-db on miss, then falls back to the env value
+# the hydrator populated.  This makes UI rotations propagate without restart.
+from platform_shared.credentials import get_credential_by_env  # noqa: E402
 
 import time
 import uuid
@@ -92,25 +97,54 @@ _pss: PromptSecurityService | None = None
 _pss_stream: PromptSecurityService | None = None
 
 # ── Anthropic client ──────────────────────────────────────────────────────────
+# Module-level constants kept as boot-time fallbacks for tests that import them
+# directly.  All runtime reads go through the live helpers below.
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL   = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 TAVILY_API_KEY    = os.getenv("TAVILY_API_KEY", "")
-_anthropic_client = None
-_async_anthropic_client = None
+
+# Per-key SDK client cache.  When the UI rotates the Anthropic key,
+# invalidate_credential_cache fires, the next get_credential_by_env returns
+# the new value, and we lazily build a fresh anthropic.Anthropic with it.
+# Old clients are left in the dict to die with the process — small leak, no
+# correctness impact, vastly simpler than coordinating eviction across
+# concurrent in-flight requests.
+_anthropic_clients: dict = {}
+_async_anthropic_clients: dict = {}
+
+def _live_anthropic_key() -> str:
+    return get_credential_by_env("ANTHROPIC_API_KEY", default=ANTHROPIC_API_KEY) or ""
+
+def _live_anthropic_model() -> str:
+    return (
+        get_credential_by_env("ANTHROPIC_MODEL", default=ANTHROPIC_MODEL)
+        or "claude-sonnet-4-6"
+    )
+
+def _live_tavily_key() -> str:
+    return get_credential_by_env("TAVILY_API_KEY", default=TAVILY_API_KEY) or ""
 
 def _get_anthropic():
-    global _anthropic_client
-    if _anthropic_client is None and ANTHROPIC_API_KEY:
+    key = _live_anthropic_key()
+    if not key:
+        return None
+    client = _anthropic_clients.get(key)
+    if client is None:
         import anthropic
-        _anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-    return _anthropic_client
+        client = anthropic.Anthropic(api_key=key)
+        _anthropic_clients[key] = client
+    return client
 
 def _get_async_anthropic():
-    global _async_anthropic_client
-    if _async_anthropic_client is None and ANTHROPIC_API_KEY:
+    key = _live_anthropic_key()
+    if not key:
+        return None
+    client = _async_anthropic_clients.get(key)
+    if client is None:
         import anthropic
-        _async_anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    return _async_anthropic_client
+        client = anthropic.AsyncAnthropic(api_key=key)
+        _async_anthropic_clients[key] = client
+    return client
 
 # ── Tool definitions for Claude ───────────────────────────────────────────────
 _TOOLS = [
@@ -147,14 +181,15 @@ _TOOLS = [
 
 async def _run_web_search(query: str) -> str:
     """Call Tavily search API and return formatted results."""
-    if not TAVILY_API_KEY:
+    tavily_key = _live_tavily_key()
+    if not tavily_key:
         return "Web search is not configured (missing TAVILY_API_KEY)."
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(
                 "https://api.tavily.com/search",
                 json={
-                    "api_key": TAVILY_API_KEY,
+                    "api_key": tavily_key,
                     "query": query,
                     "search_depth": "basic",
                     "max_results": 5,
@@ -670,12 +705,13 @@ async def chat(
             _redis = _get_gate_redis()
             history = _load_history(_redis, tenant_id, user_id)
             messages = history + [{"role": "user", "content": req.prompt}]
-            tools = _TOOLS if (TAVILY_API_KEY or True) else []  # fetch always available
+            tools = _TOOLS if (_live_tavily_key() or True) else []  # fetch always available
+            _model = _live_anthropic_model()
 
             # Tool loop — max 3 rounds to prevent runaway calls
             for _round in range(3):
                 message = anthropic_client.messages.create(
-                    model=ANTHROPIC_MODEL,
+                    model=_model,
                     max_tokens=1024,
                     system=system_prompt,
                     tools=tools,
@@ -870,7 +906,7 @@ async def internal_probe(
     x_internal_token: str = Header(None, alias="X-Internal-Token"),
 ):
     """Garak red-team probe — full CPM pipeline, no JWT required."""
-    _secret = os.getenv("GARAK_INTERNAL_SECRET", "")
+    _secret = get_credential_by_env("GARAK_INTERNAL_SECRET", default="") or ""
     if not _secret or x_internal_token != _secret:
         raise HTTPException(status_code=403, detail="Forbidden")
 
@@ -936,7 +972,7 @@ async def internal_probe(
     if _aac:
         try:
             _msg = await _aac.messages.create(
-                model=ANTHROPIC_MODEL,
+                model=_live_anthropic_model(),
                 max_tokens=512,
                 messages=[{"role": "user", "content": req.prompt}],
             )
@@ -1226,13 +1262,13 @@ async def chat_stream(
                 # final output node has no upstream LLM Call to attach to.
                 await _emit_ws("llm.invoked", {
                     "provider":   "anthropic",
-                    "model":      ANTHROPIC_MODEL,
+                    "model":      _live_anthropic_model(),
                     "round":      _round + 1,
                     "tools":      [t["name"] for t in _TOOLS],
                     "msg_count":  len(current_messages),
                 })
                 async with async_client.messages.stream(
-                    model=ANTHROPIC_MODEL,
+                    model=_live_anthropic_model(),
                     max_tokens=1024,
                     system=system_prompt,
                     tools=_TOOLS,

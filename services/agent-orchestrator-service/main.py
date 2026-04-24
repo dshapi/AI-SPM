@@ -38,6 +38,12 @@ from typing import AsyncGenerator
 # read ANTHROPIC_API_KEY / ANTHROPIC_MODEL from os.environ at import time. ──
 from platform_shared.integration_config import hydrate_env_from_db  # noqa: E402
 hydrate_env_from_db()
+# Hydration above remains a fallback — LLM_MODEL is also read live via
+# get_credential_by_env at lifespan time so a model bump in the UI is
+# picked up on the next container start *without* needing the hydrator
+# to win against stale env vars.  (LLM_API_KEY is operator-set so we
+# leave it on plain os.getenv.)
+from platform_shared.credentials import get_credential_by_env  # noqa: E402
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
@@ -274,7 +280,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     if llm_provider == "docker":
         from clients.llm_client import DockerModelClient
-        docker_model    = os.getenv("LLM_MODEL", "ai/smollm2")
+        docker_model    = get_credential_by_env("LLM_MODEL", default=os.getenv("LLM_MODEL", "ai/smollm2"))
         docker_base_url = os.getenv(
             "DOCKER_MODEL_RUNNER_URL",
             DockerModelClient.DEFAULT_BASE_URL,
@@ -289,7 +295,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
     else:
         llm_api_key = os.getenv("LLM_API_KEY", "")
-        llm_model   = os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001")
+        llm_model   = get_credential_by_env("LLM_MODEL", default=os.getenv("LLM_MODEL", "claude-haiku-4-5-20251001"))
         if llm_api_key:
             from clients.llm_client import LLMClient
             app.state.llm_client = LLMClient(api_key=llm_api_key, model=llm_model)

@@ -35,6 +35,10 @@ from typing import Any
 # the DB — see platform_shared/integration_config.py. ─────────────────────
 from platform_shared.integration_config import hydrate_env_from_db
 hydrate_env_from_db()
+# Hydration above remains a fallback — _make_generator() reads the secret
+# live each invocation so a UI rotation reaches Garak on the next probe
+# without rebuild.
+from platform_shared.credentials import get_credential_by_env
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -423,7 +427,7 @@ def _make_generator() -> Any:
       2. garak.generators.test.Blank — synthetic fallback (empty responses)
     """
     api_url  = os.environ.get("CPM_API_URL", "").strip()
-    secret   = os.environ.get("GARAK_INTERNAL_SECRET", "").strip()
+    secret   = (get_credential_by_env("GARAK_INTERNAL_SECRET", default="") or "").strip()
     if api_url and secret:
         log.info("Using CPMPipelineGenerator → %s/internal/probe", api_url)
         return CPMPipelineGenerator(api_url=api_url, internal_secret=secret)
