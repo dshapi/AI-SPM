@@ -31,6 +31,12 @@ export function summaryToListRow(s) {
   return {
     id:           s.id,
     external_id:  s.external_id ?? null,
+    // Registry key for the schema-driven Configure modal.  The backend
+    // returns this as `connectorType` (Pydantic alias for connector_type);
+    // we accept either casing for safety so this adapter survives a
+    // server-side rename.  Without this passthrough the Configure modal
+    // can never see the key and falls back to the legacy 3-field form.
+    connectorType: s.connectorType ?? s.connector_type ?? null,
     name:         s.name,
     abbrev:       s.abbrev || deriveAbbrev(s.name),
     category:     s.category,

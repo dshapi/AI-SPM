@@ -73,6 +73,27 @@ describe('summaryToListRow', () => {
     expect(summaryToListRow({ ...MINIMAL, tags: 'not-an-array' }).tags).toEqual([])
   })
 
+  it('passes through connectorType so the schema-driven Configure modal sees it', () => {
+    // Regression guard: when this field was dropped, the modal would
+    // ignore the registry key on every row (even after Alembic 004
+    // backfilled it) and fall back to the legacy 3-field form for
+    // postgres / redis / kafka — which doesn't expose host / port /
+    // database / sslmode at all.  The bug only surfaced once a user
+    // tried to Test Connection on a row whose probe needed a config
+    // key (postgres host) the legacy form had no way to enter.
+    const camel = summaryToListRow({ ...MINIMAL, connectorType: 'postgres' })
+    expect(camel.connectorType).toBe('postgres')
+
+    // Defensive: accept snake_case too, in case anything ever serialises
+    // this without `populate_by_name=True` / by_alias=True.
+    const snake = summaryToListRow({ ...MINIMAL, connector_type: 'redis' })
+    expect(snake.connectorType).toBe('redis')
+
+    // Default to null when the backend omits it (legacy unmigrated row).
+    const none = summaryToListRow({ ...MINIMAL })
+    expect(none.connectorType).toBeNull()
+  })
+
   it('accepts snake_case auth_method as a fallback', () => {
     // The canonical alias is authMethod, but if a row ever slips through
     // with the raw Python attribute name (e.g. from a raw DB fixture),
