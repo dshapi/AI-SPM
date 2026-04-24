@@ -112,6 +112,14 @@ jobs:
             pydantic-settings \
             "python-jose[cryptography]"
 
+          # spm_api routes (e.g. POST /models/upload) use Form/File data and
+          # therefore require python-multipart at IMPORT time. Tests in
+          # tests/test_integrations_routes.py lazy-import services.spm_api.app
+          # via verify_jwt(), which triggers FastAPI's route inspection of
+          # every spm_api route — including the multipart one — so this dep
+          # must be installed in the platform-tests venv as well.
+          pip install python-multipart==0.0.17
+
       # ── 4. Readiness gate — deterministic, no race conditions ─────────────
       - name: Wait for PostgreSQL
         run: |
