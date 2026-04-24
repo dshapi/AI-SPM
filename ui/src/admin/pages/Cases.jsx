@@ -519,25 +519,27 @@ function CaseDetailPanel({ caseData, onClose }) {
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex items-center border-b border-gray-100 px-5 shrink-0 overflow-x-auto">
-        {PANEL_TABS.map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              'h-9 px-3 text-[11px] font-medium border-b-2 shrink-0 transition-colors whitespace-nowrap',
-              activeTab === tab
-                ? 'text-blue-600 border-blue-600'
-                : 'text-gray-500 border-transparent hover:text-gray-700',
-            )}
-          >
-            {tab}
-            {tab === 'Notes' && notes.length > 0 && (
-              <span className="ml-1.5 text-[9px] bg-gray-100 text-gray-500 rounded-full px-1.5 py-px font-bold">{notes.length}</span>
-            )}
-          </button>
-        ))}
+      {/* Tabs — see Integrations.jsx for the pixel-perfect structure rationale */}
+      <div className="px-5 pb-2 shrink-0 overflow-x-auto">
+        <div className="flex items-center border-b border-gray-100 min-w-max">
+          {PANEL_TABS.map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={cn(
+                'h-10 px-3 text-[11px] font-medium border-b-2 -mb-px shrink-0 transition-colors whitespace-nowrap',
+                activeTab === tab
+                  ? 'text-blue-600 border-blue-600'
+                  : 'text-gray-500 border-transparent hover:text-gray-700',
+              )}
+            >
+              {tab}
+              {tab === 'Notes' && notes.length > 0 && (
+                <span className="ml-1.5 text-[9px] bg-gray-100 text-gray-500 rounded-full px-1.5 py-px font-bold">{notes.length}</span>
+              )}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}

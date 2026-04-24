@@ -1,4 +1,4 @@
-.PHONY: help up down logs test smoke-test token admin-token freeze status clean spm-up spm-logs spm-token-admin spm-token-auditor spm-register-model spm-compliance spm-smoke rebuild-security rebuild-security-fast security-smoke
+.PHONY: help up down logs test smoke-test token admin-token freeze status clean spm-up spm-logs spm-token-admin spm-token-auditor spm-register-model spm-compliance spm-smoke rebuild-security rebuild-security-fast security-smoke bootstrap-integrations
 
 # ─────────────────────────────────────────────────────────────────────────────
 help:
@@ -31,8 +31,12 @@ up:
 	@echo "→ Copying .env.example to .env (if not exists)..."
 	@test -f .env || cp .env.example .env
 	@mkdir -p keys
+	@# Managed integration config lives in spm-db; consuming services hydrate
+	@# it at boot via platform_shared.integration_config.hydrate_env_from_db().
+	@# Run `make bootstrap-integrations` once after the first `make up` to
+	@# seed the DB from .env; subsequent boots read straight from the DB.
 	@echo "→ Starting platform (startup-orchestrator will auto-provision everything)..."
-	docker compose up --build -d
+	docker compose --env-file .env up --build -d
 	@echo ""
 	@echo "→ Waiting for startup orchestrator to complete..."
 	@docker wait cpm-startup-orchestrator 2>/dev/null || true
@@ -134,7 +138,30 @@ simulate:
 
 # ── AI SPM ───────────────────────────────────────────────────────────────────
 spm-up:
-	docker compose up -d spm-db spm-api spm-aggregator prometheus grafana
+	docker compose --env-file .env up -d spm-db spm-api spm-aggregator prometheus grafana
+
+# ── Integrations bootstrap (one-shot) ────────────────────────────────────────
+# Posts to POST /integrations/bootstrap on spm-api with an admin JWT.  The
+# endpoint populates the integrations + integration_credentials tables from
+# the in-process seed module (services/spm_api/integrations_seed_data.py)
+# and, on the very first run, reads the transitional managed-config values
+# (ANTHROPIC_API_KEY, TAVILY_API_KEY, GROQ_BASE_URL, LLM_MODEL, …,
+# GARAK_INTERNAL_SECRET, SPM_INTERNAL_BOOTSTRAP_SECRET) out of the spm-api
+# container's own env and copies them into the DB.
+#
+# After this runs successfully the operator can strip the managed keys from
+# .env — subsequent boots hydrate env from the DB directly via
+# platform_shared.integration_config.hydrate_env_from_db().
+bootstrap-integrations: _install-mint
+	@echo "→ Minting admin JWT and calling POST http://spm-api:8092/integrations/bootstrap"
+	@TOKEN=$$(docker exec cpm-api python3 /tmp/mint_demo_jwt.py --admin 2>/dev/null | tail -1) ; \
+	 docker exec cpm-spm-api python3 -c "import urllib.request,os; \
+	   req=urllib.request.Request('http://localhost:8092/integrations/bootstrap', method='POST', \
+	     headers={'Authorization':'Bearer $$TOKEN'}); \
+	   print(urllib.request.urlopen(req,timeout=30).read().decode())"
+	@echo "✓ Bootstrap complete.  Restart config-consuming services so the"
+	@echo "  hydrator picks up DB values:"
+	@echo "    docker compose restart api guard-model threat-hunting-agent garak-runner agent-orchestrator"
 
 spm-logs:
 	docker compose logs -f spm-api spm-aggregator

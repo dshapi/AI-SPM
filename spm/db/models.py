@@ -7,11 +7,11 @@ import uuid
 from typing import Dict
 
 from sqlalchemy import (
-    BigInteger, Column, DateTime, Enum, Float,
+    BigInteger, Boolean, Column, DateTime, Enum, Float, ForeignKey,
     Integer, Index, String, Text, UniqueConstraint, func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
@@ -165,3 +165,204 @@ class AuditExport(Base):
     __table_args__ = (
         Index("idx_audit_export_session_id", "session_id"),
     )
+
+
+# ─── Integrations module ────────────────────────────────────────────────────────
+# Single source of truth for the Admin → Integrations page.  Mirrors the
+# shape used by the UI (MOCK_INTEGRATIONS) so the seed script can migrate
+# existing mock entries row-for-row.
+
+
+class IntegrationStatus(str, enum.Enum):
+    Healthy = "Healthy"
+    Warning = "Warning"
+    Error = "Error"
+    NotConfigured = "Not Configured"
+    Disabled = "Disabled"
+    Partial = "Partial"
+
+
+class IntegrationAuthMethod(str, enum.Enum):
+    api_key = "API Key"
+    oauth = "OAuth"
+    iam_role = "IAM Role"
+    service_account = "Service Account"
+
+
+class IntegrationActivityResult(str, enum.Enum):
+    Success = "Success"
+    Warning = "Warning"
+    Error = "Error"
+    Info = "Info"
+
+
+class Integration(Base):
+    __tablename__ = "integrations"
+
+    id            = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    external_id   = Column(Text, unique=True, nullable=True)
+    # connector_type is the stable registry key ("postgres", "redis", …)
+    # that drives schema-based form rendering and probe dispatch.  Nullable
+    # for back-compat with rows written before migration 004; name-based
+    # dispatch is the fallback when this is null.
+    connector_type = Column(Text, nullable=True)
+    name          = Column(Text, nullable=False)
+    abbrev        = Column(Text, nullable=True)
+    category      = Column(Text, nullable=False)
+    status        = Column(Enum(IntegrationStatus, name="integration_status",
+                                values_callable=lambda e: [m.value for m in e]),
+                           nullable=False, default=IntegrationStatus.NotConfigured)
+    auth_method   = Column(Enum(IntegrationAuthMethod, name="integration_auth_method",
+                                values_callable=lambda e: [m.value for m in e]),
+                           nullable=False, default=IntegrationAuthMethod.api_key)
+    owner         = Column(Text, nullable=True)
+    owner_display = Column(Text, nullable=True)
+    environment   = Column(Text, nullable=False, default="Production")
+    enabled       = Column(Boolean, nullable=False, default=True, server_default="true")
+    description   = Column(Text, nullable=True)
+    vendor        = Column(Text, nullable=True)
+    tags          = Column(JSONB, nullable=False, default=list, server_default="[]")
+    config        = Column(JSONB, nullable=False, default=dict, server_default="{}")
+    tenant_id     = Column(Text, nullable=False, default="global", server_default="'global'")
+    created_at    = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at    = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    credentials = relationship("IntegrationCredential", back_populates="integration",
+                               cascade="all, delete-orphan", lazy="selectin")
+    connection  = relationship("IntegrationConnection", back_populates="integration",
+                               uselist=False, cascade="all, delete-orphan", lazy="selectin")
+    auth        = relationship("IntegrationAuth", back_populates="integration",
+                               uselist=False, cascade="all, delete-orphan", lazy="selectin")
+    coverage    = relationship("IntegrationCoverage", back_populates="integration",
+                               cascade="all, delete-orphan", lazy="selectin",
+                               order_by="IntegrationCoverage.position")
+    activity    = relationship("IntegrationActivity", back_populates="integration",
+                               cascade="all, delete-orphan", lazy="selectin",
+                               order_by="IntegrationActivity.event_at.desc()")
+    workflows   = relationship("IntegrationWorkflow", back_populates="integration",
+                               uselist=False, cascade="all, delete-orphan", lazy="selectin")
+    logs        = relationship("IntegrationLog", back_populates="integration",
+                               cascade="all, delete-orphan", lazy="selectin",
+                               order_by="IntegrationLog.event_at.desc()")
+
+
+class IntegrationCredential(Base):
+    __tablename__ = "integration_credentials"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False)
+    credential_type = Column(Text, nullable=False)
+    name            = Column(Text, nullable=False)
+    value_enc       = Column(Text, nullable=True)
+    value_hint      = Column(Text, nullable=True)
+    is_configured   = Column(Boolean, nullable=False, default=False, server_default="false")
+    rotated_at      = Column(DateTime(timezone=True), nullable=True)
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    integration = relationship("Integration", back_populates="credentials")
+
+
+class IntegrationConnection(Base):
+    __tablename__ = "integration_connections"
+
+    id                = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id    = Column(UUID(as_uuid=True),
+                               ForeignKey("integrations.id", ondelete="CASCADE"),
+                               nullable=False, unique=True)
+    last_sync         = Column(Text, nullable=True)
+    last_sync_full    = Column(Text, nullable=True)
+    last_failed_sync  = Column(Text, nullable=True)
+    avg_latency       = Column(Text, nullable=True)
+    uptime            = Column(Text, nullable=True)
+    health_history    = Column(JSONB, nullable=False, default=list, server_default="[]")
+    updated_at        = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    integration = relationship("Integration", back_populates="connection")
+
+
+class IntegrationAuth(Base):
+    __tablename__ = "integration_auth"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False, unique=True)
+    token_expiry    = Column(Text, nullable=True)
+    scopes          = Column(JSONB, nullable=False, default=list, server_default="[]")
+    missing_scopes  = Column(JSONB, nullable=False, default=list, server_default="[]")
+    setup_progress  = Column(JSONB, nullable=True)
+    updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    integration = relationship("Integration", back_populates="auth")
+
+
+class IntegrationCoverage(Base):
+    __tablename__ = "integration_coverage"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False)
+    position        = Column(Integer, nullable=False, default=0, server_default="0")
+    label           = Column(Text, nullable=False)
+    enabled         = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at      = Column(DateTime(timezone=True), server_default=func.now())
+
+    integration = relationship("Integration", back_populates="coverage")
+
+
+class IntegrationActivity(Base):
+    __tablename__ = "integration_activity"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False)
+    ts_display      = Column(Text, nullable=False)
+    event_at        = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    event           = Column(Text, nullable=False)
+    result          = Column(Enum(IntegrationActivityResult, name="integration_activity_result",
+                                  values_callable=lambda e: [m.value for m in e]),
+                             nullable=False, default=IntegrationActivityResult.Info)
+    actor           = Column(Text, nullable=True)
+
+    integration = relationship("Integration", back_populates="activity")
+
+
+class IntegrationWorkflow(Base):
+    __tablename__ = "integration_workflows"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False, unique=True)
+    playbooks       = Column(JSONB, nullable=False, default=list, server_default="[]")
+    alerts          = Column(JSONB, nullable=False, default=list, server_default="[]")
+    policies        = Column(JSONB, nullable=False, default=list, server_default="[]")
+    cases           = Column(JSONB, nullable=False, default=list, server_default="[]")
+    updated_at      = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    integration = relationship("Integration", back_populates="workflows")
+
+
+class IntegrationLog(Base):
+    __tablename__ = "integration_logs"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    integration_id  = Column(UUID(as_uuid=True),
+                             ForeignKey("integrations.id", ondelete="CASCADE"),
+                             nullable=False)
+    event_at        = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    action          = Column(Text, nullable=False)
+    actor           = Column(Text, nullable=True)
+    result          = Column(Enum(IntegrationActivityResult, name="integration_activity_result",
+                                  values_callable=lambda e: [m.value for m in e],
+                                  create_type=False),
+                             nullable=False, default=IntegrationActivityResult.Info)
+    message         = Column(Text, nullable=True)
+    detail          = Column(JSONB, nullable=False, default=dict, server_default="{}")
+
+    integration = relationship("Integration", back_populates="logs")

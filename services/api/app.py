@@ -27,6 +27,16 @@ _ROOT = os.path.dirname(os.path.dirname(_HERE))             # repo root
 for _p in (_HERE, _ROOT):
     if _p not in _sys.path:
         _sys.path.insert(0, _p)
+
+# ── Hydrate managed config from spm-db BEFORE any platform_shared import ─────
+# platform_shared.config.get_settings() snapshots os.environ the first time it
+# is called, so the DB pull has to happen before that import.  This is the
+# single point where the DB becomes the source of truth for ANTHROPIC_API_KEY,
+# TAVILY_API_KEY, GROQ_BASE_URL, LLM_MODEL, etc. — see
+# platform_shared/integration_config.py for the full ENV_EXPORT_MAP.
+from platform_shared.integration_config import hydrate_env_from_db  # noqa: E402
+hydrate_env_from_db()
+
 import time
 import uuid
 import logging

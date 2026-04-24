@@ -22,6 +22,12 @@ import time
 import logging
 from typing import List, Optional
 
+# ── Hydrate managed config (GROQ_BASE_URL, LLM_MODEL, GUARD_PROMPT_MODE, …)
+# straight from spm-db before anything downstream reads os.getenv.  See
+# platform_shared/integration_config.py for the ENV_EXPORT_MAP. ──────────────
+from platform_shared.integration_config import hydrate_env_from_db
+hydrate_env_from_db()
+
 from fastapi import FastAPI
 from pydantic import BaseModel
 

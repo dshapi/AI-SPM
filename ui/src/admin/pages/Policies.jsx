@@ -933,22 +933,24 @@ function DetailPanel({ policy, onUpdate, onDelete, onDuplicate, toast }) {
       </div>
 
       {/* ── TAB BAR ── */}
-      <div className="flex items-center px-4 border-b border-gray-100 shrink-0 gap-0.5">
-        {TABS_CFG.map(({ key, icon: TabIcon }) => (
-          <button
-            key={key}
-            onClick={() => setTab(key)}
-            className={cn(
-              'inline-flex items-center gap-1.5 px-3 py-2.5 text-[12px] border-b-2 transition-colors duration-100 whitespace-nowrap',
-              tab === key
-                ? 'border-blue-600 text-blue-600 font-semibold'
-                : 'border-transparent text-gray-500 hover:text-gray-700 font-medium',
-            )}
-          >
-            <TabIcon size={12} strokeWidth={tab === key ? 2.5 : 1.75} />
-            {key}
-          </button>
-        ))}
+      <div className="bg-white shrink-0 px-4 pb-2 overflow-x-auto">
+        <div className="flex items-center border-b border-gray-100 gap-0.5 min-w-max">
+          {TABS_CFG.map(({ key, icon: TabIcon }) => (
+            <button
+              key={key}
+              onClick={() => setTab(key)}
+              className={cn(
+                'inline-flex items-center gap-1.5 px-3 py-2.5 text-[12px] border-b-2 -mb-px transition-colors duration-100 whitespace-nowrap',
+                tab === key
+                  ? 'border-blue-600 text-blue-600 font-semibold'
+                  : 'border-transparent text-gray-500 hover:text-gray-700 font-medium',
+              )}
+            >
+              <TabIcon size={12} strokeWidth={tab === key ? 2.5 : 1.75} />
+              {key}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* ── TAB CONTENT ── */}

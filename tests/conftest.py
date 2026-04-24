@@ -33,6 +33,12 @@ _SIBLING_ROOTS = [
     os.path.join(_HERE, "services", "api"),
     os.path.join(_HERE, "services", "policy_decider"),
     os.path.join(_HERE, "services", "guard_model"),
+    # spm_api's Dockerfile flattens ``integrations_routes.py`` and
+    # ``integrations_seed_data.py`` onto /app/ next to app.py, so at runtime
+    # they are importable by bare name (e.g. ``from integrations_routes import
+    # router``).  Mirror that here so tests can import the same modules the
+    # way the running container does.
+    os.path.join(_HERE, "services", "spm_api"),
 ]
 
 for _root in _SIBLING_ROOTS:

@@ -29,6 +29,13 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+# ── Hydrate managed config from spm-db at process start.
+# Both GARAK_INTERNAL_SECRET (used to authenticate /internal/garak/results
+# calls back to `api`) and SPM_INTERNAL_BOOTSTRAP_SECRET live on int-018 in
+# the DB — see platform_shared/integration_config.py. ─────────────────────
+from platform_shared.integration_config import hydrate_env_from_db
+hydrate_env_from_db()
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 

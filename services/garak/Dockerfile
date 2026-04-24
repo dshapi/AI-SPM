@@ -29,6 +29,8 @@ WORKDIR /app
 COPY --from=builder /venv /venv
 ENV PATH="/venv/bin:${PATH}"
 
+# platform_shared is needed so main.py can call integration_config.hydrate_env_from_db()
+COPY platform_shared/ ./platform_shared/
 COPY services/garak/main.py .
 
 # garak imports torch/transformers on startup — allow up to 90 s before health

@@ -833,3 +833,16 @@ async def refresh_sbom(
 
 from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
 Instrumentator().instrument(app).expose(app)
+
+
+# ── Integrations module ───────────────────────────────────────────────────────
+# Routes live in a sibling module because the 15+ endpoints + 8-table
+# serialization surface would bloat this file.  See integrations_routes.py.
+# The Dockerfile flattens the service dir onto /app/, so the sibling is
+# importable by its bare name at runtime.  When running tests from the repo
+# root we fall through to the packaged path under services/spm_api/.
+try:
+    from integrations_routes import router as integrations_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.integrations_routes import router as integrations_router  # noqa: E402
+app.include_router(integrations_router)

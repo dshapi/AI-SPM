@@ -26,6 +26,12 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+# ── Hydrate managed config from spm-db BEFORE `config.Settings` is imported
+# (pydantic-settings reads os.environ at class-definition time).  See
+# platform_shared/integration_config.py. ────────────────────────────────────
+from platform_shared.integration_config import hydrate_env_from_db
+hydrate_env_from_db()
+
 import psycopg2
 import redis as redis_lib
 from fastapi import FastAPI

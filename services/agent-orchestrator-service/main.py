@@ -34,6 +34,11 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+# ── Hydrate managed config from spm-db before clients.llm_client / ChatAnthropic
+# read ANTHROPIC_API_KEY / ANTHROPIC_MODEL from os.environ at import time. ──
+from platform_shared.integration_config import hydrate_env_from_db  # noqa: E402
+hydrate_env_from_db()
+
 from fastapi import FastAPI, Request, Response, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware

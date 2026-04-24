@@ -9,6 +9,9 @@ cryptography==43.0.3
 requests==2.32.3
 anthropic==0.40.0
 tavily-python==0.5.0
+# platform_shared.integration_config hydrates ANTHROPIC_API_KEY / TAVILY_API_KEY
+# etc. from spm-db at boot (direct psycopg2 read — no HTTP to spm-api).
+psycopg2-binary==2.9.9
 beautifulsoup4==4.12.3
 lxml==5.3.0
 # WebSocket transport — required by uvicorn for ws:// upgrade handling

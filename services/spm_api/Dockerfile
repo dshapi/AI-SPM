@@ -9,4 +9,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY platform_shared/ ./platform_shared/
 COPY spm/ ./spm/
 COPY services/spm_api/app.py .
+COPY services/spm_api/integrations_routes.py .
+COPY services/spm_api/integrations_seed_data.py .
+COPY services/spm_api/connector_registry.py .
+COPY services/spm_api/connector_probes.py .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8092"]

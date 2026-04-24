@@ -32,10 +32,23 @@ button { cursor: pointer; border: none; background: none; font-family: inherit; 
 input, textarea { font-family: inherit; }
 a { color: inherit; text-decoration: none; }
 
-/* Scrollbar */
-::-webkit-scrollbar { width: 6px; }
+/* Scrollbar
+ * ─────────────────────────────────────────────────────────────────
+ * Important: set BOTH width and height, otherwise Safari renders
+ * ~16px horizontal scrollbars on `overflow-x-auto` containers and
+ * eats descenders ("y", "g", "p") off tab labels like "Activity",
+ * "Workflows", "Sync History".  All our pages use overflow-x-auto
+ * on the detail-panel tab rows, so this default must be thin.
+ */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 99px; }
+
+/* no-scrollbar: for rows (like detail-panel tabs) where we still
+ * want overflow-x to scroll via swipe/wheel but DO NOT want a
+ * visible bar clipping the text below it. */
+.no-scrollbar { scrollbar-width: none; -ms-overflow-style: none; }
+.no-scrollbar::-webkit-scrollbar { display: none; width: 0; height: 0; }
 
 /* Code blocks inside messages */
 pre {

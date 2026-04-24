@@ -11,3 +11,4 @@ weasyprint==62.3
 prometheus-fastapi-instrumentator==7.0.0
 kafka-python-ng==2.2.3
 cryptography==43.0.3
+redis==5.2.0

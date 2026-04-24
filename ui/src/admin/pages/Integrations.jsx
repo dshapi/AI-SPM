@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   Search, X, Plus, Upload, Download, RefreshCw,
   Cloud, Shield, Database, Bell, Workflow,
@@ -8,12 +8,25 @@ import {
   GitBranch, Layers, Webhook, Filter,
   Network, FlaskConical, ExternalLink,
   Server, ShieldCheck, FileText, Plug,
+  Loader2,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
 import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { useIntegrations, useIntegration } from '../../hooks/useIntegrations.js'
+import {
+  enableIntegration,
+  disableIntegration,
+  syncIntegration,
+  testIntegration,
+  createIntegration,
+  listIntegrations,
+} from '../api/integrationsApi.js'
+import { summaryToListRow, detailToViewModel } from './integrationsViewModel.js'
+import { IntegrationConfigureModal }           from './IntegrationConfigureModal.jsx'
+import { IntegrationCreateModal }              from './IntegrationCreateModal.jsx'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -898,7 +911,17 @@ function MetaRow({ label, value, mono = false }) {
   )
 }
 
-function IntegrationDetailPanel({ integration: int, onClose }) {
+function IntegrationDetailPanel({
+  integration: int,
+  detailLoading = false,
+  onClose,
+  onConfigure,
+  onTest,
+  testBusy = false,
+  onEnable,
+  onDisable,
+  onSync,
+}) {
   const [activeTab, setActiveTab] = useState('Overview')
   if (!int) return null
 
@@ -959,49 +982,78 @@ function IntegrationDetailPanel({ integration: int, onClose }) {
 
         {/* Row 4: actions */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]">
+          <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={onConfigure}>
             <Settings size={11} /> Configure
           </Button>
-          <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-blue-600 border-blue-200 hover:bg-blue-50">
-            <Activity size={11} /> Test
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1 text-[11px] text-blue-600 border-blue-200 hover:bg-blue-50"
+            onClick={onTest}
+            disabled={testBusy}
+          >
+            {testBusy
+              ? <Loader2 size={11} className="animate-spin" />
+              : <Activity size={11} />}
+            {testBusy ? 'Testing…' : 'Test'}
           </Button>
           <div className="w-px h-5 bg-gray-200 mx-0.5" />
           {int.status === 'Error' && (
-            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-emerald-600 border-emerald-200 hover:bg-emerald-50 font-semibold">
+            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-emerald-600 border-emerald-200 hover:bg-emerald-50 font-semibold" onClick={onConfigure}>
               <RotateCcw size={11} /> Reconnect
             </Button>
           )}
           {int.enabled ? (
-            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-orange-600 border-orange-200 hover:bg-orange-50">
+            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-orange-600 border-orange-200 hover:bg-orange-50" onClick={onDisable}>
               <XCircle size={11} /> Disable
             </Button>
           ) : (
-            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-emerald-600 border-emerald-200 hover:bg-emerald-50">
+            <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px] text-emerald-600 border-emerald-200 hover:bg-emerald-50" onClick={onEnable}>
               <CheckCircle2 size={11} /> Enable
             </Button>
           )}
-          <Button size="sm" variant="ghost" className="h-7 gap-1 text-[11px] ml-auto text-gray-400 hover:text-gray-600">
+          {/* Logs — jumps to the Activity tab, which already renders the
+              recent-activity table for this integration.  Previously this
+              button was a visual stub with no onClick. */}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="h-7 gap-1 text-[11px] ml-auto text-gray-400 hover:text-gray-600"
+            onClick={() => setActiveTab('Activity')}
+          >
             <Eye size={11} /> Logs
           </Button>
         </div>
       </div>
 
-      {/* Tabs */}
-      <div className="flex border-b border-gray-100 bg-white shrink-0 px-4 overflow-x-auto">
-        {DETAIL_TABS.map(tab => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={cn(
-              'px-3 py-2.5 text-[11.5px] font-semibold whitespace-nowrap border-b-2 transition-colors',
-              activeTab === tab
-                ? 'border-blue-500 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700',
-            )}
-          >
-            {tab}
-          </button>
-        ))}
+      {/* Tabs
+       * ─────────────────────────────────────────────────────────────
+       * Pixel-perfect structure:
+       *   outer  – horizontal scroll container, reserves an 8px gutter
+       *            (pb-2) below the inner row so the 6px scrollbar
+       *            sits in its own lane and never touches tab text
+       *            or the active-tab indicator.
+       *   inner  – flex row that owns the full-width `border-b` gray
+       *            line.  Keeping the border on this inner row means
+       *            the active tab's blue border-b-2 indicator butts
+       *            directly against the gray line with zero gap. */}
+      <div className="bg-white shrink-0 px-4 pb-2 overflow-x-auto">
+        <div className="flex border-b border-gray-100 min-w-max">
+          {DETAIL_TABS.map(tab => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={cn(
+                'px-3 py-3 text-[11.5px] font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors',
+                activeTab === tab
+                  ? 'border-blue-500 text-blue-600'
+                  : 'border-transparent text-gray-500 hover:text-gray-700',
+              )}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
       </div>
 
       {/* Tab content */}
@@ -1120,13 +1172,22 @@ function IntegrationDetailPanel({ integration: int, onClose }) {
             <div>
               <SectionLabel>Quick Actions</SectionLabel>
               <div className="grid grid-cols-2 gap-2">
-                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start">
-                  <Activity size={12} /> Test Connection
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1.5 text-[11.5px] justify-start"
+                  onClick={onTest}
+                  disabled={testBusy}
+                >
+                  {testBusy
+                    ? <Loader2 size={12} className="animate-spin" />
+                    : <Activity size={12} />}
+                  {testBusy ? 'Testing…' : 'Test Connection'}
                 </Button>
-                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start">
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start" onClick={onConfigure}>
                   <RotateCcw size={12} /> Rotate Credentials
                 </Button>
-                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start">
+                <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start" onClick={onSync}>
                   <RefreshCw size={12} /> Force Sync
                 </Button>
                 <Button variant="outline" size="sm" className="h-8 gap-1.5 text-[11.5px] justify-start">
@@ -1398,42 +1459,261 @@ function RecentActivityTable({ events }) {
 // ── Main page ──────────────────────────────────────────────────────────────────
 
 export default function Integrations() {
-  const [integrations, setIntegrations] = useState(MOCK_INTEGRATIONS)
-  const [selectedId, setSelectedId]     = useState('int-001')
-  const [search, setSearch]             = useState('')
+  // ── Filters ────────────────────────────────────────────────────────────────
+  // Backend does server-side filtering on category/status/q; auth-method and
+  // "only unhealthy" are client-side, because the list endpoint doesn't take
+  // those and they're cheap to apply to the returned array (we never have
+  // more than ~50 rows).
+  const [search,         setSearch]         = useState('')
   const [filterCategory, setFilterCategory] = useState('All Categories')
-  const [filterStatus, setFilterStatus]     = useState('All Statuses')
-  const [filterAuth, setFilterAuth]         = useState('All Auth Types')
-  const [onlyUnhealthy, setOnlyUnhealthy]   = useState(false)
+  const [filterStatus,   setFilterStatus]   = useState('All Statuses')
+  const [filterAuth,     setFilterAuth]     = useState('All Auth Types')
+  const [onlyUnhealthy,  setOnlyUnhealthy]  = useState(false)
 
-  const selectedInt = integrations.find(i => i.id === selectedId) || null
+  // Live list + metrics — the hook reacts to filter changes automatically
+  // and drops stale responses via its seq counter, so there's no extra work
+  // to do here when the user flips a filter mid-request.
+  const { integrations: rawList, metrics, loading, error, refresh } =
+    useIntegrations({ category: filterCategory, status: filterStatus, q: search })
 
-  function handleToggle(id, enabled) {
-    setIntegrations(prev => prev.map(i =>
-      i.id === id ? { ...i, enabled, status: enabled ? 'Healthy' : 'Disabled' } : i,
-    ))
+  // Normalize server rows to the flat view-model the renderers were built
+  // against.  Memoized so IntegrationRow's identity checks don't re-mount
+  // every render.
+  const integrations = useMemo(
+    () => (rawList || []).map(summaryToListRow),
+    [rawList],
+  )
+
+  // Selection: default to the first integration once the list lands, and
+  // clear the selection if the selected row disappears after a refresh.
+  const [selectedId, setSelectedId] = useState(null)
+  const resolvedSelectedId =
+    selectedId && integrations.some(i => i.id === selectedId)
+      ? selectedId
+      : integrations[0]?.id ?? null
+
+  // Full detail (credentials/connection/auth/coverage/activity/workflows)
+  // — fetched lazily per-selection.  The list row already has enough to
+  // render the header chips while we wait for the detail to arrive.
+  const { integration: rawDetail, loading: detailLoading, refresh: refreshDetail } =
+    useIntegration(resolvedSelectedId)
+  const selectedDetail = useMemo(() => detailToViewModel(rawDetail), [rawDetail])
+  const selectedListRow = integrations.find(i => i.id === resolvedSelectedId) || null
+  // Prefer the full detail view-model; fall back to the summary row so the
+  // panel can render its header immediately on selection while the detail
+  // request is in flight.
+  const selectedInt = selectedDetail || selectedListRow
+
+  // ── Configure modal ────────────────────────────────────────────────────────
+  const [configureOpen, setConfigureOpen] = useState(false)
+
+  // ── Create modal + Import/Export state ─────────────────────────────────────
+  const [createOpen,     setCreateOpen]     = useState(false)
+  const [importBusy,     setImportBusy]     = useState(false)
+  const [exportBusy,     setExportBusy]     = useState(false)
+  const [importSummary,  setImportSummary]  = useState(null)   // { ok, failed, total }
+
+  // ── Mutations (optimistic; revert + surface error on failure) ──────────────
+  const [mutationError, setMutationError] = useState(null)
+  // Test-button state — structured result + loading flag so the Test
+  // button can show a spinner, and we can render a green/red banner with
+  // the probe's message + latency when the call completes.
+  const [testResult,    setTestResult]    = useState(null)
+  const [testBusy,      setTestBusy]      = useState(false)
+  async function runMutation(fn) {
+    setMutationError(null)
+    try {
+      await fn()
+      // Refresh list + detail so the KPI strip and chips reflect the new
+      // state.  We could be more surgical (swap in the returned row), but
+      // mutation rates on this surface are low enough that an extra GET
+      // is a fine tradeoff for guaranteed correctness.
+      await Promise.all([refresh(), refreshDetail()])
+    } catch (err) {
+      setMutationError(err)
+    }
   }
 
-  // Filter options
+  async function handleToggle(id, enabled) {
+    await runMutation(() => (enabled ? enableIntegration(id) : disableIntegration(id)))
+  }
+  async function handleEnable()  { if (selectedInt) await runMutation(() => enableIntegration(selectedInt.id)) }
+  async function handleDisable() { if (selectedInt) await runMutation(() => disableIntegration(selectedInt.id)) }
+
+  // Test — unlike the other mutations, we want to show the probe's
+  // structured response ({ ok, message, latency_ms }) to the user, not
+  // just flip the row status silently.  The backend always returns 200
+  // whether the probe passed or failed, so we capture the body into
+  // `testResult` and render a green/red banner.  The network-level
+  // errors (500, etc.) still fall through to mutationError.
+  async function handleTest() {
+    if (!selectedInt) return
+    setMutationError(null)
+    setTestResult(null)
+    setTestBusy(true)
+    try {
+      const res = await testIntegration(selectedInt.id)
+      setTestResult({ ...res, integrationName: selectedInt.name })
+      // Refresh so the row's Healthy/Error chip matches the probe result.
+      await Promise.all([refresh(), refreshDetail()])
+    } catch (err) {
+      setMutationError(err)
+    } finally {
+      setTestBusy(false)
+    }
+  }
+
+  async function handleSync()    { if (selectedInt) await runMutation(() => syncIntegration(selectedInt.id))    }
+  async function handleSaved()   { await Promise.all([refresh(), refreshDetail()]) }
+
+  // ── Create handler ─────────────────────────────────────────────────────────
+  // On successful create, refresh the list so the new row renders, then
+  // auto-select it so the detail panel opens on the thing the user just made.
+  async function handleCreated(created) {
+    setMutationError(null)
+    setImportSummary(null)
+    await refresh()
+    if (created?.id) setSelectedId(created.id)
+  }
+
+  // ── Export handler ─────────────────────────────────────────────────────────
+  // Server returns IntegrationSummary (no credentials), but we still defensively
+  // strip any credential-shaped fields in case the server payload evolves.  The
+  // JSON is round-trippable through the Import handler below.
+  async function handleExport() {
+    setMutationError(null)
+    setImportSummary(null)
+    setExportBusy(true)
+    try {
+      const rows = await listIntegrations()
+      const safe = (rows || []).map(r => {
+        const {
+          // secrets / runtime-only fields we never want in a portable config
+          credentials:   _creds,     // eslint-disable-line no-unused-vars
+          api_key:       _apiKey,    // eslint-disable-line no-unused-vars
+          value_hint:    _hint,      // eslint-disable-line no-unused-vars
+          last_sync:     _ls1,       // eslint-disable-line no-unused-vars
+          lastSync:      _ls2,       // eslint-disable-line no-unused-vars
+          avg_latency:   _al1,       // eslint-disable-line no-unused-vars
+          avgLatency:    _al2,       // eslint-disable-line no-unused-vars
+          health_history:_hh1,       // eslint-disable-line no-unused-vars
+          healthHistory: _hh2,       // eslint-disable-line no-unused-vars
+          uptime:        _up,        // eslint-disable-line no-unused-vars
+          status:        _st,        // reset to Not Configured on re-import
+          id:            _id,        // eslint-disable-line no-unused-vars
+          ...rest
+        } = r
+        return rest
+      })
+      const payload = {
+        version:      1,
+        exported_at:  new Date().toISOString(),
+        integrations: safe,
+      }
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json',
+      })
+      const url  = URL.createObjectURL(blob)
+      const a    = document.createElement('a')
+      a.href     = url
+      a.download = `integrations-${new Date().toISOString().slice(0, 10)}.json`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setMutationError(err)
+    } finally {
+      setExportBusy(false)
+    }
+  }
+
+  // ── Import handler ─────────────────────────────────────────────────────────
+  // Opens a transient <input type=file>.  Accepts either the export shape
+  // ({ version, integrations: [...] }) or a bare array of integration objects.
+  // Creates each row via POST /integrations and tallies success/failure;
+  // duplicates surface as per-row errors without aborting the batch.
+  function handleImport() {
+    setMutationError(null)
+    setImportSummary(null)
+    const input = document.createElement('input')
+    input.type   = 'file'
+    input.accept = 'application/json,.json'
+    input.onchange = async () => {
+      const file = input.files?.[0]
+      if (!file) return
+      setImportBusy(true)
+      try {
+        const text  = await file.text()
+        const json  = JSON.parse(text)
+        const rows  = Array.isArray(json)
+          ? json
+          : Array.isArray(json?.integrations)
+            ? json.integrations
+            : null
+        if (!rows) {
+          throw new Error('File must be a JSON array or { integrations: [...] }.')
+        }
+        let ok = 0
+        let failed = 0
+        for (const row of rows) {
+          if (!row || !row.name || !row.category) { failed += 1; continue }
+          try {
+            await createIntegration({
+              name:        row.name,
+              category:    row.category,
+              auth_method: row.auth_method || row.authMethod || 'API Key',
+              environment: row.environment || 'Production',
+              ...(row.vendor      ? { vendor:      row.vendor      } : {}),
+              ...(row.description ? { description: row.description } : {}),
+              ...(Array.isArray(row.tags) && row.tags.length
+                ? { tags: row.tags }
+                : {}),
+              ...(row.config && typeof row.config === 'object'
+                ? { config: row.config }
+                : {}),
+              ...(row.external_id ? { external_id: row.external_id } : {}),
+            })
+            ok += 1
+          } catch {
+            failed += 1
+          }
+        }
+        setImportSummary({ ok, failed, total: rows.length })
+        await refresh()
+      } catch (err) {
+        setMutationError(err)
+      } finally {
+        setImportBusy(false)
+      }
+    }
+    // Firefox won't fire change if the element isn't in the DOM briefly.
+    document.body.appendChild(input)
+    input.click()
+    setTimeout(() => input.remove(), 1000)
+  }
+
+  // ── Filter options ─────────────────────────────────────────────────────────
+  // Pull options from the (already-filtered) live list.  This intentionally
+  // re-uses whatever the server just returned, so categories/statuses that
+  // aren't present are hidden from the dropdown rather than showing as
+  // empty picks.
   const categoryOpts = ['All Categories', ...Array.from(new Set(integrations.map(i => i.category)))]
   const statusOpts   = ['All Statuses',   ...Array.from(new Set(integrations.map(i => i.status)))]
   const authOpts     = ['All Auth Types', ...Array.from(new Set(integrations.map(i => i.authMethod)))]
 
+  // Client-side only for auth + unhealthy flag; the rest is already server-side.
   const filtered = integrations.filter(i => {
-    const q = search.toLowerCase()
-    if (q && !i.name.toLowerCase().includes(q) && !i.category.toLowerCase().includes(q) && !i.tags.some(t => t.includes(q))) return false
-    if (filterCategory !== 'All Categories' && i.category  !== filterCategory) return false
-    if (filterStatus   !== 'All Statuses'   && i.status    !== filterStatus)   return false
-    if (filterAuth     !== 'All Auth Types' && i.authMethod !== filterAuth)     return false
-    if (onlyUnhealthy && (i.status === 'Healthy' || i.status === 'Disabled'))  return false
+    if (filterAuth     !== 'All Auth Types' && i.authMethod !== filterAuth) return false
+    if (onlyUnhealthy && (i.status === 'Healthy' || i.status === 'Disabled')) return false
     return true
   })
 
-  // KPI values
-  const totalConnected  = integrations.filter(i => i.status !== 'Not Configured' && i.status !== 'Disabled').length
-  const healthy         = integrations.filter(i => i.status === 'Healthy').length
-  const needsAttention  = integrations.filter(i => i.status === 'Warning' || i.status === 'Partial').length
-  const failedSyncs     = MOCK_ACTIVITY.filter(e => e.result === 'Error').length
+  // ── KPIs — prefer server metrics when present, fall back to derived ────────
+  const totalConnected = metrics?.connected        ?? integrations.filter(i => i.status !== 'Not Configured' && i.status !== 'Disabled').length
+  const healthy        = metrics?.healthy          ?? integrations.filter(i => i.status === 'Healthy').length
+  const needsAttention = metrics?.needs_attention  ?? integrations.filter(i => i.status === 'Warning' || i.status === 'Partial').length
+  const failedSyncs    = metrics?.failed_syncs_24h ?? 0
 
   return (
     <PageContainer>
@@ -1443,18 +1723,152 @@ export default function Integrations() {
         subtitle="Connect AI providers, security systems, and operational tools to extend platform coverage"
         actions={
           <>
-            <Button size="sm" variant="outline" className="gap-1.5">
-              <Upload size={13} /> Import Config
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={refresh} disabled={loading}>
+              {loading
+                ? <Loader2 size={13} className="animate-spin" />
+                : <RefreshCw size={13} />}
+              Sync
             </Button>
-            <Button size="sm" variant="outline" className="gap-1.5">
-              <Download size={13} /> Export
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={handleImport}
+              disabled={importBusy}
+            >
+              {importBusy
+                ? <Loader2 size={13} className="animate-spin" />
+                : <Upload size={13} />}
+              Import Config
             </Button>
-            <Button size="sm" className="gap-1.5">
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={handleExport}
+              disabled={exportBusy}
+            >
+              {exportBusy
+                ? <Loader2 size={13} className="animate-spin" />
+                : <Download size={13} />}
+              Export
+            </Button>
+            <Button
+              size="sm"
+              className="gap-1.5"
+              onClick={() => setCreateOpen(true)}
+            >
               <Plus size={13} /> Add Integration
             </Button>
           </>
         }
       />
+
+      {/* Error banners (list load + mutation) */}
+      {error && (
+        <div className="flex items-start gap-2.5 px-3.5 py-3 bg-red-50 border border-red-200 border-l-[3px] border-l-red-500 rounded-xl">
+          <AlertTriangle size={13} className="text-red-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-[11.5px] font-semibold text-red-700">Couldn't load integrations</p>
+            <p className="text-[11px] text-red-600 mt-0.5 leading-snug">
+              {error.message || 'Request failed.'} Try the Sync button to retry.
+            </p>
+          </div>
+        </div>
+      )}
+      {mutationError && (
+        <div className="flex items-start gap-2.5 px-3.5 py-3 bg-red-50 border border-red-200 border-l-[3px] border-l-red-500 rounded-xl">
+          <AlertTriangle size={13} className="text-red-500 mt-0.5 shrink-0" />
+          <div>
+            <p className="text-[11.5px] font-semibold text-red-700">Action failed</p>
+            <p className="text-[11px] text-red-600 mt-0.5 leading-snug">
+              {mutationError.message || 'Request failed.'}
+            </p>
+          </div>
+        </div>
+      )}
+      {/* Test-probe result — green on ok, red on failure.  Dismissible
+          via the X so it doesn't hang around after the user's seen it. */}
+      {testResult && (
+        <div
+          className={cn(
+            'flex items-start gap-2.5 px-3.5 py-3 border border-l-[3px] rounded-xl',
+            testResult.ok
+              ? 'bg-emerald-50 border-emerald-200 border-l-emerald-500'
+              : 'bg-red-50 border-red-200 border-l-red-500',
+          )}
+        >
+          {testResult.ok
+            ? <CheckCircle2 size={13} className="text-emerald-600 mt-0.5 shrink-0" />
+            : <XCircle size={13} className="text-red-500 mt-0.5 shrink-0" />}
+          <div className="flex-1 min-w-0">
+            <p className={cn(
+              'text-[11.5px] font-semibold',
+              testResult.ok ? 'text-emerald-700' : 'text-red-700',
+            )}>
+              {testResult.ok
+                ? `${testResult.integrationName || 'Integration'} is alive`
+                : `${testResult.integrationName || 'Integration'} test failed`}
+              {testResult.latency_ms != null && (
+                <span className="ml-1.5 font-mono text-[10.5px] opacity-70">
+                  ({testResult.latency_ms}ms)
+                </span>
+              )}
+            </p>
+            <p className={cn(
+              'text-[11px] mt-0.5 leading-snug',
+              testResult.ok ? 'text-emerald-700/80' : 'text-red-600',
+            )}>
+              {testResult.message || (testResult.ok ? 'Probe succeeded.' : 'Probe failed.')}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setTestResult(null)}
+            className="w-5 h-5 flex items-center justify-center rounded-md hover:bg-black/[0.06] text-gray-400 hover:text-gray-600 transition-colors shrink-0"
+            aria-label="Dismiss"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      )}
+      {importSummary && (
+        <div
+          className={cn(
+            'flex items-start gap-2.5 px-3.5 py-3 border border-l-[3px] rounded-xl',
+            importSummary.failed === 0
+              ? 'bg-emerald-50 border-emerald-200 border-l-emerald-500'
+              : 'bg-yellow-50 border-yellow-200 border-l-yellow-500',
+          )}
+        >
+          {importSummary.failed === 0
+            ? <CheckCircle2 size={13} className="text-emerald-600 mt-0.5 shrink-0" />
+            : <AlertTriangle size={13} className="text-yellow-600 mt-0.5 shrink-0" />}
+          <div className="flex-1">
+            <p className={cn(
+              'text-[11.5px] font-semibold',
+              importSummary.failed === 0 ? 'text-emerald-700' : 'text-yellow-800',
+            )}>
+              Import complete
+            </p>
+            <p className={cn(
+              'text-[11px] mt-0.5 leading-snug',
+              importSummary.failed === 0 ? 'text-emerald-700' : 'text-yellow-700',
+            )}>
+              {importSummary.ok} of {importSummary.total} integrations imported
+              {importSummary.failed > 0 && ` · ${importSummary.failed} failed (likely duplicates or missing required fields)`}
+              .
+            </p>
+          </div>
+          <button
+            onClick={() => setImportSummary(null)}
+            className="w-5 h-5 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/[0.04] shrink-0"
+            aria-label="Dismiss"
+          >
+            <X size={11} />
+          </button>
+        </div>
+      )}
 
       {/* KPI strip */}
       <div className="grid grid-cols-4 gap-4">
@@ -1503,7 +1917,12 @@ export default function Integrations() {
       <div className="flex gap-4 items-start">
         {/* Integration list */}
         <div className="flex-1 min-w-0">
-          {filtered.length === 0 ? (
+          {loading && integrations.length === 0 ? (
+            <div className="bg-white border border-gray-200 rounded-xl shadow-sm py-16 flex flex-col items-center gap-2 text-center">
+              <Loader2 size={20} className="text-gray-300 animate-spin" />
+              <p className="text-[12.5px] text-gray-400 font-medium">Loading integrations…</p>
+            </div>
+          ) : filtered.length === 0 ? (
             <div className="bg-white border border-gray-200 rounded-xl shadow-sm py-16 flex flex-col items-center gap-2 text-center">
               <Filter size={20} className="text-gray-300" />
               <p className="text-[12.5px] text-gray-400 font-medium">No integrations match your filters</p>
@@ -1512,7 +1931,7 @@ export default function Integrations() {
           ) : (
             <IntegrationList
               integrations={filtered}
-              selectedId={selectedId}
+              selectedId={resolvedSelectedId}
               onSelect={setSelectedId}
               onToggle={handleToggle}
             />
@@ -1523,13 +1942,35 @@ export default function Integrations() {
         {selectedInt && (
           <IntegrationDetailPanel
             integration={selectedInt}
+            detailLoading={detailLoading && !selectedDetail}
             onClose={() => setSelectedId(null)}
+            onConfigure={() => setConfigureOpen(true)}
+            onTest={handleTest}
+            testBusy={testBusy}
+            onEnable={handleEnable}
+            onDisable={handleDisable}
+            onSync={handleSync}
           />
         )}
       </div>
 
       {/* Recent activity */}
       <RecentActivityTable events={MOCK_ACTIVITY} />
+
+      {/* Configure modal — admin-only on the server; dev token has the role. */}
+      <IntegrationConfigureModal
+        integration={selectedInt}
+        open={configureOpen}
+        onClose={() => setConfigureOpen(false)}
+        onSaved={handleSaved}
+      />
+
+      {/* Create modal — POSTs to /integrations; on success auto-selects the new row. */}
+      <IntegrationCreateModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        onCreated={handleCreated}
+      />
     </PageContainer>
   )
 }

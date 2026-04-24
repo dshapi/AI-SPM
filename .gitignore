@@ -1,9 +1,32 @@
 /.env
 .env
 /.env.auth
+# Per-developer Vite/Node local overrides — never commit, may contain secrets
+**/.env.local
+**/.env.*.local
 
 # Uploaded model artefacts (SPM API model registry).
 # Keep the directory in the tree via .gitkeep, ignore its contents.
 /services/spm_api/models/*
 !/services/spm_api/models/.gitkeep
 /.venv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Node.js dependencies
+**/node_modules/
+
+# Persistent docker volume data (Postgres, Redis, Grafana, Keycloak,
+# agent-orchestrator). Bind-mounted from docker-compose so the data lives
+# on the host filesystem, but the contents must NEVER be committed:
+#   - spm-db/   contains hashed API keys for every configured integration
+#   - keycloak/ contains realm config + client secrets
+#   - grafana/  contains API tokens + dashboard state
+#   - redis/    contains session tokens + cached creds
+# We keep the directory structure via .gitkeep but ignore everything else.
+/DataVolums/*/*
+!/DataVolums/*/.gitkeep
+

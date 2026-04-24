@@ -97,7 +97,7 @@ services:
     ports: ["6379:6379"]
     command: ["redis-server", "--appendonly", "yes", "--loglevel", "warning", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
     volumes:
-      - redis-data:/data
+      - ./DataVolums/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -141,6 +141,9 @@ services:
     container_name: cpm-guard-model
     environment:
       <<: *common-env
+      # Direct spm-db connection — platform_shared.integration_config.hydrate_env_from_db
+      # uses this at startup to pull GROQ_BASE_URL / LLM_MODEL / GUARD_PROMPT_MODE etc.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       # When GROQ_BASE_URL is set (e.g. http://host.docker.internal:11434/v1
       # for host Ollama), guard-model talks directly to that OpenAI-compatible
@@ -171,6 +174,8 @@ services:
       retries: 5
     depends_on:
       <<: *depends-platform
+      spm-db:
+        condition: service_healthy
 
   # ── garak red-team sidecar ──────────────────────────────────────────────────
   # garak carries heavy ML deps (torch, transformers, etc.) so it lives in its
@@ -182,6 +187,9 @@ services:
     build: {context: ., dockerfile: services/garak/Dockerfile}
     container_name: cpm-garak-runner
     environment:
+      # Direct spm-db connection — platform_shared.integration_config.hydrate_env_from_db
+      # pulls GARAK_INTERNAL_SECRET and SPM_INTERNAL_BOOTSTRAP_SECRET from int-018 at boot.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       PROBE_TIMEOUT_S: ${PROBE_TIMEOUT_S:-60}
       GARAK_WORKERS: ${GARAK_WORKERS:-4}
@@ -222,6 +230,9 @@ services:
       retries: 8
       # garak imports torch/transformers on startup — give it time
       start_period: 90s
+    depends_on:
+      spm-db:
+        condition: service_healthy
     restart: unless-stopped
 
   api:
@@ -229,14 +240,13 @@ services:
     container_name: cpm-api
     environment:
       <<: *common-env
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-4-6}
-      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      # DB is the source of truth for ANTHROPIC_API_KEY, TAVILY_API_KEY,
+      # GARAK_INTERNAL_SECRET, LLM_MODEL, ANTHROPIC_MODEL, etc.
+      # platform_shared.integration_config.hydrate_env_from_db() reads them
+      # from spm-db at process startup via SPM_DB_URL below.
+      SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
       LLM_MODEL_ID: ${LLM_MODEL_ID:-}
       GARAK_RUNNER_URL: http://garak-runner:8099
-      # Must match what garak-runner sees — api validates the header on
-      # callback ingestion. Rotate both sides together.
-      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
     volumes: *key-vol
     ports: ["8080:8080"]
     healthcheck:
@@ -250,6 +260,8 @@ services:
       guard-model:
         condition: service_healthy
       garak-runner:
+        condition: service_healthy
+      spm-db:
         condition: service_healthy
 
   retrieval-gateway:
@@ -358,7 +370,7 @@ services:
       POSTGRES_USER: spm_rw
       POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
     volumes:
-      - spm-db-data:/var/lib/postgresql/data
+      - ./DataVolums/spm-db:/var/lib/postgresql/data
       - ./spm/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
@@ -383,10 +395,38 @@ services:
       # Uploaded model files land here (inside the container).
       # Mounted to ./services/spm_api/models on the host below.
       MODEL_UPLOAD_DIR: /app/models
+      # First-boot bootstrap: POST /integrations/bootstrap reads these from
+      # process env and copies them into the DB.  After the first successful
+      # bootstrap these can be dropped from .env — subsequent bootstraps
+      # won't overwrite DB values with empty env (see _envget in
+      # integrations_seed_data.py).  Canonical mapping:
+      #   ANTHROPIC_API_KEY             → int-003.credentials.api_key
+      #   ANTHROPIC_MODEL               → int-003.config.model
+      #   TAVILY_API_KEY                → int-016.credentials.api_key
+      #   GROQ_BASE_URL                 → int-017.config.base_url
+      #   LLM_MODEL                     → int-017.config.model
+      #   GUARD_PROMPT_MODE             → int-017.config.guard_prompt_mode
+      #   OLLAMA_KEEP_ALIVE             → int-017.config.keep_alive
+      #   GARAK_INTERNAL_SECRET         → int-018.credentials.shared_secret
+      #   SPM_INTERNAL_BOOTSTRAP_SECRET → int-018.credentials.internal_bootstrap_secret
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      GROQ_BASE_URL: ${GROQ_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      GUARD_PROMPT_MODE: ${GUARD_PROMPT_MODE:-}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-}
+      GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
+      SPM_INTERNAL_BOOTSTRAP_SECRET: ${SPM_INTERNAL_BOOTSTRAP_SECRET:-}
     volumes:
       - ./keys:/keys:ro
       # Persist uploaded model artefacts on the host (listed in .gitignore).
       - ./services/spm_api/models:/app/models
+    # Integrations' Test-connection probe hits host-side Ollama at
+    # host.docker.internal:11434.  Docker Desktop auto-resolves this on
+    # Mac/Windows, but Linux needs the explicit host-gateway mapping.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=4)"]
       interval: 10s
@@ -440,7 +480,7 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - grafana-data:/var/lib/grafana
+      - ./DataVolums/grafana:/var/lib/grafana
     depends_on:
       spm-api:
         condition: service_healthy
@@ -458,7 +498,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
       POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     volumes:
-      - agent-orchestrator-data:/data
+      - ./DataVolums/agent-orchestrator:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=4)"]
       interval: 10s
@@ -538,8 +578,11 @@ services:
       - api
       - agent-orchestrator
 
-volumes:
-  redis-data:
-  spm-db-data:
-  grafana-data:
-  agent-orchestrator-data:
+# ─────────────────────────────────────────────────────────────────────────────
+# Persistent state lives in ./DataVolums/{redis,spm-db,grafana,agent-orchestrator}
+# (bind mounts on each service above) so the data is visible on the host
+# filesystem and survives `docker compose down -v`.
+#
+# Migration from the previous named volumes (AISPM_redis-data, etc.) is in
+# DataVolums/migrate-volumes.sh — run it once before `docker compose up`.
+# ─────────────────────────────────────────────────────────────────────────────
