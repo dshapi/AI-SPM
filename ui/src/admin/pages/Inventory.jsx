@@ -1465,10 +1465,16 @@ export default function Inventory() {
                     onClose={() => navigate('/admin/inventory', { replace: true })}
                     onOpenChat={(agent) => setChatAgent(agent)}
                     onDeleted={async () => {
-                      // Close the panel + pull the polling tick forward
-                      // so the row disappears from the list immediately.
+                      // Refresh BEFORE navigating away so the list
+                      // updates first; otherwise the URL still points
+                      // at a row that no longer exists in the merged
+                      // list and React unmounts mid-render, surfacing
+                      // an "null is not an object" stack from its
+                      // internal listener accumulator.
+                      try {
+                        if (refreshAgents) await refreshAgents()
+                      } catch { /* swallow — navigate anyway */ }
                       navigate('/admin/inventory', { replace: true })
-                      if (refreshAgents) await refreshAgents()
                     }}
                   />
                 )

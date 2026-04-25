@@ -110,7 +110,17 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 # ─── Disk layout for uploaded code ─────────────────────────────────────────
 
-CODE_ROOT = Path("./DataVolums/agents")
+# Where agent.py files live INSIDE this container — written by POST /agents.
+CODE_ROOT_CONTAINER = Path("./DataVolums/agents")
+
+# Host-equivalent of the same directory, populated by docker-compose. The
+# docker daemon resolves bind-mount paths against the HOST filesystem, so
+# we store the HOST path on the row's `code_path` column and pass that to
+# spawn_agent_container() at deploy time. Falls back to the container
+# path when AGENT_CODE_HOST_DIR is unset (test/dev mode where spawn is
+# mocked anyway).
+import os as _os
+_AGENT_CODE_HOST_DIR = _os.environ.get("AGENT_CODE_HOST_DIR", "")
 
 
 # ─── Serializer ────────────────────────────────────────────────────────────
@@ -182,23 +192,52 @@ async def create_agent(
     agent_id  = uuid.uuid4()
     tenant_id = _tenant_from_claims(claims, fallback="t1")
 
-    code_dir = CODE_ROOT / str(agent_id)
+    # Write to the container path; remember the host-equivalent so
+    # spawn_agent_container can pass it through to the docker daemon.
+    code_dir = CODE_ROOT_CONTAINER / str(agent_id)
     code_dir.mkdir(parents=True, exist_ok=True)
     code_file = code_dir / "agent.py"
     code_file.write_text(raw)
     sha = hashlib.sha256(raw.encode()).hexdigest()
+
+    if _AGENT_CODE_HOST_DIR:
+        host_code_path = (Path(_AGENT_CODE_HOST_DIR) / str(agent_id) / "agent.py").as_posix()
+    else:
+        host_code_path = str(code_file)
 
     mcp_t, llm_t = mint_agent_tokens()
 
     a = Agent(
         id=agent_id, name=name, version=version, agent_type=agent_type,
         provider="internal", owner=owner, description=description,
-        code_path=str(code_file), code_sha256=sha,
+        code_path=host_code_path, code_sha256=sha,
         mcp_token=mcp_t, llm_api_key=llm_t,
         tenant_id=tenant_id, runtime_state="stopped",
     )
     db.add(a)
-    await _maybe_async_commit(db)
+    try:
+        await _maybe_async_commit(db)
+    except Exception as e:                                # noqa: BLE001
+        # Most common case: name+version+tenant unique constraint
+        # already exists (operator re-registering without bumping
+        # version). Return 409 with a clear message instead of a
+        # raw 500 sqlalchemy traceback.
+        msg = str(getattr(e, "orig", None) or e).lower()
+        if "uq_agents_name_ver_tenant" in msg or "unique constraint" in msg:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"An agent named {name!r} version {version!r} already "
+                    f"exists in this tenant. Bump the version or use a "
+                    f"different name."
+                ),
+            )
+        # Unknown DB failure — log and surface a 500.
+        log.exception("create_agent: commit failed")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to register agent: {e}",
+        )
     await _maybe_async_refresh(db, a)
 
     if deploy_after:

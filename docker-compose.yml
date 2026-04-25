@@ -503,6 +503,13 @@ services:
       #   OLLAMA_KEEP_ALIVE             → int-017.config.keep_alive
       #   GARAK_INTERNAL_SECRET         → int-018.credentials.shared_secret
       #   SPM_INTERNAL_BOOTSTRAP_SECRET → int-018.credentials.internal_bootstrap_secret
+      # Phase 1 — agent runtime control plane. spawn_agent_container
+      # passes a bind-mount path to the docker daemon, which resolves
+      # paths against the HOST. spm-api writes agent.py files to its
+      # own container view (/app/DataVolums/agents/<id>/agent.py)
+      # but must store the equivalent HOST path so the daemon can
+      # find the file when launching the runtime container.
+      AGENT_CODE_HOST_DIR: ${PWD}/DataVolums/agents
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
@@ -516,6 +523,19 @@ services:
       - ./keys:/keys:ro
       # Persist uploaded model artefacts on the host (listed in .gitignore).
       - ./services/spm_api/models:/app/models
+      # Phase 1 — agent runtime control plane. spm-api uses the docker
+      # SDK to spawn/stop customer agent containers, so it needs to
+      # talk to the host's Docker daemon. Mount the socket read-write.
+      # SECURITY: this gives spm-api root-equivalent access to the
+      # host's Docker. Acceptable in the dev compose stack; production
+      # should sandbox spm-api or use a per-tenant docker-in-docker
+      # daemon (V2 hardening — spec § 2 non-goal).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Customer agent.py files are written here by POST /agents and
+      # bind-mounted into the spawned agent runtime container, so
+      # both spm-api AND the runtime container need to see the same
+      # path. Bind-mount the host directory.
+      - ./DataVolums/agents:/app/DataVolums/agents
     # Integrations' Test-connection probe hits host-side Ollama at
     # host.docker.internal:11434.  Docker Desktop auto-resolves this on
     # Mac/Windows, but Linux needs the explicit host-gateway mapping.

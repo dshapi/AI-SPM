@@ -116,13 +116,32 @@ async def create_agent_topics(*, tenant_id: str, agent_id: str,
 
 
 async def delete_agent_topics(*, tenant_id: str, agent_id: str) -> None:
-    """Delete both per-agent topics. Used on retire."""
+    """Delete both per-agent topics. Used on retire.
+
+    Idempotent: swallows ``UnknownTopicOrPartitionError`` (the topics
+    never got created — agent was never deployed, or was already
+    retired) so the rest of retire_agent still runs and the row gets
+    cleaned out of the DB. Other broker errors propagate.
+    """
+    from kafka.errors import UnknownTopicOrPartitionError          # type: ignore
     from platform_shared.topics import agent_topics_for           # type: ignore
 
     t = agent_topics_for(tenant_id, agent_id)
     admin = _kafka_admin()
     try:
-        admin.delete_topics(t.all())
+        try:
+            admin.delete_topics(t.all())
+        except UnknownTopicOrPartitionError:
+            log.info("delete_agent_topics: topics for %s/%s already absent",
+                     tenant_id, agent_id)
+        except Exception as e:                                    # noqa: BLE001
+            # Don't block retire on broker quirks (broker not reachable,
+            # transient leadership election, etc.). Log loudly so ops
+            # notices, but continue.
+            log.warning(
+                "delete_agent_topics: non-fatal kafka error for %s/%s: %s",
+                tenant_id, agent_id, e,
+            )
     finally:
         admin.close()
 
@@ -134,6 +153,38 @@ def _docker_client():
     is importable when the docker SDK isn't installed."""
     import docker  # type: ignore
     return docker.from_env()
+
+
+def _resolve_host_code_path(code_path: str) -> str:
+    """Translate the row's stored ``code_path`` to a host-resolvable
+    bind-mount source.
+
+    Three cases:
+      1. Absolute path that already lives on the host
+         (``${AGENT_CODE_HOST_DIR}/<id>/agent.py``) → use as-is.
+      2. Container path under ``/app/DataVolums/agents/...`` →
+         swap the prefix for ``AGENT_CODE_HOST_DIR``.
+      3. Relative path (``DataVolums/agents/...``) → prepend
+         ``AGENT_CODE_HOST_DIR``.
+
+    Falls back to ``code_path`` unchanged if ``AGENT_CODE_HOST_DIR``
+    is unset (test mode where docker is mocked anyway).
+    """
+    host_dir = os.environ.get("AGENT_CODE_HOST_DIR", "").rstrip("/")
+    if not host_dir:
+        return code_path
+    p = code_path.lstrip("./")
+    # Strip the well-known container prefixes.
+    for prefix in ("app/DataVolums/agents/", "DataVolums/agents/"):
+        if p.startswith(prefix):
+            return f"{host_dir}/{p[len(prefix):]}"
+    if code_path.startswith("/app/DataVolums/agents/"):
+        return host_dir + code_path[len("/app/DataVolums/agents"):]
+    if code_path.startswith(host_dir):
+        return code_path
+    # Last-resort: treat code_path as a bare filename relative to the
+    # host_dir.
+    return f"{host_dir}/{code_path.lstrip('/')}"
 
 
 async def spawn_agent_container(*, agent_id: str, tenant_id: str,
@@ -164,11 +215,14 @@ async def spawn_agent_container(*, agent_id: str, tenant_id: str,
         "LLM_API_KEY":              llm_api_key,
         "KAFKA_BOOTSTRAP_SERVERS":  _KAFKA_BOOTSTRAP,
     }
+    host_path = _resolve_host_code_path(code_path)
+    log.info("spawn_agent_container: agent=%s code_path=%s host_path=%s",
+             agent_id, code_path, host_path)
     ctr = client.containers.run(
         _AGENT_IMAGE,
         name=f"agent-{agent_id}",
         environment=env,
-        volumes={code_path: {"bind": "/agent/agent.py", "mode": "ro"}},
+        volumes={host_path: {"bind": "/agent/agent.py", "mode": "ro"}},
         mem_limit=f"{mem_mb}m",
         nano_cpus=int(cpu_quota * 1_000_000_000),
         network=_AGENT_NETWORK,
@@ -338,7 +392,14 @@ async def stop_agent(db, agent_id) -> None:
 
 async def retire_agent(db, agent_id) -> None:
     """Permanent removal: stop the container, delete topics, then the
-    row. Soft-delete is V2 (we'd flip a deleted_at column instead)."""
+    row. Soft-delete is V2 (we'd flip a deleted_at column instead).
+
+    Both the container-stop and the topic-delete are best-effort —
+    they may fail for any number of reasons (docker daemon unreachable,
+    container already gone, broker quirks, topic never existed). We
+    swallow those failures so the DB row still gets cleaned up.
+    Otherwise a half-deployed agent becomes un-deletable from the UI.
+    """
     from spm.db.models import Agent  # type: ignore
 
     a = await _db_get(db, Agent, agent_id)
@@ -347,7 +408,18 @@ async def retire_agent(db, agent_id) -> None:
 
     tenant_id = a.tenant_id
     aid_str   = str(a.id)
-    await stop_agent_container(aid_str)
-    await delete_agent_topics(tenant_id=tenant_id, agent_id=aid_str)
+
+    try:
+        await stop_agent_container(aid_str)
+    except Exception as e:                                        # noqa: BLE001
+        log.warning("retire_agent: container stop failed for %s: %s",
+                    aid_str, e)
+
+    try:
+        await delete_agent_topics(tenant_id=tenant_id, agent_id=aid_str)
+    except Exception as e:                                        # noqa: BLE001
+        log.warning("retire_agent: topic delete failed for %s: %s",
+                    aid_str, e)
+
     await _db_delete(db, a)
     await _db_commit(db)
