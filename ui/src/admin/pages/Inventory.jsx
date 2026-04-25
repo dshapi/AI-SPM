@@ -1346,20 +1346,13 @@ export default function Inventory() {
                   assets={filtered}
                   selectedId={selected?.id}
                   onSelect={(asset) => {
-                    // Phase 3 — any agent row opens the new detail
-                    // drawer (Overview / Configure / Activity / Sessions
-                    // / Lineage tabs + Open Chat button). Mocks open
-                    // the same UI so the operator can preview the
-                    // layout even before registering a real agent;
-                    // lifecycle actions on mocks fail with a 404 from
-                    // the backend, which surfaces inline on the
-                    // run/stop toggle so it's a no-op rather than a
-                    // confusing silent miss.
-                    if (asset && asset.kind === 'agent') {
-                      // Toggle: clicking the same agent row again closes the drawer.
-                      setDetailAgent((cur) => cur && cur.id === asset.id ? null : asset)
-                      return
-                    }
+                    // Reverted to the original behaviour for ALL asset
+                    // types: single-click toggles the inline
+                    // PreviewPanel via URL state. The AgentDetailDrawer
+                    // built in Phase 3 is left in the codebase but no
+                    // longer triggered from row clicks — bring it back
+                    // selectively (e.g. via a "View details" right-
+                    // click item) when the design lands.
                     if (asset?.id === assetId) {
                       navigate('/admin/inventory', { replace: true })
                     } else {
