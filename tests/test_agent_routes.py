@@ -157,7 +157,7 @@ class TestPostAgents:
         code = b"import asyncio\nasync def main():\n    pass\nasyncio.run(main())\n"
 
         r = client.post(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
             data={
                 "name": "my-agent",
@@ -182,7 +182,7 @@ class TestPostAgents:
     def test_bad_syntax_returns_422(self, client_factory):
         client, _ = client_factory()
         r = client.post(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
             data={"name": "x", "version": "1", "agent_type": "custom"},
             files={"code": ("agent.py", io.BytesIO(b"def main(::"),
@@ -194,7 +194,7 @@ class TestPostAgents:
     def test_missing_async_main_returns_422(self, client_factory):
         client, _ = client_factory()
         r = client.post(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
             data={"name": "x", "version": "1", "agent_type": "custom"},
             files={"code": ("agent.py",
@@ -207,7 +207,7 @@ class TestPostAgents:
     def test_non_admin_is_403(self, client_factory):
         client, _ = client_factory(claims=NON_ADMIN_CLAIMS)
         r = client.post(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
             data={"name": "x", "version": "1", "agent_type": "custom"},
             files={"code": ("agent.py", io.BytesIO(b"async def main(): pass"),
@@ -223,7 +223,7 @@ class TestGetAgents:
         rows = [_make_agent_row(name="a"), _make_agent_row(name="b")]
         client, _ = client_factory(rows=rows)
         r = client.get(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 200
@@ -235,7 +235,7 @@ class TestGetAgents:
                                   llm_api_key="SECRET-LLM")]
         client, _ = client_factory(rows=rows)
         r = client.get(
-            "/api/spm/agents",
+            "/agents",
             headers={"Authorization": "Bearer x"},
         )
         body = r.text
@@ -249,7 +249,7 @@ class TestGetAgent:
     def test_returns_404_when_unknown(self, client_factory):
         client, _ = client_factory(rows=[])
         r = client.get(
-            f"/api/spm/agents/{uuid.uuid4()}",
+            f"/agents/{uuid.uuid4()}",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 404
@@ -259,7 +259,7 @@ class TestGetAgent:
         rows = [_make_agent_row(id=agent_id, name="found")]
         client, _ = client_factory(rows=rows)
         r = client.get(
-            f"/api/spm/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 200
@@ -274,7 +274,7 @@ class TestPatchAgent:
         row = _make_agent_row(id=agent_id, description="old")
         client, _ = client_factory(rows=[row])
         r = client.patch(
-            f"/api/spm/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers={"Authorization": "Bearer x"},
             json={"description": "new"},
         )
@@ -286,7 +286,7 @@ class TestPatchAgent:
         row = _make_agent_row(id=agent_id)
         client, _ = client_factory(rows=[row])
         r = client.patch(
-            f"/api/spm/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers={"Authorization": "Bearer x"},
             json={"mcp_token": "stolen-attempt"},
         )
@@ -305,7 +305,7 @@ class TestLifecycleEndpoints:
         agent_id = uuid.uuid4()
         client, _ = client_factory(rows=[_make_agent_row(id=agent_id)])
         r = client.post(
-            f"/api/spm/agents/{agent_id}/start",
+            f"/agents/{agent_id}/start",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 202
@@ -318,7 +318,7 @@ class TestLifecycleEndpoints:
         agent_id = uuid.uuid4()
         client, _ = client_factory(rows=[_make_agent_row(id=agent_id)])
         r = client.post(
-            f"/api/spm/agents/{agent_id}/stop",
+            f"/agents/{agent_id}/stop",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 202
@@ -331,7 +331,7 @@ class TestLifecycleEndpoints:
         agent_id = uuid.uuid4()
         client, _ = client_factory(rows=[_make_agent_row(id=agent_id)])
         r = client.delete(
-            f"/api/spm/agents/{agent_id}",
+            f"/agents/{agent_id}",
             headers={"Authorization": "Bearer x"},
         )
         assert r.status_code == 204
@@ -340,9 +340,9 @@ class TestLifecycleEndpoints:
     def test_lifecycle_endpoints_require_admin(self, client_factory):
         client, _ = client_factory(claims=NON_ADMIN_CLAIMS)
         for verb, path in [
-            ("post",   "/api/spm/agents/whatever/start"),
-            ("post",   "/api/spm/agents/whatever/stop"),
-            ("delete", "/api/spm/agents/whatever"),
+            ("post",   "/agents/whatever/start"),
+            ("post",   "/agents/whatever/stop"),
+            ("delete", "/agents/whatever"),
         ]:
             r = getattr(client, verb)(
                 path, headers={"Authorization": "Bearer x"},

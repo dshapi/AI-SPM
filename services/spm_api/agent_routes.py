@@ -100,7 +100,12 @@ def _tenant_from_claims(claims: Dict[str, Any], fallback: str = "t1") -> str:
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/spm/agents", tags=["agents"])
+# Mount path is `/agents` — the UI's Vite proxy (and the production
+# Traefik / nginx config that mirrors it) strips the `/api/spm` prefix
+# before forwarding to spm-api, so the user-visible URL is
+# `/api/spm/agents/...` even though FastAPI sees `/agents/...`. Mirrors
+# the convention already in use by integrations_routes.py.
+router = APIRouter(prefix="/agents", tags=["agents"])
 
 
 # ─── Disk layout for uploaded code ─────────────────────────────────────────
