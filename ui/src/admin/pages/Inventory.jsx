@@ -22,6 +22,7 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
 import { deleteAgent } from '../api/agents.js'
 import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
+import AgentDetailDrawer    from '../agents/AgentDetailDrawer.jsx'
 import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
 import PolicySelector       from '../agents/PolicySelector.jsx'
 import RegisterAgentPanel   from '../agents/RegisterAgentPanel.jsx'
@@ -571,7 +572,7 @@ function DeleteAgentConfirmModal({ open, agentName, loading, onConfirm, onCancel
   )
 }
 
-function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
+function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) {
   if (!asset) return null
 
   const riskBg = {
@@ -729,7 +730,12 @@ function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
             />
           </>
         )}
-        <Button variant="outline" size="sm" className="w-full h-8 gap-1.5 text-[12px] justify-center">
+        <Button
+          variant="outline"
+          size="sm"
+          className="w-full h-8 gap-1.5 text-[12px] justify-center"
+          onClick={() => onOpenDetails && onOpenDetails(asset)}
+        >
           <ExternalLink size={12} />
           View Detail
         </Button>
@@ -1350,6 +1356,11 @@ export default function Inventory() {
   // button on PreviewPanel for live agents.
   const [chatAgent, setChatAgent] = useState(null)
 
+  // AgentDetailDrawer state — opens from the "View Detail" button on
+  // PreviewPanel. The drawer carries the 5 tabs (Overview, Configure,
+  // Activity live tail, Sessions, Lineage) on a wider 560px column.
+  const [detailAgent, setDetailAgent] = useState(null)
+
   async function reloadLiveModels() {
     try {
       const rows = await fetchModels()
@@ -1549,6 +1560,7 @@ export default function Inventory() {
                       asset={selected}
                       onClose={() => navigate('/admin/inventory', { replace: true })}
                       onOpenChat={(agent) => setChatAgent(agent)}
+                      onOpenDetails={(agent) => setDetailAgent(agent)}
                       onDeleted={async () => {
                         try {
                           if (refreshAgents) await refreshAgents()
@@ -1574,6 +1586,35 @@ export default function Inventory() {
         )}
 
       </div>
+
+      {/* Detail drawer — opens from PreviewPanel's "View Detail" button.
+          Lives at page root so it can overlay the inventory table. */}
+      <AgentDetailDrawer
+        open={!!detailAgent}
+        agent={detailAgent ? {
+          // Drawer expects the backend agent shape (id, name, runtime_state,
+          // version, etc.). Map our inventory-row shape onto it; fall back
+          // to the inventory id if there's no _backendId (mock rows).
+          id:            detailAgent._backendId || detailAgent.id,
+          name:          detailAgent.name,
+          risk:          detailAgent.risk,
+          runtime_state: detailAgent.runtime_state || 'stopped',
+          version:       detailAgent.version,
+          agent_type:    detailAgent.agent_type,
+          code_path:     detailAgent.code_path,
+          code_sha256:   detailAgent.code_sha256,
+          policy_status: detailAgent.policy_status,
+          owner:         detailAgent.owner,
+        } : null}
+        onClose={() => setDetailAgent(null)}
+        onOpenChat={(agent) => {
+          setDetailAgent(null)
+          setChatAgent(agent)
+        }}
+        onAgentChanged={async () => {
+          if (refreshAgents) await refreshAgents()
+        }}
+      />
 
     </PageContainer>
   )

@@ -122,12 +122,17 @@ async def mcp_call(
     # Fast path for web_fetch — its Tavily creds + truncation knobs come
     # from the agent-runtime + Tavily integration rows, which the helper
     # already knows how to resolve.
+    agent_id  = str(agent.get("id") or "")
+    tenant_id = str(agent.get("tenant_id") or "t1")
+    trace_id  = str(body.get("trace_id") or req_id or "")
+
     if tool_name == "web_fetch":
+        import time
+        started = time.monotonic()
+        ok      = False
         try:
             from .tools.web_fetch import web_fetch, _resolve_tavily_config
-            cfg = await _resolve_tavily_config(
-                tenant_id=agent.get("tenant_id", "t1"),
-            )
+            cfg = await _resolve_tavily_config(tenant_id=tenant_id)
             n = args.get("max_results") or cfg["max_results_default"]
             result = await web_fetch(
                 query=str(args.get("query") or ""),
@@ -135,10 +140,9 @@ async def mcp_call(
                 max_results=int(n),
                 max_chars=cfg["max_chars"],
             )
+            ok = True
             return {"jsonrpc": "2.0", "id": req_id, "result": result}
         except RuntimeError as e:
-            # Resolution / config error — surface as a JSON-RPC error
-            # rather than letting it become a 500.
             log.warning("spm-mcp: web_fetch config error: %s", e)
             return _jsonrpc_error(req_id, -32000, str(e))
         except Exception as e:  # noqa: BLE001
@@ -146,6 +150,37 @@ async def mcp_call(
             return _jsonrpc_error(
                 req_id, -32000, f"{type(e).__name__}: {e}",
             )
+        finally:
+            # Phase 4.5 — emit AgentToolCallEvent for every web_fetch
+            # invocation. Best-effort, never raises. Audit consumer
+            # picks it up and persists into session_events.
+            duration_ms = int((time.monotonic() - started) * 1000)
+            try:
+                from platform_shared.lineage_producer import emit_agent_event
+                from platform_shared.lineage_events   import AgentToolCallEvent
+                evt = AgentToolCallEvent(
+                    agent_id    = agent_id,
+                    tenant_id   = tenant_id,
+                    tool        = "web_fetch",
+                    args        = {k: v for k, v in args.items()
+                                    if k in ("query", "max_results")},
+                    ok          = ok,
+                    duration_ms = duration_ms,
+                    trace_id    = trace_id or "",
+                ).to_dict()
+                emit_agent_event(
+                    session_id     = f"agent-{agent_id}-runtime",
+                    event_type     = "AgentToolCall",
+                    payload        = evt,
+                    agent_id       = agent_id,
+                    tenant_id      = tenant_id,
+                    correlation_id = trace_id or None,
+                    source         = "spm-mcp",
+                )
+            except Exception:                              # noqa: BLE001
+                # Lineage is best-effort; never blow up the tool call
+                # because audit emit failed.
+                log.debug("spm-mcp: lineage emit failed", exc_info=True)
 
     return _jsonrpc_error(
         req_id, -32601, f"Unknown tool: {tool_name!r}",

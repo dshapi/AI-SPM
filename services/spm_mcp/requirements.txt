@@ -5,3 +5,7 @@ httpx==0.27.*
 pydantic==2.*
 sqlalchemy[asyncio]==2.*
 asyncpg==0.29.*
+
+# Phase 4.5 — fire-and-forget AgentToolCallEvent emission to the global
+# lineage_events Kafka topic on every web_fetch invocation.
+kafka-python-ng==2.2.3

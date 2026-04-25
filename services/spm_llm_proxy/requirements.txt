@@ -4,3 +4,8 @@ httpx==0.27.*
 pydantic==2.*
 sqlalchemy[asyncio]==2.*
 asyncpg==0.29.*
+
+# Phase 4.5 — fire-and-forget AgentLLMCallEvent emission to the global
+# lineage_events Kafka topic. Sync producer running in a background
+# thread; we never call flush/get so the hot path stays async-clean.
+kafka-python-ng==2.2.3

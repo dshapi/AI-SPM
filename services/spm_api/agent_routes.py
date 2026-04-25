@@ -594,6 +594,126 @@ async def session_messages_endpoint(
     ]
 
 
+# ─── GET /agents/{id}/activity — Phase 4.5 unified activity tail ───────────
+#
+# Returns the last N events for one agent across:
+#   • agent_chat_messages          — user/agent turns (populated by
+#                                    agent_chat.py on every chat round-trip)
+#   • session_events filtered      — AgentToolCall / AgentLLMCall events
+#     by agent_id                    (populated by the global lineage_consumer
+#                                    when spm-mcp / spm-llm-proxy emit them)
+#
+# Auth: admin JWT (the UI's dev-token has admin role). The endpoint is
+# operator-facing — agents themselves don't need it.
+
+@router.get("/{agent_id}/activity")
+async def agent_activity_endpoint(
+    agent_id: str,
+    limit: int = 50,
+    db = Depends(get_db),
+    _claims = Depends(require_admin),
+):
+    """Return the most recent activity entries for one agent, newest-first.
+
+    Each entry is shaped like::
+
+        {
+          "ts":         "2026-04-25T17:09:30.057170+00:00",
+          "kind":       "chat" | "tool_call" | "llm_call",
+          "session_id": "...",        # for chat rows; synthetic for tool/llm
+          "role":       "user|agent", # chat only
+          "text":       "...",        # chat only
+          "tool":       "web_fetch",  # tool_call only
+          "ok":         true,         # tool_call / llm_call
+          "duration_ms":140,          # tool_call
+          "model":      "...",        # llm_call
+          "prompt_tokens": 12,        # llm_call
+          "completion_tokens": 47,    # llm_call
+          "trace_id":   "..."
+        }
+
+    Tail is capped to 200 to keep responses bounded; the UI polls
+    every 5 s and renders newest-first.
+    """
+    cap = max(1, min(int(limit), 200))
+    out = []
+
+    if hasattr(db, "execute"):
+        from sqlalchemy import select   # type: ignore
+        from spm.db.models import AgentChatMessage, AgentChatSession  # type: ignore
+
+        # 1. chat turns for any session belonging to this agent
+        chat_stmt = (
+            select(AgentChatMessage, AgentChatSession.id)
+            .join(AgentChatSession,
+                   AgentChatSession.id == AgentChatMessage.session_id)
+            .where(AgentChatSession.agent_id == agent_id)
+            .order_by(AgentChatMessage.ts.desc())
+            .limit(cap)
+        )
+        for m, sid in (await db.execute(chat_stmt)).all():
+            out.append({
+                "ts":         m.ts.isoformat() if m.ts else None,
+                "kind":       "chat",
+                "session_id": str(sid),
+                "role":       (m.role.value if hasattr(m.role, "value") else m.role),
+                "text":       m.text,
+                "trace_id":   getattr(m, "trace_id", None),
+            })
+
+        # 2. lineage events filtered by agent_id (best-effort — the
+        # session_events table lives in the agent-orchestrator-service
+        # DB schema, accessed via the same engine if it's reachable).
+        # Wrapped in try so a missing table on a fresh dev box doesn't
+        # break the UI.
+        try:
+            from sqlalchemy import text
+            ev_rows = (await db.execute(
+                text(
+                    "SELECT timestamp, event_type, payload "
+                    "FROM   session_events "
+                    "WHERE  payload::text LIKE :needle "
+                    "       OR session_id LIKE :prefix "
+                    "ORDER BY timestamp DESC "
+                    "LIMIT  :cap"
+                ),
+                {
+                    "needle": f'%"agent_id": "{agent_id}"%',
+                    "prefix": f"agent-{agent_id}-runtime",
+                    "cap":    cap,
+                },
+            )).all()
+            for ts, etype, raw_payload in ev_rows:
+                import json as _json
+                try:
+                    p = _json.loads(raw_payload) if isinstance(raw_payload, str) else (raw_payload or {})
+                except Exception:
+                    p = {}
+                row = {
+                    "ts":       ts.isoformat() if ts else None,
+                    "kind":     ("tool_call" if etype == "AgentToolCall"
+                                  else "llm_call" if etype == "AgentLLMCall"
+                                  else etype.lower()),
+                    "trace_id": p.get("trace_id"),
+                    "ok":       p.get("ok", True),
+                }
+                if etype == "AgentToolCall":
+                    row["tool"]        = p.get("tool")
+                    row["duration_ms"] = p.get("duration_ms")
+                elif etype == "AgentLLMCall":
+                    row["model"]              = p.get("model")
+                    row["prompt_tokens"]      = p.get("prompt_tokens")
+                    row["completion_tokens"]  = p.get("completion_tokens")
+                out.append(row)
+        except Exception:                                  # noqa: BLE001
+            # session_events not reachable — return chat-only timeline.
+            pass
+
+    # Sort the unified list newest-first and cap.
+    out.sort(key=lambda r: r.get("ts") or "", reverse=True)
+    return out[:cap]
+
+
 # ─── DB helpers — async-vs-sync session compatibility ──────────────────────
 #
 # The dependency ``get_db`` yields an ``AsyncSession`` in production but

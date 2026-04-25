@@ -69,7 +69,11 @@ function _errFrom(res, body) {
 }
 
 // ── Authenticated fetch helper ────────────────────────────────────────────────
-async function apiFetch(path, { method = 'GET', body, headers } = {}) {
+//
+// Exported because other admin modules (e.g. ActivityTab.jsx) need the
+// same auth + base-URL handling for one-off `/agents/*` calls and there's
+// no benefit to maintaining two copies of the dev-token + bearer plumbing.
+export async function apiFetch(path, { method = 'GET', body, headers } = {}) {
   const token = await getToken()
   const res = await fetch(`${SPM_BASE}${path}`, {
     method,

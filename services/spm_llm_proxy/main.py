@@ -179,6 +179,41 @@ def _anthropic_to_openai_response(out, model):
     }
 
 
+def _emit_llm_event(*, agent_id, tenant_id, model, prompt_tokens, completion_tokens, ok, trace_id):
+    """Phase 4.5 — fire-and-forget AgentLLMCallEvent. Best-effort.
+
+    Called from both success and failure paths of /v1/chat/completions
+    so the audit trail covers latency-relevant events even when the
+    upstream errored. Token counts are 0 on failure paths (we didn't
+    consume any).
+    """
+    try:
+        from platform_shared.lineage_producer import emit_agent_event
+        from platform_shared.lineage_events   import AgentLLMCallEvent
+        evt = AgentLLMCallEvent(
+            agent_id          = str(agent_id or ""),
+            tenant_id         = str(tenant_id or ""),
+            model             = str(model or ""),
+            prompt_tokens     = int(prompt_tokens or 0),
+            completion_tokens = int(completion_tokens or 0),
+            trace_id          = str(trace_id or ""),
+        ).to_dict()
+        # Annotate ok/!ok in the payload so the consumer can colour
+        # error rows differently even though the dataclass shape is fixed.
+        evt["ok"] = bool(ok)
+        emit_agent_event(
+            session_id     = f"agent-{agent_id}-runtime",
+            event_type     = "AgentLLMCall",
+            payload        = evt,
+            agent_id       = str(agent_id or ""),
+            tenant_id      = str(tenant_id or ""),
+            correlation_id = str(trace_id or "") or None,
+            source         = "spm-llm-proxy",
+        )
+    except Exception:                                      # noqa: BLE001
+        log.debug("llm-proxy: lineage emit failed", exc_info=True)
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: Dict[str, Any],
@@ -192,6 +227,10 @@ async def chat_completions(
     """
     if "messages" not in payload:
         raise HTTPException(status_code=400, detail="`messages` is required")
+
+    agent_id  = agent.get("id")
+    tenant_id = agent.get("tenant_id")
+    trace_id  = payload.get("trace_id") or ""
 
     try:
         connector_type, cfg, creds = await resolve_llm_integration(
@@ -251,7 +290,15 @@ async def chat_completions(
                     detail=f"Anthropic upstream error {r.status_code}: "
                             f"{r.text[:400]}",
                 )
-            return _anthropic_to_openai_response(r.json(), body["model"])
+            wrapped = _anthropic_to_openai_response(r.json(), body["model"])
+            _emit_llm_event(
+                agent_id=agent_id, tenant_id=tenant_id,
+                model=body["model"],
+                prompt_tokens=wrapped.get("usage", {}).get("prompt_tokens", 0),
+                completion_tokens=wrapped.get("usage", {}).get("completion_tokens", 0),
+                ok=True, trace_id=trace_id,
+            )
+            return wrapped
 
         # Default / legacy path — Ollama-style upstream.
         # Ollama exposes two transports off its port:
@@ -299,7 +346,14 @@ async def chat_completions(
                             f"{r.status_code}: {r.text[:400]}",
                 )
             # Already OpenAI shape — pass through.
-            return r.json()
+            wrapped = r.json()
+            _emit_llm_event(
+                agent_id=agent_id, tenant_id=tenant_id, model=chosen_model,
+                prompt_tokens=wrapped.get("usage", {}).get("prompt_tokens", 0),
+                completion_tokens=wrapped.get("usage", {}).get("completion_tokens", 0),
+                ok=True, trace_id=trace_id,
+            )
+            return wrapped
 
         # Native Ollama path.
         url  = f"{base}/api/chat"
@@ -319,17 +373,37 @@ async def chat_completions(
                 detail=f"Upstream LLM ({connector_type or 'ollama'}) "
                         f"returned {r.status_code}: {r.text[:400]}",
             )
-        return _ollama_to_openai_response(r.json(), body["model"])
+        wrapped = _ollama_to_openai_response(r.json(), body["model"])
+        _emit_llm_event(
+            agent_id=agent_id, tenant_id=tenant_id, model=body["model"],
+            prompt_tokens=wrapped.get("usage", {}).get("prompt_tokens", 0),
+            completion_tokens=wrapped.get("usage", {}).get("completion_tokens", 0),
+            ok=True, trace_id=trace_id,
+        )
+        return wrapped
 
     except httpx.TimeoutException:
+        _emit_llm_event(agent_id=agent_id, tenant_id=tenant_id, model="",
+                        prompt_tokens=0, completion_tokens=0,
+                        ok=False, trace_id=trace_id)
         raise HTTPException(status_code=504, detail="Upstream LLM timed out")
     except HTTPException:
+        # _emit_llm_event already happened on the explicit-error paths
+        # (anthropic-returned-non-200 / ollama-returned-non-200) — but
+        # a fresh HTTPException raised here without emit means we hit
+        # the api_key-missing branch. Emit ok=False once and re-raise.
+        _emit_llm_event(agent_id=agent_id, tenant_id=tenant_id, model="",
+                        prompt_tokens=0, completion_tokens=0,
+                        ok=False, trace_id=trace_id)
         raise
     except Exception as e:                                # noqa: BLE001
         # Surface anything else as a clean 502 with the message; better
         # than a bare 500 the agent gets as "Server error '500 Internal
         # Server Error'" with nothing to act on.
         log.exception("llm-proxy: unexpected upstream error")
+        _emit_llm_event(agent_id=agent_id, tenant_id=tenant_id, model="",
+                        prompt_tokens=0, completion_tokens=0,
+                        ok=False, trace_id=trace_id)
         raise HTTPException(
             status_code=502,
             detail=f"llm-proxy upstream error: {type(e).__name__}: {e}",

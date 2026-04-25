@@ -176,3 +176,136 @@ class TestHelloWorldSDKSmoke:
             # 5. Always cleanup so re-runs don't leak agents.
             requests.delete(f"{API}/agents/{agent_id}",
                              headers=headers, timeout=20)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Phase 4.5 — chat-with-policy + activity tail e2e
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Beyond the raw-Kafka path above, this class exercises the full Phase 4
+# pipeline:
+#   • POST /agents/{id}/chat (SSE)     ── prompt-guard → OPA → kafka → out-guard
+#   • PUT  /agents/{id}/policies       ── attached policy is in the linked list
+#   • GET  /agents/{id}/activity       ── unified chat + lineage timeline
+#
+# Same skip-when-stack-down + always-cleanup pattern as above.
+
+def _list_policies(headers) -> list:
+    r = requests.get(f"{API}/policies", headers=headers, timeout=10)
+    if r.status_code != 200:
+        return []
+    return r.json() or []
+
+
+def _send_chat(headers, agent_id, message, *, session_id=None):
+    """POST /agents/{id}/chat and consume the SSE stream into a dict.
+
+    Returns ``{"text": str, "events": [...]}`` once the stream emits
+    ``done`` (or returns whatever it has on stream close).
+    """
+    sid = session_id or str(uuid.uuid4())
+    r = requests.post(
+        f"{API}/agents/{agent_id}/chat",
+        headers={**headers, "Accept": "text/event-stream"},
+        json={"message": message, "session_id": sid},
+        stream=True,
+        timeout=120,
+    )
+    assert r.status_code == 200, f"chat returned {r.status_code}: {r.text[:400]}"
+    events = []
+    text = ""
+    for raw in r.iter_lines(decode_unicode=True):
+        if not raw or not raw.startswith("data:"):
+            continue
+        try:
+            evt = json.loads(raw[5:].strip())
+        except Exception:
+            continue
+        events.append(evt)
+        if evt.get("type") == "token" and isinstance(evt.get("text"), str):
+            text += evt["text"]
+        elif evt.get("type") == "done":
+            if isinstance(evt.get("text"), str) and evt["text"]:
+                text = evt["text"]
+            break
+        elif evt.get("type") == "error":
+            break
+    r.close()
+    return {"text": text, "events": events, "session_id": sid}
+
+
+class TestChatWithPolicySmoke:
+    def test_attach_policy_chat_round_trip_then_activity_tail(
+        self, headers, hello_agent_path,
+    ):
+        # Need at least one existing policy on the platform — pick the
+        # first one off the list. If there are none, skip cleanly.
+        policies = _list_policies(headers)
+        if not policies:
+            pytest.skip("no policies present on this stack to attach")
+        policy_id = policies[0].get("id") or policies[0].get("policy_id")
+        assert policy_id, f"first policy row has no id: {policies[0]!r}"
+
+        agent_id = _upload_and_deploy(headers, hello_agent_path)
+        try:
+            _wait_for_state(headers, agent_id, "running", timeout_s=45)
+
+            # ── Attach the policy via the atomic-replace PUT. ─────────
+            r = requests.put(
+                f"{API}/agents/{agent_id}/policies",
+                headers=headers,
+                json={"policy_ids": [policy_id]},
+                timeout=10,
+            )
+            assert r.status_code in (200, 204), \
+                f"PUT policies failed: {r.status_code} {r.text[:300]}"
+
+            # GET reflects the attachment.
+            r = requests.get(
+                f"{API}/agents/{agent_id}/policies",
+                headers=headers, timeout=10,
+            )
+            assert r.status_code == 200
+            attached_ids = {(p.get("policy_id") or p.get("id"))
+                              for p in (r.json() or [])}
+            assert policy_id in attached_ids, \
+                f"policy {policy_id} not in linked list: {attached_ids}"
+
+            # ── Send a chat through the full pipeline. ────────────────
+            res = _send_chat(headers, agent_id, "hello, please reply briefly")
+            assert res["text"], (
+                f"chat round-trip produced no text: events={res['events'][:5]!r}"
+            )
+
+            # ── Activity tail returns at least the two chat turns. ────
+            # (The tool/llm lineage rows may also appear if Kafka is
+            # flowing, but we don't require them — Phase 4.5 emit is
+            # best-effort by design.)
+            time.sleep(0.5)  # let the lineage_consumer catch up
+            r = requests.get(
+                f"{API}/agents/{agent_id}/activity?limit=20",
+                headers=headers, timeout=10,
+            )
+            assert r.status_code == 200, r.text
+            timeline = r.json() or []
+            chat_kinds = [row for row in timeline if row.get("kind") == "chat"]
+            assert len(chat_kinds) >= 2, (
+                f"expected ≥2 chat rows in activity tail, got {len(chat_kinds)}: "
+                f"{timeline[:5]!r}"
+            )
+            roles = {row.get("role") for row in chat_kinds}
+            assert {"user", "agent"}.issubset(roles), (
+                f"activity tail missing user or agent turn: {roles!r}"
+            )
+        finally:
+            # Detach the policy so the cascade can drop the row cleanly,
+            # then delete the agent.
+            try:
+                requests.put(
+                    f"{API}/agents/{agent_id}/policies",
+                    headers=headers, json={"policy_ids": []}, timeout=10,
+                )
+            except Exception:
+                pass
+            requests.delete(f"{API}/agents/{agent_id}",
+                             headers=headers, timeout=20)
