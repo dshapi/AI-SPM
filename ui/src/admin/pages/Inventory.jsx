@@ -8,6 +8,7 @@ import {
   User, Cloud, Clock, ArrowUpRight,
   CheckCircle2, XCircle, AlertCircle, Share2,
   Upload, FileUp, Loader2,
+  MessageSquare,
 } from 'lucide-react'
 import { cn }            from '../../lib/utils.js'
 import { useFilterParams } from '../../hooks/useFilterParams.js'
@@ -19,9 +20,9 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 
 // ── Phase 3 — agent runtime control plane wiring ──────────────────────────
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
-import AgentDetailDrawer from '../agents/AgentDetailDrawer.jsx'
-import AgentChatPanel    from '../agents/AgentChatPanel.jsx'
-import RegisterAgentPanel from '../agents/RegisterAgentPanel.jsx'
+import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
+import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
+import RegisterAgentPanel   from '../agents/RegisterAgentPanel.jsx'
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
@@ -515,7 +516,7 @@ function MetaRow({ icon: Icon, label, value }) {
   )
 }
 
-function PreviewPanel({ asset, onClose }) {
+function PreviewPanel({ asset, onClose, onOpenChat }) {
   if (!asset) return null
 
   const riskBg = {
@@ -524,6 +525,11 @@ function PreviewPanel({ asset, onClose }) {
     Medium:   'bg-yellow-50',
     Low:      'bg-emerald-50',
   }[asset.risk] ?? 'bg-gray-50'
+
+  // Phase 3 — live agents get an extra "Open Chat" + run/stop control
+  // appended to the action footer. Mocks and other asset types render
+  // the panel exactly as before.
+  const isLiveAgent = asset.kind === 'agent' && asset._live === true
 
   return (
     <div className="w-[300px] shrink-0 flex flex-col h-full" data-testid="asset-preview-panel">
@@ -601,6 +607,32 @@ function PreviewPanel({ asset, onClose }) {
 
       {/* Actions */}
       <div className="px-4 py-3 border-t border-gray-100 space-y-2 shrink-0">
+        {/* Live-agent only: runtime status + Open Chat. Stays above
+            the existing actions so it's the first thing the operator
+            sees when they open an agent row. */}
+        {isLiveAgent && (
+          <>
+            <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
+              <span>Runtime status</span>
+              <span className="font-medium text-gray-800">
+                {asset.runtime_state || 'stopped'}
+              </span>
+            </div>
+            <AgentRunStopToggle
+              agent={{ id: asset._backendId, runtime_state: asset.runtime_state }}
+              size="sm"
+              className="w-full justify-center"
+            />
+            <Button
+              variant="outline" size="sm"
+              onClick={() => onOpenChat && onOpenChat(asset)}
+              className="w-full h-8 gap-1.5 text-[12px] justify-center"
+            >
+              <MessageSquare size={12} />
+              Open Chat
+            </Button>
+          </>
+        )}
         <Button variant="outline" size="sm" className="w-full h-8 gap-1.5 text-[12px] justify-center">
           <ExternalLink size={12} />
           View Detail
@@ -1214,10 +1246,9 @@ export default function Inventory() {
     [liveAgentsRaw],
   )
 
-  // Drawer + chat-panel state. Both can be open simultaneously so an
-  // operator can keep configuration visible while chatting.
-  const [detailAgent, setDetailAgent] = useState(null)
-  const [chatAgent,   setChatAgent]   = useState(null)
+  // Chat-panel state. Floats over the page; opens from the Open Chat
+  // button on PreviewPanel for live agents.
+  const [chatAgent, setChatAgent] = useState(null)
 
   async function reloadLiveModels() {
     try {
@@ -1390,7 +1421,13 @@ export default function Inventory() {
                     },
                   }}
                 />
-              : selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />
+              : selected && (
+                  <PreviewPanel
+                    asset={selected}
+                    onClose={() => navigate('/admin/inventory', { replace: true })}
+                    onOpenChat={(agent) => setChatAgent(agent)}
+                  />
+                )
           }
 
         </div>
@@ -1409,25 +1446,18 @@ export default function Inventory() {
 
       </div>
 
-      {/* Phase 3 — agent detail + chat drawers. Both float over the
-          page; closing them just clears the state. They do NOT live in
-          the route since linkability isn't a Phase-3 requirement. */}
-      <AgentDetailDrawer
-        open={Boolean(detailAgent)}
-        agent={detailAgent}
-        onClose={() => setDetailAgent(null)}
-        onOpenChat={() => setChatAgent(detailAgent)}
-        onAgentChanged={(updated) => {
-          // Optimistically update the row the drawer shows so run/stop
-          // toggles + saves reflect immediately. The next poll tick
-          // overwrites with the canonical row.
-          setDetailAgent(updated)
-          refreshAgents && refreshAgents()
-        }}
-      />
+      {/* Chat drawer — floats over the page, opens from the
+          Open Chat button on PreviewPanel for live agents. */}
       <AgentChatPanel
         open={Boolean(chatAgent)}
-        agent={chatAgent}
+        agent={chatAgent ? {
+          // Map the inventory-shape row onto the fields AgentChatPanel
+          // expects (id is the real backend id, runtime_state pass-through).
+          id:            chatAgent._backendId || chatAgent.id,
+          name:          chatAgent.name,
+          risk:          (chatAgent.risk || '').toLowerCase(),
+          runtime_state: chatAgent.runtime_state || 'stopped',
+        } : null}
         onClose={() => setChatAgent(null)}
       />
 
