@@ -1,7 +1,18 @@
 #!/bin/bash
 set -e
 
-BUILD=${BUILD:-}   # set BUILD=1 to rebuild images before starting
+BUILD=${BUILD:-}   # set BUILD=1 to force-rebuild every image before starting
+
+# The aispm-flink-pyjob image is built once by flink-jobmanager and reused by
+# flink-taskmanager and flink-pyjob-submitter (they reference the same tag but
+# don't have their own build: directive). Without this, a fresh checkout — or
+# any host where `docker system prune` has cleared the local cache — fails
+# `compose up` with "pull access denied" the first time it tries to start the
+# stack. Build the image up-front if it's missing; cached builds are ~1s.
+if ! docker image inspect aispm-flink-pyjob:latest >/dev/null 2>&1; then
+  echo "Building aispm-flink-pyjob image (one-time)..."
+  docker compose -f docker-compose.yml -f docker-compose.auth.yml build flink-jobmanager
+fi
 
 if [ -n "$BUILD" ]; then
   docker compose -f docker-compose.yml -f docker-compose.auth.yml build
