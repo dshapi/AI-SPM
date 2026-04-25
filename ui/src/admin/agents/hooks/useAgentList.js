@@ -27,11 +27,17 @@ import { listAgents } from "../../api/agents"
  * render a small live-data dot next to live rows.
  */
 export function mergeAgents(mocks, live) {
-  const liveNames = new Set((live || []).map(a => a && a.name))
+  // Filter null/undefined entries up-front — a poll race or a bad
+  // adaptor row can leave holes in the array, and downstream consumers
+  // ([...].find(a => a.id === ...)) crash with "null is not an object
+  // (evaluating 'n.id')" when one slips through.
+  const liveClean  = (live  || []).filter(a => a && a.name && a.id)
+  const mocksClean = (mocks || []).filter(m => m && m.name && m.id)
+  const liveNames  = new Set(liveClean.map(a => a.name))
   return [
-    ...((live  || []).map(a => ({ ...a, _source: "live" }))),
-    ...((mocks || []).filter(m => m && !liveNames.has(m.name))
-                     .map(m => ({ ...m, _source: "mock" }))),
+    ...liveClean.map(a => ({ ...a, _source: "live" })),
+    ...mocksClean.filter(m => !liveNames.has(m.name))
+                 .map(m => ({ ...m, _source: "mock" })),
   ]
 }
 

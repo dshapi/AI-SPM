@@ -60,6 +60,22 @@ async def subscribe() -> AsyncIterator[ChatMessage]:
     workload by partition. V1 runs one container per agent, so the
     group_id is just bookkeeping today.
 
+    Important offset/race notes
+    ───────────────────────────
+    * ``auto_offset_reset='earliest'`` — for a fresh consumer group
+      (every new agent's first deploy), aiokafka's default ``"latest"``
+      causes any messages sent between ``aispm.ready()`` flipping
+      ``runtime_state`` to ``running`` and the consumer fully
+      registering with the broker to be silently dropped. ``earliest``
+      makes the first poll see those messages too. After the first
+      commit the value is moot — the group has a stored offset.
+
+    * ``await consumer.start()`` blocks until the broker has assigned
+      the agent its partition(s); only then can a published message
+      reach the agent. Customer ``main()`` therefore needs to call
+      ``ready()`` *after* the first ``async for`` iteration begins —
+      see the example agents in ``Example agents/``.
+
     The consumer auto-commits offsets — at-least-once delivery is the
     contract; customer agents must be idempotent on retries.
     """
@@ -76,6 +92,9 @@ async def subscribe() -> AsyncIterator[ChatMessage]:
         bootstrap_servers=_BOOTSTRAP,
         group_id=f"agent-{_AGENT_ID}",
         enable_auto_commit=True,
+        # See docstring — fresh deploys would otherwise silently drop
+        # the first message a user sends right after the agent comes up.
+        auto_offset_reset="earliest",
         value_deserializer=lambda b: json.loads(b.decode()),
     )
     await consumer.start()

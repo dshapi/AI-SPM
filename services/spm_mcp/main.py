@@ -73,3 +73,80 @@ except ImportError:                             # pragma: no cover
 # module load. No public surface beyond that.
 if _MCP_AVAILABLE:                              # pragma: no cover
     from . import tools  # noqa: F401
+
+
+# ─── POST /mcp — JSON-RPC tools/call endpoint ───────────────────────────────
+#
+# The aispm SDK speaks plain JSON-RPC 2.0 over HTTP (one POST per tool
+# call) — that's enough for one-shot agent tool invocations and avoids
+# FastMCP's heavier streaming-HTTP / SSE transport setup. We dispatch
+# the registered tools directly so the SDK gets a clean JSON-RPC reply
+# instead of the FastAPI default 404 it was hitting before.
+
+def _jsonrpc_error(req_id, code, message, data=None):
+    err = {"code": code, "message": message}
+    if data is not None:
+        err["data"] = data
+    return {"jsonrpc": "2.0", "id": req_id, "error": err}
+
+
+@app.post("/mcp")
+async def mcp_call(
+    body:  Dict[str, Any],
+    agent: Dict[str, Any] = Depends(auth_required),
+) -> Dict[str, Any]:
+    """Dispatch a JSON-RPC ``tools/call`` request from the agent SDK.
+
+    Currently the only registered tool is ``web_fetch``; we resolve its
+    Tavily creds via the agent-runtime integration row and forward.
+    Other tools added via ``@mcp.tool()`` are handled generically by
+    looking them up in ``mcp._tool_manager`` so wiring a new tool is a
+    one-decorator change in ``services/spm_mcp/tools/``.
+    """
+    req_id = body.get("id")
+    method = body.get("method")
+    if method != "tools/call":
+        return _jsonrpc_error(
+            req_id, -32601,
+            f"Method not found or not implemented: {method!r}",
+        )
+
+    params = body.get("params") or {}
+    tool_name = params.get("name")
+    args = params.get("arguments") or {}
+    if not tool_name:
+        return _jsonrpc_error(
+            req_id, -32602, "tools/call requires params.name",
+        )
+
+    # Fast path for web_fetch — its Tavily creds + truncation knobs come
+    # from the agent-runtime + Tavily integration rows, which the helper
+    # already knows how to resolve.
+    if tool_name == "web_fetch":
+        try:
+            from .tools.web_fetch import web_fetch, _resolve_tavily_config
+            cfg = await _resolve_tavily_config(
+                tenant_id=agent.get("tenant_id", "t1"),
+            )
+            n = args.get("max_results") or cfg["max_results_default"]
+            result = await web_fetch(
+                query=str(args.get("query") or ""),
+                tavily_api_key=cfg["api_key"],
+                max_results=int(n),
+                max_chars=cfg["max_chars"],
+            )
+            return {"jsonrpc": "2.0", "id": req_id, "result": result}
+        except RuntimeError as e:
+            # Resolution / config error — surface as a JSON-RPC error
+            # rather than letting it become a 500.
+            log.warning("spm-mcp: web_fetch config error: %s", e)
+            return _jsonrpc_error(req_id, -32000, str(e))
+        except Exception as e:  # noqa: BLE001
+            log.exception("spm-mcp: web_fetch failed")
+            return _jsonrpc_error(
+                req_id, -32000, f"{type(e).__name__}: {e}",
+            )
+
+    return _jsonrpc_error(
+        req_id, -32601, f"Unknown tool: {tool_name!r}",
+    )

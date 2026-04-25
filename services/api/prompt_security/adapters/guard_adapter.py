@@ -9,15 +9,35 @@ The adapter encapsulates the HTTP call, timeout handling, and fail-closed
 logic.  It can be constructed either with a live URL (production) or with an
 injectable ``guard_fn`` callable (testing / alternative backends).
 
+Verdict policy
+--------------
+Trust the guard's own ``verdict`` field. The historical "any S1–S15 cat
+forces block" rule was too aggressive — Llama Guard 3 routinely tags
+benign one-word replies (``yes``, ``ok``) with a category like S2 while
+itself returning ``verdict: "allow"`` and a low score. We only escalate
+``allow → block`` when the score is above ``GUARD_BLOCK_SCORE`` (env-
+tunable; default 0.6) AND there's at least one unsafe category. Pure
+``allow`` with a category but a low score now passes — categories alone
+are informational, not a kill-switch.
+
+Short-input bypass
+------------------
+Inputs shorter than ``GUARD_MIN_TEXT_LEN`` chars (default 8) skip the
+guard entirely. Conversational replies like ``yes`` / ``no`` / ``thanks``
+have too little signal for the guard to reason about and produce noisy
+categorisations.
+
 Fail-closed contract:
   - HTTP timeout           → ("block", 0.5, ["timeout"])
   - Any other exception    → ("block", 0.5, ["unavailable"])
   - HTTP 4xx/5xx from guard→ ("block", 0.5, ["unavailable"])
   - Disabled guard model   → ("allow", 0.0, [])
+  - Input shorter than min → ("allow", 0.0, [])
 """
 from __future__ import annotations
 
 import logging
+import os
 from typing import Callable, Coroutine, List, Optional, Tuple
 
 import httpx
@@ -26,6 +46,9 @@ log = logging.getLogger("security.guard_adapter")
 
 # All Llama Guard 3 unsafe categories S1–S15
 _ALL_UNSAFE: frozenset[str] = frozenset(f"S{i}" for i in range(1, 16))
+
+_GUARD_BLOCK_SCORE  = float(os.environ.get("GUARD_BLOCK_SCORE",  "0.6"))
+_GUARD_MIN_TEXT_LEN = int(os.environ.get("GUARD_MIN_TEXT_LEN", "8"))
 
 # Type alias for the guard callable signature
 GuardFn = Callable[[str], Coroutine[None, None, Tuple[str, float, List[str]]]]
@@ -84,6 +107,13 @@ class LlamaGuardAdapter:
             log.warning("LlamaGuardAdapter: guard_url not set — failing CLOSED")
             return "block", 0.5, ["unavailable"]
 
+        # ── 2b. Short-input bypass ────────────────────────────────────────
+        # Conversational acks ("yes", "ok", "thanks") trip Llama Guard's
+        # category model in a way that doesn't reflect actual risk; skip
+        # the guard for inputs below the configured min length.
+        if len((prompt or "").strip()) < _GUARD_MIN_TEXT_LEN:
+            return "allow", 0.0, []
+
         # ── 3. Live HTTP call ─────────────────────────────────────────────
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -97,8 +127,23 @@ class LlamaGuardAdapter:
                 score      = float(data.get("score", 1.0))
                 categories = data.get("categories", [])
 
-                # Any S1–S15 match forces "block" regardless of verdict field
-                if categories and set(categories) & _ALL_UNSAFE:
+                # Only escalate "allow" → "block" when the guard's own
+                # score is above the configured threshold AND a category
+                # is present. Categories alone with a low score are
+                # informational ("this touched on X") and shouldn't kill
+                # the request — that produced false positives like
+                # blocking the literal word "yes" tagged as S2.
+                if (
+                    verdict == "allow"
+                    and categories
+                    and set(categories) & _ALL_UNSAFE
+                    and score >= _GUARD_BLOCK_SCORE
+                ):
+                    log.info(
+                        "LlamaGuard: escalating allow→block on score=%.2f "
+                        "categories=%s (threshold=%.2f)",
+                        score, categories, _GUARD_BLOCK_SCORE,
+                    )
                     verdict = "block"
 
                 return verdict, score, categories

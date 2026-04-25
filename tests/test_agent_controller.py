@@ -122,14 +122,17 @@ class TestSpawnAgentContainer:
         assert cid == "ctr-abc"
 
         env = captured["environment"]
+        # Identity-bootstrap only — everything else (TENANT_ID, MCP_URL,
+        # LLM_*, KAFKA_*) is fetched by the SDK at import time from the
+        # DB-backed /agents/{id}/bootstrap endpoint, not pushed via env.
         assert env["AGENT_ID"]       == "ag-001"
-        assert env["TENANT_ID"]      == "t1"
         assert env["MCP_TOKEN"]      == "mcp-x"
-        assert env["LLM_API_KEY"]    == "llm-x"
-        assert env["MCP_URL"]        == "http://spm-mcp:8500/mcp"
-        assert env["LLM_BASE_URL"]   == "http://spm-llm-proxy:8500/v1"
         assert env["CONTROLLER_URL"] == "http://spm-api:8092"
-        assert "KAFKA_BOOTSTRAP_SERVERS" in env
+        # Verify the platform-URL / per-agent-secret keys are NOT leaked
+        # into the container env any more.
+        for leaked in ("TENANT_ID", "MCP_URL", "LLM_BASE_URL", "LLM_API_KEY",
+                       "KAFKA_BOOTSTRAP_SERVERS"):
+            assert leaked not in env, f"unexpected env leak: {leaked}"
 
         assert captured["mem_limit"] == "256m"
         assert captured["network"]   == "agent-net"

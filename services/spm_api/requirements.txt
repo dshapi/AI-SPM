@@ -15,3 +15,10 @@ redis==5.2.0
 # Phase 1 — agent runtime control plane. spm-api spawns customer agent
 # containers via the docker SDK when a registered agent is deployed.
 docker==7.1.0
+
+# Phase 4 — agent chat pipeline. POST /agents/{id}/chat produces to
+# the agent's chat.in topic and consumes the reply from chat.out
+# inside the SSE generator. kafka-python-ng above is the legacy sync
+# client used elsewhere in spm-api; aiokafka is the async client we
+# use inside the streaming response so we don't block the event loop.
+aiokafka==0.11.0

@@ -18,6 +18,7 @@ Fail-closed contract:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Callable, Coroutine, List, Optional, Tuple
 
 import httpx
@@ -26,6 +27,17 @@ log = logging.getLogger("security.guard_adapter")
 
 # All Llama Guard 3 unsafe categories S1–S15
 _ALL_UNSAFE: frozenset[str] = frozenset(f"S{i}" for i in range(1, 16))
+
+# Score above which an "allow" verdict + a category is escalated to
+# "block". Default 0.6 was chosen by hand-testing: the model returns
+# allow + low-score + irrelevant category on benign one-word inputs
+# like "yes" / "ok" / "thanks", and we don't want to kill those.
+_GUARD_BLOCK_SCORE  = float(os.environ.get("GUARD_BLOCK_SCORE",  "0.6"))
+
+# Min input length the guard is allowed to act on. Conversational acks
+# under 8 chars produce noisy categorisations from this model family
+# (e.g. "yes" → S2). Skip the call for those — too little signal.
+_GUARD_MIN_TEXT_LEN = int(os.environ.get("GUARD_MIN_TEXT_LEN", "8"))
 
 # Type alias for the guard callable signature
 GuardFn = Callable[[str], Coroutine[None, None, Tuple[str, float, List[str]]]]
@@ -84,6 +96,14 @@ class LlamaGuardAdapter:
             log.warning("LlamaGuardAdapter: guard_url not set — failing CLOSED")
             return "block", 0.5, ["unavailable"]
 
+        # ── 2b. Short-input bypass ────────────────────────────────────────
+        # Llama Guard reliably tags benign one-word replies ("yes",
+        # "ok", "thanks") with a category like S2 even when the
+        # verdict is "allow". For conversational acks we trust the
+        # length signal over the model — too little to reason about.
+        if len((prompt or "").strip()) < _GUARD_MIN_TEXT_LEN:
+            return "allow", 0.0, []
+
         # ── 3. Live HTTP call ─────────────────────────────────────────────
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -97,8 +117,24 @@ class LlamaGuardAdapter:
                 score      = float(data.get("score", 1.0))
                 categories = data.get("categories", [])
 
-                # Any S1–S15 match forces "block" regardless of verdict field
-                if categories and set(categories) & _ALL_UNSAFE:
+                # Trust the guard's verdict. Only escalate "allow" →
+                # "block" when an unsafe category is present AND the
+                # score is high enough to indicate genuine risk.
+                # Pure "allow + category + low score" used to be
+                # blanket-blocked, which produced false positives like
+                # "yes" → S2 → killed. Categories alone are
+                # informational, not a kill-switch.
+                if (
+                    verdict == "allow"
+                    and categories
+                    and set(categories) & _ALL_UNSAFE
+                    and score >= _GUARD_BLOCK_SCORE
+                ):
+                    log.info(
+                        "LlamaGuard: escalating allow→block on score=%.2f "
+                        "categories=%s (threshold=%.2f)",
+                        score, categories, _GUARD_BLOCK_SCORE,
+                    )
                     verdict = "block"
 
                 return verdict, score, categories

@@ -538,13 +538,37 @@ async def _call_guard_model(prompt: str) -> tuple[str, float, list[str]]:
     Call Llama Guard 3 guard model service.
     Returns (verdict, score, categories).
 
-    FAILS CLOSED: timeout or unavailability → ("block", 0.5, ["unavailable"])
-    ALL unsafe categories S1–S15 → verdict forced to "block".
+    FAILS CLOSED on transport/timeout: ("block", 0.5, [...]).
+
+    Verdict policy
+    ──────────────
+    Trust the guard's own ``verdict`` field. The historical
+    "any S1–S15 cat forces block" rule was over-aggressive — Llama
+    Guard 3 routinely tags benign one-word replies (``yes``, ``ok``,
+    ``thanks``) with a category like S2 while itself returning
+    ``verdict: "allow"`` and a low score. We only escalate
+    ``allow → block`` when the score crosses ``GUARD_BLOCK_SCORE``
+    (default 0.6, env-tunable) AND there's an unsafe category.
+
+    Short-input bypass
+    ──────────────────
+    Inputs shorter than ``GUARD_MIN_TEXT_LEN`` chars (default 8)
+    skip the guard call entirely — too little signal for the model
+    to reason about, and benign acks shouldn't trip safety.
     """
     if not settings.guard_model_enabled:
         return "allow", 0.0, []
 
-    # All Llama Guard 3 unsafe categories — any match forces block
+    # Tunables — read at call time so an env-only ratchet doesn't
+    # require a redeploy of code, just `docker compose up -d` after
+    # `export GUARD_BLOCK_SCORE=0.7`.
+    block_score   = float(os.environ.get("GUARD_BLOCK_SCORE",  "0.6"))
+    min_text_len  = int(os.environ.get("GUARD_MIN_TEXT_LEN", "8"))
+
+    if len((prompt or "").strip()) < min_text_len:
+        return "allow", 0.0, []
+
+    # All Llama Guard 3 unsafe categories
     _ALL_UNSAFE = {f"S{i}" for i in range(1, 16)}  # S1 through S15
 
     try:
@@ -558,8 +582,21 @@ async def _call_guard_model(prompt: str) -> tuple[str, float, list[str]]:
             verdict    = data.get("verdict", "block")   # fail-closed default
             score      = float(data.get("score", 1.0))
             categories = data.get("categories", [])
-            # Force block if ANY S1–S15 category present (regardless of guard's own verdict)
-            if categories and set(categories) & _ALL_UNSAFE:
+            # Only escalate "allow" → "block" when the guard's own
+            # score is high enough AND an unsafe category is present.
+            # Low-score allow with a category is informational, not a
+            # kill-switch.
+            if (
+                verdict == "allow"
+                and categories
+                and set(categories) & _ALL_UNSAFE
+                and score >= block_score
+            ):
+                log.info(
+                    "Guard model: escalating allow→block on score=%.2f "
+                    "categories=%s (threshold=%.2f)",
+                    score, categories, block_score,
+                )
                 verdict = "block"
             return verdict, score, categories
     except httpx.TimeoutException:

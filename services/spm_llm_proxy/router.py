@@ -72,38 +72,59 @@ async def _load_target_integration(integration_id: str):
         return result.scalar_one_or_none()
 
 
-def _decode_creds_for(target_row) -> Dict[str, Any]:
-    """Decode all secret credentials declared on the target's
-    connector_type, keyed by FieldSpec.key."""
+def _decode_secret(enc):
+    """Inverse of services.spm_api.integrations_routes._encode_secret —
+    inlined here so spm-llm-proxy's image doesn't need the spm_api code.
+
+    The encoding is plain base64 of the UTF-8 plaintext; tests assert
+    ``decode(encode(s)) == s`` on the spm_api side. Returns "" on any
+    decode failure so a corrupt row produces a clean upstream-call
+    error rather than crashing the proxy with a 500.
+    """
+    import base64
+    if not enc:
+        return ""
     try:
-        from connector_registry  import get_connector  # type: ignore
-        from integrations_routes import _decode_secret  # type: ignore
-    except ModuleNotFoundError:                        # pragma: no cover
-        from services.spm_api.connector_registry  import get_connector  # type: ignore
-        from services.spm_api.integrations_routes import _decode_secret  # type: ignore
+        return base64.b64decode(enc.encode("ascii")).decode("utf-8")
+    except Exception:                                   # noqa: BLE001
+        return ""
 
-    ct = get_connector(getattr(target_row, "connector_type", None))
-    if ct is None:
-        return {}
 
+def _decode_creds_for(target_row) -> Dict[str, Any]:
+    """Decode every configured credential on the target row, keyed by
+    ``credential_type`` (== FieldSpec.key on the spm_api side).
+
+    Previously this routed through ``connector_registry.get_connector``
+    to filter to ``secret=True`` fields, but that import lives in the
+    ``services.spm_api`` package, which isn't COPY'd into the
+    spm-llm-proxy image — so the import raised ModuleNotFoundError
+    mid-request and the whole call surfaced as 500. We don't actually
+    need the FieldSpec metadata: every row in ``integration_credentials``
+    is by definition a secret, and the caller (``_to_native_*``) only
+    reads the keys it expects (``api_key``, etc.) — extras are
+    harmless. Skipping the registry lookup makes spm-llm-proxy
+    self-contained.
+    """
     creds: Dict[str, Any] = {}
-    for f in ct["fields"]:
-        if not f.get("secret"):
+    for c in (getattr(target_row, "credentials", None) or []):
+        if not getattr(c, "is_configured", False):
             continue
-        key = f["key"]
-        c = next(
-            (c for c in (target_row.credentials or [])
-             if c.credential_type == key and c.is_configured),
-            None,
-        )
-        if c:
-            creds[key] = _decode_secret(c.value_enc)
+        key = getattr(c, "credential_type", None)
+        if not key:
+            continue
+        creds[key] = _decode_secret(getattr(c, "value_enc", None))
     return creds
 
 
 async def resolve_llm_integration(*, tenant_id: str = "t1"
-                                   ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Return ``(config, credentials)`` for the upstream LLM.
+                                   ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Return ``(connector_type, config, credentials)`` for the upstream LLM.
+
+    The ``connector_type`` (e.g. ``"anthropic"``, ``"ollama"``,
+    ``"openai"``) tells the dispatcher in main.py which native API
+    shape to translate to. Without it the proxy was blindly POSTing
+    Ollama-shaped requests to whichever provider the operator picked,
+    which only worked when they picked Ollama.
 
     Raises ``RuntimeError`` if:
       - no agent-runtime integration exists for the tenant
@@ -131,4 +152,5 @@ async def resolve_llm_integration(*, tenant_id: str = "t1"
             f"{target_id!r} which does not exist"
         )
 
-    return dict(target.config or {}), _decode_creds_for(target)
+    connector_type = (getattr(target, "connector_type", "") or "").lower()
+    return connector_type, dict(target.config or {}), _decode_creds_for(target)

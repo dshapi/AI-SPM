@@ -403,6 +403,74 @@ async def _resolve_agent_by_mcp_token(authorization: Optional[str]) -> Dict[str,
     return agent
 
 
+# ─── GET /agents/{id}/bootstrap — SDK boot-time DB read ────────────────────
+#
+# The agent's ``aispm`` SDK calls this on first import to learn its
+# connection info (tenant_id, MCP / LLM / Kafka URLs, llm_api_key).
+# Source of truth is the DB row + the controller's view of platform
+# URLs — the SDK doesn't read those from env vars.
+#
+# Auth: the agent's own ``mcp_token`` (Bearer header). Only that agent
+# can fetch its own bootstrap; cross-agent reads → 403.
+
+def _platform_urls() -> Dict[str, str]:
+    """Single canonical place for the in-cluster service URLs handed to
+    every agent. Kept in the controller (not the SDK) so operators can
+    re-target a deploy without rebuilding agent images."""
+    from agent_controller import (
+        _AGENT_MCP_URL,
+        _AGENT_LLM_BASE_URL,
+        _KAFKA_BOOTSTRAP,
+    )
+    return {
+        "mcp_url":                 _AGENT_MCP_URL,
+        "llm_base_url":            _AGENT_LLM_BASE_URL,
+        "kafka_bootstrap_servers": _KAFKA_BOOTSTRAP,
+    }
+
+
+@router.get("/{agent_id}/bootstrap")
+async def bootstrap_endpoint(
+    agent_id: str,
+    authorization: Optional[str] = Header(None),
+    db = Depends(get_db),
+):
+    """Return the agent's connection bundle, sourced from the DB.
+
+    Response shape::
+
+        {
+          "agent_id":    "...",
+          "tenant_id":   "t1",
+          "mcp_url":     "http://spm-mcp:8500/mcp",
+          "llm_base_url":"http://spm-llm-proxy:8500/v1",
+          "llm_api_key": "spm-llm-...",
+          "kafka_bootstrap_servers": "kafka-broker:9092"
+        }
+
+    Read once by ``aispm`` on import; values flow into the SDK's module
+    constants. Bearer must be the agent's own mcp_token.
+    """
+    caller = await _resolve_agent_by_mcp_token(authorization)
+    if str(caller["id"]) != str(agent_id):
+        raise HTTPException(status_code=403,
+                             detail="Bearer token does not match agent_id")
+
+    a = await _get_agent_or_none(db, agent_id)
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    urls = _platform_urls()
+    return {
+        "agent_id":                str(getattr(a, "id", agent_id)),
+        "tenant_id":               str(getattr(a, "tenant_id", "") or ""),
+        "mcp_url":                 urls["mcp_url"],
+        "llm_base_url":            urls["llm_base_url"],
+        "llm_api_key":             str(getattr(a, "llm_api_key", "") or ""),
+        "kafka_bootstrap_servers": urls["kafka_bootstrap_servers"],
+    }
+
+
 @router.post("/{agent_id}/ready", status_code=status.HTTP_204_NO_CONTENT)
 async def ready_endpoint(
     agent_id: str,

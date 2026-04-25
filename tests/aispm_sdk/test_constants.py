@@ -1,5 +1,11 @@
-"""Env → module-level constants. The SDK reads env at import time so
-the constants are simple strings the customer can read directly."""
+"""Module-level connection constants.
+
+The SDK fetches its connection bundle (TENANT_ID, MCP_URL, LLM_*,
+KAFKA_BOOTSTRAP_SERVERS) from the controller's DB-backed
+``/agents/{id}/bootstrap`` endpoint at import time. When the controller
+is unreachable (as in these tests — no spm-api process is running) the
+SDK falls back to the matching env vars; that's what we exercise here.
+"""
 from __future__ import annotations
 
 import importlib
@@ -39,16 +45,18 @@ def test_constants_populated(aispm_with_env):
 
 
 def test_unset_env_defaults_to_empty(aispm_with_env, monkeypatch):
-    # Strip the env to baseline — only TENANT_ID has a non-empty default.
-    for k in ("AGENT_ID", "MCP_URL", "MCP_TOKEN", "LLM_BASE_URL",
+    # No env, no controller — every connection constant should be the
+    # empty string. Only CONTROLLER_URL has a hardcoded default
+    # (the in-cluster spm-api host) because we need *something* to point
+    # the bootstrap call at.
+    for k in ("AGENT_ID", "TENANT_ID", "MCP_URL", "MCP_TOKEN", "LLM_BASE_URL",
               "LLM_API_KEY", "KAFKA_BOOTSTRAP_SERVERS", "CONTROLLER_URL"):
         monkeypatch.delenv(k, raising=False)
-    monkeypatch.delenv("TENANT_ID", raising=False)
 
     aispm = aispm_with_env({})
     assert aispm.AGENT_ID  == ""
     assert aispm.MCP_URL   == ""
-    assert aispm.TENANT_ID == "t1"
+    assert aispm.TENANT_ID == ""
     assert aispm.CONTROLLER_URL.startswith("http://spm-api")
 
 

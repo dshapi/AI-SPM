@@ -72,7 +72,13 @@ export default function AgentChatPanel({ open, agent, onClose }) {
   return (
     <div
       role="dialog" aria-modal="false" aria-label={`Chat with ${agent.name}`}
-      className="w-[300px] shrink-0 flex flex-col h-full bg-white"
+      // ``min-h-0`` lets the parent flex column actually constrain us
+      // when the surrounding layout doesn't cap our height; ``max-h``
+      // is a viewport-relative ceiling so the panel can never push the
+      // composer below the fold even when the parent forgets to size
+      // it. Combined with ``flex-1 min-h-0`` on the body below, the
+      // message list scrolls and the composer stays pinned.
+      className="w-[300px] shrink-0 flex flex-col h-full min-h-0 max-h-[calc(100vh-120px)] bg-white"
       data-testid="agent-chat-panel"
     >
       {/* Header — mirrors PreviewPanel exactly. */}

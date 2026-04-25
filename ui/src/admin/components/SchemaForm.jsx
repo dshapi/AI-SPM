@@ -43,8 +43,33 @@
  * leave-blank hint; onChange carries unrelated keys through untouched.
  */
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { cn } from '../../lib/utils.js'
+import { listIntegrations } from '../api/integrationsApi.js'
+
+// ── enum_integration option resolution ────────────────────────────────────────
+//
+// FieldSpec.options_provider is one of a fixed set of identifiers the
+// backend exposes — we resolve each to a (category, vendor) filter pair
+// matching connector_registry.OPTIONS_PROVIDERS. Anything we don't know
+// falls back to "show all" so a new provider added on the backend still
+// gives the user something pickable instead of a blank list.
+
+const OPTIONS_PROVIDERS = {
+  ai_provider_integrations: { category: 'AI Providers', vendor: null },
+  tavily_integrations:      { category: 'AI Providers', vendor: 'Tavily' },
+}
+
+function filterIntegrationsForProvider(all, providerName) {
+  const spec = OPTIONS_PROVIDERS[providerName]
+  if (!spec) return all
+  return (all || []).filter(row => {
+    if (spec.category && row.category !== spec.category) return false
+    if (spec.vendor && (row.vendor || '').toLowerCase()
+                       !== spec.vendor.toLowerCase()) return false
+    return true
+  })
+}
 
 // ── Section grouping ──────────────────────────────────────────────────────────
 
@@ -92,7 +117,8 @@ const selectCls = cn(
  * configure mode render with a "leave blank to keep" placeholder when an
  * existing credential is present.
  */
-function FieldRow({ field, value, onFieldChange, existingCredentials, mode }) {
+function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
+                    integrationOptions }) {
   const v = value?.[field.key]
   const secretHint =
     field.secret && mode === 'configure'
@@ -169,6 +195,42 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode }) {
         </select>
       )
       break
+    case 'enum_integration': {
+      // Cross-reference to another integration row. Backend resolves the
+      // FieldSpec.options_provider to a (category, vendor) filter; we do
+      // the same lookup client-side over the cached integrations list
+      // we fetched once at the SchemaForm level.
+      const filtered = filterIntegrationsForProvider(
+        integrationOptions.list, field.options_provider,
+      )
+      const loading = integrationOptions.loading
+      const error   = integrationOptions.error
+      const empty   = !loading && !error && filtered.length === 0
+      control = (
+        <select
+          value={v ?? ''}
+          onChange={e => onFieldChange(field.key, e.target.value)}
+          className={selectCls}
+          data-testid={`field-${field.key}`}
+          disabled={loading || empty}
+        >
+          <option value="">
+            {loading ? '— Loading…'
+              : error ? '— Error loading integrations —'
+              : empty ? '— No matching integrations configured yet —'
+              : '— Select an integration —'}
+          </option>
+          {filtered.map(row => (
+            <option key={row.id} value={row.id}>
+              {row.name || row.id}
+              {row.vendor ? ` · ${row.vendor}` : ''}
+              {row.status && row.status !== 'Healthy' ? ` (${row.status})` : ''}
+            </option>
+          ))}
+        </select>
+      )
+      break
+    }
     case 'textarea':
       control = (
         <textarea
@@ -259,6 +321,33 @@ export function SchemaForm({
 }) {
   const grouped = useMemo(() => groupFields(schema?.fields || []), [schema])
 
+  // Fetch the integrations list once if any field is enum_integration.
+  // Cached in component state so a connector with two enum_integration
+  // fields (e.g. agent-runtime: Default LLM + Tavily) only fires one
+  // request.
+  const needsIntegrations = useMemo(
+    () => (schema?.fields || []).some(f => f?.type === 'enum_integration'),
+    [schema],
+  )
+  const [integrationOptions, setIntegrationOptions] = useState({
+    loading: false, error: null, list: [],
+  })
+  useEffect(() => {
+    if (!needsIntegrations) return
+    let cancelled = false
+    setIntegrationOptions(s => ({ ...s, loading: true, error: null }))
+    listIntegrations()
+      .then(rows => {
+        if (cancelled) return
+        setIntegrationOptions({ loading: false, error: null, list: rows || [] })
+      })
+      .catch(err => {
+        if (cancelled) return
+        setIntegrationOptions({ loading: false, error: err, list: [] })
+      })
+    return () => { cancelled = true }
+  }, [needsIntegrations])
+
   function onFieldChange(fieldKey, next) {
     onChange({ ...(value || {}), [fieldKey]: next })
   }
@@ -290,6 +379,7 @@ export function SchemaForm({
                   onFieldChange={onFieldChange}
                   existingCredentials={existingCredentials}
                   mode={mode}
+                  integrationOptions={integrationOptions}
                 />
               ))}
             </div>
@@ -318,6 +408,7 @@ export function buildInitialFormValue(schema, overrides = {}) {
     }
     if (f.default !== undefined) out[f.key] = f.default
     else if (f.type === 'boolean') out[f.key] = false
+    else if (f.type === 'enum_integration') out[f.key] = ''  // user picks
     else out[f.key] = ''
   }
   return { ...out, ...overrides }

@@ -37,6 +37,19 @@ _AGENT_IMAGE   = os.environ.get("AGENT_RUNTIME_IMAGE", "aispm-agent-runtime:late
 _KAFKA_BOOTSTRAP = os.environ.get(
     "KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092",
 )
+# Canonical in-cluster URLs for the platform services the SDK talks to.
+# Single source of truth — exposed via ``agent_routes.bootstrap_endpoint``
+# so the SDK can read them from the DB-backed controller instead of
+# pulling them from its own container env.
+_AGENT_MCP_URL      = os.environ.get(
+    "AGENT_MCP_URL",      "http://spm-mcp:8500/mcp",
+)
+_AGENT_LLM_BASE_URL = os.environ.get(
+    "AGENT_LLM_BASE_URL", "http://spm-llm-proxy:8500/v1",
+)
+_AGENT_CONTROLLER_URL = os.environ.get(
+    "AGENT_CONTROLLER_URL", "http://spm-api:8092",
+)
 # Phase 2: replaced the hardcoded sleep with a real handshake. The
 # SDK's ``aispm.ready()`` POSTs to /agents/{id}/ready which flips
 # runtime_state→running. We poll for that transition with a short
@@ -243,21 +256,21 @@ async def spawn_agent_container(*, agent_id: str, tenant_id: str,
     start_agent / deploy_agent calls.
     """
     client = _docker_client()
+    # Minimal identity-bootstrap env. Everything else (tenant_id, MCP /
+    # LLM URLs, llm_api_key, kafka bootstrap) is fetched by the SDK at
+    # import time from the controller's GET /agents/{id}/bootstrap
+    # endpoint, which reads from the DB. Tenant_id and llm_api_key are
+    # kept out of the container env on purpose — the agent gets them
+    # from the same DB-backed bootstrap call.
     env = {
-        "AGENT_ID":                 agent_id,
-        "TENANT_ID":                tenant_id,
-        "MCP_URL":                  "http://spm-mcp:8500/mcp",
-        "MCP_TOKEN":                mcp_token,
-        "LLM_BASE_URL":             "http://spm-llm-proxy:8500/v1",
-        "LLM_API_KEY":              llm_api_key,
-        "KAFKA_BOOTSTRAP_SERVERS":  _KAFKA_BOOTSTRAP,
-        # SDK reaches back here for the ready() handshake, /secrets/*,
-        # and chat history. spm-api is dual-homed on default+agent-net
-        # so the agent container (on agent-net only) can resolve it.
-        "CONTROLLER_URL": os.environ.get(
-            "AGENT_CONTROLLER_URL", "http://spm-api:8092",
-        ),
+        "AGENT_ID":       agent_id,
+        "MCP_TOKEN":      mcp_token,
+        "CONTROLLER_URL": _AGENT_CONTROLLER_URL,
     }
+    # Silence unused-arg lint — these still flow through deploy_agent
+    # for back-compat callers but are no longer leaked into the agent's
+    # process environment.
+    _ = (tenant_id, llm_api_key)
     host_path = _resolve_host_code_path(code_path)
     log.info("spawn_agent_container: agent=%s code_path=%s host_path=%s",
              agent_id, code_path, host_path)
@@ -420,15 +433,38 @@ async def deploy_agent(db, agent_id) -> None:
 async def _wait_for_ready(db, agent_id, *, timeout_s: float) -> None:
     """Poll the agents row until ``runtime_state == 'running'``.
 
+    Critical SQLAlchemy detail
+    ──────────────────────────
+    The ``/ready`` endpoint runs in a different ``AsyncSession`` than
+    the upload route that called us. When ``ready_endpoint`` commits
+    ``runtime_state = "running"``, our session does NOT see the change
+    because the Agent row is pinned in our session's identity map at
+    its loaded value. ``db.get()`` is identity-map first — it returns
+    the cached object without re-querying.
+
+    Without ``expire_all()`` (or per-row ``refresh``), this loop spins
+    on a stale snapshot of ``starting`` for the full timeout window
+    and then incorrectly marks the row ``crashed``, even though the
+    agent successfully called ``aispm.ready()`` seconds earlier. The
+    UI then shows a fake Restart button on a perfectly-healthy agent.
+
     Raises ``TimeoutError`` if the agent never signals ready within
-    *timeout_s*; the caller (the upload route) catches and converts
-    to a 504 so the operator sees a clear error.
+    *timeout_s*; the caller catches and flips the row to ``crashed``.
     """
     import time
     from spm.db.models import Agent  # type: ignore
 
     started = time.monotonic()
     while time.monotonic() - started < timeout_s:
+        # Drop our identity-map cache so the next get() hits the DB.
+        # expire_all() on AsyncSession is a sync method (per
+        # SQLAlchemy docs) — it doesn't await; it just marks objects
+        # stale. The next attribute access / get() then re-queries.
+        try:
+            db.expire_all()
+        except Exception:                                # noqa: BLE001
+            # Tests sometimes pass a plain dict-like stub; ignore.
+            pass
         a = await _db_get(db, Agent, agent_id)
         if a is None:
             raise ValueError(f"agent {agent_id!r} disappeared during ready poll")

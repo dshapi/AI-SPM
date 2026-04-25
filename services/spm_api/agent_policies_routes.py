@@ -188,13 +188,14 @@ async def attach_policy(
 @router.delete(
     "/{agent_id}/policies/{policy_id}",
     status_code=status.HTTP_204_NO_CONTENT,
+    response_model=None,
 )
 async def detach_policy(
     agent_id: str,
     policy_id: str,
     db = Depends(get_db),
     _claims = Depends(require_admin),
-) -> None:
+):
     await _get_agent_or_404(db, agent_id)
     pid = policy_id.strip()
     if hasattr(db, "execute"):

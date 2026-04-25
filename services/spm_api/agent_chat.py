@@ -112,8 +112,40 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 
 # ─── Pipeline pieces ───────────────────────────────────────────────────────
 
+# Score above which a categorised input flips to "block" even if the
+# guard verdict was "allow". Tunable via env so operators with a noisier
+# guard model can ratchet it up. Default 0.6 was chosen by hand-testing
+# the falsy-positive rate on short conversational inputs.
+GUARD_BLOCK_SCORE = float(os.environ.get("GUARD_BLOCK_SCORE", "0.6"))
+
+# Min input length the guard is allowed to act on. Models we've tested
+# in this family produce noisy categorisations on 1–2 word inputs
+# (e.g. "yes", "ok", "thanks"); skip the guard for those.
+GUARD_MIN_TEXT_LEN = int(os.environ.get("GUARD_MIN_TEXT_LEN", "8"))
+
+
 async def _call_guard(text: str) -> Tuple[str, float, List[str]]:
-    """Call prompt-guard /screen. Fail-closed on any error."""
+    """Call prompt-guard /screen. Fail-closed on any error.
+
+    Verdict policy
+    ──────────────
+    Trust the guard's own ``verdict`` field. The previous
+    ``if cats: verdict = "block"`` rule was too aggressive — the model
+    legitimately tags benign inputs ("yes") with a category like S2 and
+    sets ``verdict: "allow"``. We only override the verdict when the
+    guard reports ``allow`` AND the score is above ``GUARD_BLOCK_SCORE``,
+    which lines up with what an operator would call "high-risk despite
+    the model not saying block".
+
+    Short-input bypass
+    ──────────────────
+    Inputs shorter than ``GUARD_MIN_TEXT_LEN`` chars skip the guard
+    entirely — too little signal to reason about, and conversational
+    replies like "yes / ok / thanks" should never trip safety.
+    """
+    if len((text or "").strip()) < GUARD_MIN_TEXT_LEN:
+        return "allow", 0.0, []
+
     body = {"text": text, "context": "user_input"}
     try:
         async with httpx.AsyncClient(timeout=GUARD_TIMEOUT) as c:
@@ -123,7 +155,15 @@ async def _call_guard(text: str) -> Tuple[str, float, List[str]]:
         verdict = data.get("verdict", "block")
         score   = float(data.get("score", 1.0))
         cats    = data.get("categories", []) or []
-        if cats:
+        # Only escalate "allow" → "block" when the guard's own score
+        # is above the configured threshold. Categories alone are
+        # informational, not a kill-switch.
+        if verdict == "allow" and cats and score >= GUARD_BLOCK_SCORE:
+            log.info(
+                "prompt-guard: escalating allow→block on score=%.2f "
+                "categories=%s (threshold=%.2f)",
+                score, cats, GUARD_BLOCK_SCORE,
+            )
             verdict = "block"
         return verdict, score, cats
     except httpx.TimeoutException:

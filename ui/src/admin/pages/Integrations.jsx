@@ -603,10 +603,14 @@ function Toggle({ checked, onChange, showLabel = false }) {
 }
 
 function OwnerAvatar({ name, size = 'sm' }) {
-  const parts  = name.split('.')
-  const initials = parts.map(p => p[0].toUpperCase()).join('')
+  // Defensive: a freshly-created integration may not have an owner.name
+  // yet (the create modal doesn't ask for it). Without this guard the
+  // page blanks out with "Cannot read properties of null (reading 'split')".
+  const safeName = (typeof name === 'string' && name.trim()) ? name.trim() : '—'
+  const parts    = safeName.split('.')
+  const initials = parts.map(p => (p && p[0] ? p[0].toUpperCase() : '')).join('') || '?'
   const colors = ['bg-blue-500','bg-violet-500','bg-emerald-500','bg-amber-500','bg-rose-500','bg-cyan-500']
-  const color  = colors[name.charCodeAt(0) % colors.length]
+  const color  = colors[(safeName.charCodeAt(0) || 0) % colors.length]
   const sz     = size === 'sm' ? 'w-6 h-6 text-[9px]' : 'w-7 h-7 text-[10px]'
   return (
     <div className={cn('rounded-full flex items-center justify-center text-white font-bold shrink-0', sz, color)}>

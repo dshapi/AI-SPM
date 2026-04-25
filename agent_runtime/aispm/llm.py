@@ -26,10 +26,13 @@ log = logging.getLogger(__name__)
 # upstream timeout so we surface the same error as the proxy returns.
 _TIMEOUT_S = 120
 
-# Default model name when the customer doesn't pin one. Matches
-# spm-mcp's ``default_model_name`` default. Operators override per
-# agent via the Configure tab.
-_DEFAULT_MODEL = "llama3.1:8b"
+# No SDK-side default model. The customer can pin one explicitly via
+# ``aispm.llm.complete(..., model="...")``, but if they don't we leave
+# the field empty and let spm-llm-proxy fill it from the configured
+# upstream integration's ``model`` field (e.g. ``claude-sonnet-4-6``
+# on Anthropic, ``llama3.1:8b`` on Ollama). Pinning a value here is
+# wrong: the SDK can't know which provider the operator picked.
+_DEFAULT_MODEL = ""
 
 
 async def complete(
@@ -71,11 +74,16 @@ async def complete(
         )
 
     body: Dict[str, Any] = {
-        "model":       model or _DEFAULT_MODEL,
         "messages":    list(messages),
         "max_tokens":  max_tokens,
         "temperature": temperature,
     }
+    # Only include `model` when the caller actually picked one. Empty
+    # string ⇒ proxy fills in the upstream integration's configured
+    # model. Anything truthy is forwarded verbatim.
+    chosen = (model or _DEFAULT_MODEL).strip()
+    if chosen:
+        body["model"] = chosen
     headers = {"Authorization": f"Bearer {_API_KEY}"}
 
     async with httpx.AsyncClient(timeout=_TIMEOUT_S) as c:
@@ -86,6 +94,9 @@ async def complete(
     data = r.json()
     return Completion(
         text=  data["choices"][0]["message"]["content"],
-        model= data.get("model", body["model"]),
+        # Prefer whatever the upstream actually echoed; fall back to
+        # the model we asked for, or the empty string when neither
+        # the SDK nor the caller pinned one.
+        model= data.get("model") or body.get("model", ""),
         usage= dict(data.get("usage") or {}),
     )

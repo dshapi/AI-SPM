@@ -31,7 +31,12 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .router import resolve_llm_integration
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
+)
 log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 app = FastAPI(title="spm-llm-proxy", version="0.1.0")
 
@@ -81,7 +86,7 @@ def _ollama_request_body(payload: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[s
     }
 
 
-def _to_openai_response(out: Dict[str, Any], model: str) -> Dict[str, Any]:
+def _ollama_to_openai_response(out: Dict[str, Any], model: str) -> Dict[str, Any]:
     """Wrap an Ollama /api/chat response in the OpenAI chat-completion shape."""
     return {
         "id":      "chatcmpl-spm-1",
@@ -101,44 +106,230 @@ def _to_openai_response(out: Dict[str, Any], model: str) -> Dict[str, Any]:
     }
 
 
+# ─── Anthropic native dispatch ─────────────────────────────────────────────
+#
+# /v1/messages takes ``system`` as a top-level field (not a role-system
+# message), uses ``x-api-key`` + ``anthropic-version`` headers, and
+# returns ``content: [{type:'text', text:...}]``. We translate both
+# directions so the agent's OpenAI-compatible client stays unchanged.
+
+def _split_anthropic_messages(messages):
+    system_chunks = []
+    out = []
+    for m in (messages or []):
+        role    = (m.get("role") or "user").lower()
+        content = m.get("content", "")
+        if role == "system":
+            if content:
+                system_chunks.append(str(content))
+            continue
+        if role not in ("user", "assistant"):
+            role = "user"
+        out.append({"role": role, "content": content})
+    return "\n\n".join(system_chunks), out
+
+
+def _anthropic_request_body(payload, cfg):
+    system, msgs = _split_anthropic_messages(payload.get("messages") or [])
+    # Operator's configured model (on the Anthropic integration) wins
+    # over whatever the agent's SDK happened to default to. The agent
+    # has no way of knowing which model the upstream supports — it
+    # could send `llama3.1:8b` (the legacy SDK default) which Anthropic
+    # would 404. Only honour ``payload["model"]`` if it looks like an
+    # Anthropic model name (i.e. starts with ``claude``).
+    cfg_model = cfg.get("model") or cfg.get("model_name")
+    pl_model  = (payload.get("model") or "").strip()
+    if pl_model.lower().startswith("claude"):
+        chosen_model = pl_model
+    else:
+        chosen_model = cfg_model or "claude-sonnet-4-6"
+    body = {
+        "model":      chosen_model,
+        "messages":   msgs,
+        "max_tokens": int(payload.get("max_tokens") or 1024),
+    }
+    if system:
+        body["system"] = system
+    if "temperature" in payload:
+        body["temperature"] = payload["temperature"]
+    return body
+
+
+def _anthropic_to_openai_response(out, model):
+    blocks = out.get("content") or []
+    text_parts = [b.get("text", "") for b in blocks
+                   if isinstance(b, dict) and b.get("type") == "text"]
+    text = "".join(text_parts)
+    usage = out.get("usage") or {}
+    return {
+        "id":      out.get("id") or "chatcmpl-spm-1",
+        "object":  "chat.completion",
+        "model":   model,
+        "choices": [{
+            "index":         0,
+            "message":       {"role": "assistant", "content": text},
+            "finish_reason": out.get("stop_reason") or "stop",
+        }],
+        "usage": {
+            "prompt_tokens":     int(usage.get("input_tokens",  0) or 0),
+            "completion_tokens": int(usage.get("output_tokens", 0) or 0),
+            "total_tokens":      int(usage.get("input_tokens",  0) or 0)
+                                  + int(usage.get("output_tokens", 0) or 0),
+        },
+    }
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: Dict[str, Any],
     agent:   Dict[str, Any] = Depends(_auth_required),
 ):
     """Forward an OpenAI-shaped chat-completions request to the configured
-    upstream LLM integration.
-
-    Behaviour:
-      - Resolves the upstream via ``resolve_llm_integration(tenant_id)``.
-      - Phase 1 only knows how to forward to Ollama; other providers will
-        succeed if their config carries a compatible /api/chat or
-        /v1/chat/completions base, but are best-effort. Native dispatch
-        per-provider is Phase 2.
-      - Returns the upstream's reply re-wrapped in OpenAI shape so the
-        agent's existing OpenAI-compatible client (e.g. langchain
-        ChatOpenAI) keeps working.
+    upstream LLM integration. Provider-native dispatch — branches on the
+    upstream integration's ``connector_type`` and translates request +
+    response shape so the agent's OpenAI-compatible client stays
+    untouched regardless of which provider the operator picked.
     """
     if "messages" not in payload:
         raise HTTPException(status_code=400, detail="`messages` is required")
 
     try:
-        cfg, _creds = await resolve_llm_integration(tenant_id=agent["tenant_id"])
+        connector_type, cfg, creds = await resolve_llm_integration(
+            tenant_id=agent["tenant_id"],
+        )
     except RuntimeError as e:
         log.warning("llm-proxy: resolution failed: %s", e)
         raise HTTPException(status_code=502, detail=str(e))
 
-    base   = (cfg.get("base_url") or _DEFAULT_OLLAMA_BASE).rstrip("/")
-    body   = _ollama_request_body(payload, cfg)
-    upstream_url = f"{base}/api/chat"
+    log.info(
+        "llm-proxy: dispatching connector_type=%r model_cfg=%r base_url=%r "
+        "creds_keys=%r",
+        connector_type,
+        cfg.get("model") or cfg.get("model_name"),
+        cfg.get("base_url"),
+        sorted(list(creds.keys())),
+    )
 
     try:
+        if connector_type == "anthropic":
+            base    = (cfg.get("base_url") or "https://api.anthropic.com").rstrip("/")
+            api_key = creds.get("api_key", "")
+            if not api_key:
+                log.warning(
+                    "llm-proxy: anthropic api_key missing or empty — "
+                    "creds keys present: %s",
+                    sorted(list(creds.keys())),
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail="Anthropic upstream is missing api_key — "
+                            "configure it on the Anthropic integration",
+                )
+            body = _anthropic_request_body(payload, cfg)
+            log.info("llm-proxy: anthropic POST %s/v1/messages model=%s "
+                     "msgs=%d sys_chars=%d",
+                     base, body.get("model"),
+                     len(body.get("messages") or []),
+                     len(body.get("system") or ""))
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(
+                    f"{base}/v1/messages",
+                    json=body,
+                    headers={
+                        "x-api-key":         api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type":      "application/json",
+                    },
+                )
+            if r.status_code != 200:
+                log.warning(
+                    "llm-proxy: anthropic returned %d: %s",
+                    r.status_code, r.text[:600],
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Anthropic upstream error {r.status_code}: "
+                            f"{r.text[:400]}",
+                )
+            return _anthropic_to_openai_response(r.json(), body["model"])
+
+        # Default / legacy path — Ollama-style upstream.
+        # Ollama exposes two transports off its port:
+        #   1. Native:       POST /api/chat            (request body is
+        #                    Ollama-specific, response is Ollama-specific)
+        #   2. OpenAI-compat: POST /v1/chat/completions (forward as-is)
+        # Operators commonly set base_url to either ``http://host:11434``
+        # or ``http://host:11434/v1`` depending on which mode they want.
+        # We branch on the trailing ``/v1`` so both work — the user
+        # doesn't have to know that the proxy translates differently
+        # for one vs. the other.
+        base = (cfg.get("base_url") or _DEFAULT_OLLAMA_BASE).rstrip("/")
+        # Operator's configured model wins; only honour payload.model
+        # if the caller explicitly pinned an Ollama-shaped name (i.e.
+        # not the legacy SDK default for some other provider).
+        cfg_model = cfg.get("model") or cfg.get("model_name")
+        pl_model  = (payload.get("model") or "").strip()
+        chosen_model = (cfg_model or pl_model or "llama3.1:8b")
+
+        if base.endswith("/v1"):
+            # OpenAI-compatible mode — forward verbatim.
+            url  = f"{base}/chat/completions"
+            body = {
+                "model":       chosen_model,
+                "messages":    payload.get("messages") or [],
+                "stream":      False,
+            }
+            if "temperature" in payload:
+                body["temperature"] = payload["temperature"]
+            if "max_tokens" in payload:
+                body["max_tokens"] = payload["max_tokens"]
+            log.info("llm-proxy: ollama (openai-compat) POST %s model=%s",
+                     url, chosen_model)
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(url, json=body)
+            if r.status_code != 200:
+                log.warning(
+                    "llm-proxy: ollama openai-compat returned %d: %s",
+                    r.status_code, r.text[:600],
+                )
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Upstream LLM (ollama) returned "
+                            f"{r.status_code}: {r.text[:400]}",
+                )
+            # Already OpenAI shape — pass through.
+            return r.json()
+
+        # Native Ollama path.
+        url  = f"{base}/api/chat"
+        body = _ollama_request_body(payload, cfg)
+        body["model"] = chosen_model        # operator wins over legacy SDK
+        log.info("llm-proxy: ollama (native) POST %s model=%s",
+                 url, chosen_model)
         async with httpx.AsyncClient(timeout=120) as c:
-            r = await c.post(upstream_url, json=body)
-        r.raise_for_status()
+            r = await c.post(url, json=body)
+        if r.status_code != 200:
+            log.warning(
+                "llm-proxy: ollama native returned %d: %s",
+                r.status_code, r.text[:600],
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Upstream LLM ({connector_type or 'ollama'}) "
+                        f"returned {r.status_code}: {r.text[:400]}",
+            )
+        return _ollama_to_openai_response(r.json(), body["model"])
+
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Upstream LLM timed out")
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Upstream LLM error: {e}")
-
-    return _to_openai_response(r.json(), body["model"])
+    except HTTPException:
+        raise
+    except Exception as e:                                # noqa: BLE001
+        # Surface anything else as a clean 502 with the message; better
+        # than a bare 500 the agent gets as "Server error '500 Internal
+        # Server Error'" with nothing to act on.
+        log.exception("llm-proxy: unexpected upstream error")
+        raise HTTPException(
+            status_code=502,
+            detail=f"llm-proxy upstream error: {type(e).__name__}: {e}",
+        )

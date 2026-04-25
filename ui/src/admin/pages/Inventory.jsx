@@ -1285,6 +1285,10 @@ const AGENT_TYPE_LABEL = {
 const POLICY_FROM_BACKEND = { covered: 'full', partial: 'partial', none: 'none' }
 
 function adaptLiveAgent(a) {
+  // Defensive: skip rows missing the two fields downstream code (mergeAgents,
+  // mergedAllAssets.find, etc.) reads. Returning null here is safe — the
+  // mergeAgents helper filters falsy entries before merging.
+  if (!a || !a.id || !a.name) return null
   return {
     // Prefix so the URL-param selector can't accidentally match a mock row.
     id:            `live-${a.id}`,
@@ -1338,7 +1342,7 @@ export default function Inventory() {
   const { live: liveAgentsRaw, refresh: refreshAgents } =
     useAgentList({ pollMs: 5000 })
   const liveAgents = useMemo(
-    () => (liveAgentsRaw || []).map(adaptLiveAgent),
+    () => (liveAgentsRaw || []).map(adaptLiveAgent).filter(Boolean),
     [liveAgentsRaw],
   )
 
@@ -1372,10 +1376,18 @@ export default function Inventory() {
     return next
   }, [liveModels, liveAgents])
 
-  const mergedAllAssets = useMemo(() => Object.values(mergedAssets).flat(), [mergedAssets])
+  const mergedAllAssets = useMemo(
+    // Defensive .filter(Boolean): a poll race or an upstream adaptor
+    // returning undefined would otherwise leave a null in the array,
+    // and the .find below would crash with "null is not an object
+    // (evaluating 'n.id')" the next time the component re-rendered
+    // (e.g. when a chat fetch failed mid-render).
+    () => Object.values(mergedAssets).flat().filter(Boolean),
+    [mergedAssets],
+  )
 
   // Selection derived from URL param — now searches the merged list so live rows work
-  const selected = mergedAllAssets.find(a => a.id === assetId) ?? null
+  const selected = mergedAllAssets.find(a => a && a.id === assetId) ?? null
 
   // Owners seen across all merged assets, for the Register panel's Owner dropdown
   const ownerOptions = useMemo(() => {

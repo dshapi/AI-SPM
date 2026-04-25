@@ -18,8 +18,16 @@ Tavily can return very large content blobs. We truncate each result's
 ``content`` to ``tavily_max_chars`` (configurable per agent-runtime
 integration; default 4000) so a single tool call can't blow up the
 agent's LLM context window.
+
+NOTE: do NOT add ``from __future__ import annotations`` to this module.
+The FastMCP ``@tool()`` decorator introspects parameter annotations at
+registration time via ``issubclass(param.annotation, Context)``. With
+postponed evaluation every annotation becomes a string and the
+``issubclass`` call raises ``TypeError: issubclass() arg 1 must be a
+class`` — which crashes spm-mcp at startup, takes the chat pipeline
+with it, and leaves the agent-runtime probe failing with
+``Name or service not known``.
 """
-from __future__ import annotations
 
 import logging
 from typing import Any, Dict, Optional
@@ -72,6 +80,23 @@ async def web_fetch(
 
 # ─── Per-call config + creds resolution ────────────────────────────────────
 
+def _decode_secret(enc):
+    """Inverse of services.spm_api.integrations_routes._encode_secret —
+    inlined here so spm-mcp's image doesn't need the spm_api package.
+
+    The spm_api side encodes credentials as plain base64 of UTF-8;
+    decode is the inverse. Returns "" on any decode error so a
+    corrupt row produces a clean tool-level error instead of a 500.
+    """
+    import base64
+    if not enc:
+        return ""
+    try:
+        return base64.b64decode(enc.encode("ascii")).decode("utf-8")
+    except Exception:                                   # noqa: BLE001
+        return ""
+
+
 async def _resolve_tavily_config(tenant_id: str = "t1") -> Dict[str, Any]:
     """Return ``{"api_key": str, "max_chars": int, "max_results_default": int}``.
 
@@ -82,10 +107,6 @@ async def _resolve_tavily_config(tenant_id: str = "t1") -> Dict[str, Any]:
     from sqlalchemy.orm import selectinload  # type: ignore
     from spm.db.models  import Integration   # type: ignore
     from spm.db.session import get_session_factory  # type: ignore
-    try:
-        from integrations_routes import _decode_secret  # type: ignore
-    except ModuleNotFoundError:
-        from services.spm_api.integrations_routes import _decode_secret  # type: ignore
 
     sf = get_session_factory()
     async with sf() as db:
