@@ -548,19 +548,54 @@ def list_integrations(
     return rows
 ```
 
-- [ ] **Step 4: Add `enum_integration` documentation to FieldSpec**
+- [ ] **Step 4: Update the `FieldSpec` dataclass — concrete change**
 
-In `connector_registry.py`, find the `FieldSpec` class / type definition (likely a `dataclass` near the top). Update the `type` field's docstring or Literal:
+In `connector_registry.py`, find the existing `FieldSpec` (currently a Pydantic model or dataclass; check `grep -n "class FieldSpec" services/spm_api/connector_registry.py`). Make these two changes — show both the BEFORE and AFTER:
 
+**BEFORE** (current state):
 ```python
-type: Literal[
-    "string","integer","password","enum","textarea","boolean","url",
-    "enum_integration",   # NEW: dropdown of integrations matching options_provider
-]
-options_provider: str | None = None  # NEW: e.g. "ai_provider_integrations"
+@dataclass
+class FieldSpec:
+    key: str
+    label: str
+    type: Literal["string","integer","password","enum","textarea","boolean","url"]
+    required: bool = False
+    secret:   bool = False
+    default:  Any = None
+    placeholder: str | None = None
+    hint: str | None = None
+    group: str | None = None
+    options: list[str] | None = None
 ```
 
-The frontend will read `options_provider` and call `GET /api/spm/integrations?category=<derived>` to populate the dropdown (UI work is Phase 3; backend just declares the field).
+**AFTER** (this task):
+```python
+@dataclass
+class FieldSpec:
+    key: str
+    label: str
+    type: Literal[
+        "string","integer","password","enum","textarea","boolean","url",
+        "enum_integration",   # NEW
+    ]
+    required: bool = False
+    secret:   bool = False
+    default:  Any = None
+    placeholder: str | None = None
+    hint: str | None = None
+    group: str | None = None
+    options: list[str] | None = None
+    options_provider: str | None = None   # NEW: e.g. "ai_provider_integrations"
+```
+
+The frontend (Phase 3) reads `options_provider` and resolves it to a `?category=...` filter when populating the dropdown. The string values used as `options_provider` map to filters as follows (document this in the FieldSpec docstring):
+
+| `options_provider` | Resolves to |
+|---|---|
+| `ai_provider_integrations` | `?category=AI%20Providers` |
+| `tavily_integrations` | `?category=AI%20Providers&vendor=Tavily` |
+
+V1 just declares the field; UI work to honor it is Phase 3.
 
 - [ ] **Step 5: Run tests, expect pass; commit**
 
@@ -660,7 +695,35 @@ CONNECTOR_TYPES["agent-host"] = ConnectorType(
 
 - [ ] **Step 4: Add `probe_agent_host` to `connector_probes.py`**
 
+First, **verify whether `probe_integration_by_id` exists** in `connector_registry.py`:
+
+```
+grep -n "probe_integration_by_id\|async def probe_" /Users/danyshapiro/PycharmProjects/AISPM/services/spm_api/connector_registry.py
+```
+
+If it doesn't exist, add this helper to `connector_registry.py` first (as a sibling of the existing probe helpers):
+
 ```python
+# connector_registry.py
+async def probe_integration_by_id(integration_id: str) -> tuple[bool, str, int | None]:
+    """Run the registered probe for an existing integration row, by ID."""
+    from spm.db.session import get_session
+    from spm.db.models import Integration
+    from platform_shared.credentials import get_credential
+    with get_session() as db:
+        row = db.get(Integration, integration_id)
+        if not row: return False, f"integration {integration_id} not found", None
+        ct = CONNECTOR_TYPES.get(row.connector_type)
+        if not ct: return False, f"unknown connector_type {row.connector_type}", None
+        creds = {f.key: await get_credential(integration_id, f.key)
+                 for f in ct.fields if f.secret}
+        return await ct.probe(row.config or {}, creds)
+```
+
+Then add `probe_agent_host` itself:
+
+```python
+# connector_probes.py
 async def probe_agent_host(config, credentials) -> tuple[bool, str, int | None]:
     """Verify (1) spm-mcp /health, (2) referenced LLM integration probe,
     (3) referenced Tavily integration probe — short-circuit on first failure."""
@@ -675,7 +738,7 @@ async def probe_agent_host(config, credentials) -> tuple[bool, str, int | None]:
                           int((time.monotonic()-started)*1000)
     except Exception as e:
         return False, f"spm-mcp unreachable: {e}", None
-    # 2/3. Referenced integrations — call existing probe registry
+    # 2/3. Referenced integrations — call helper above
     from .connector_registry import probe_integration_by_id
     for fk in ("default_llm_integration_id", "tavily_integration_id"):
         ref_id = config.get(fk)
@@ -687,8 +750,6 @@ async def probe_agent_host(config, credentials) -> tuple[bool, str, int | None]:
     return True, "all probes ok", int((time.monotonic()-started)*1000)
 ```
 
-(`probe_integration_by_id` may need to be added as a small wrapper if it doesn't exist; check `connector_registry.py` for existing helpers first.)
-
 - [ ] **Step 5: Run tests, commit**
 
 ```
@@ -696,6 +757,87 @@ pytest services/spm_api/tests/test_connector_registry_agent_host.py -v
 git add services/spm_api/connector_registry.py services/spm_api/connector_probes.py \
         services/spm_api/tests/test_connector_registry_agent_host.py
 git commit -m "feat(connectors): agent-host ConnectorType + probe"
+```
+
+---
+
+## Task 5a: platform_shared/agent_tokens — token → agent lookup
+
+**Why this exists:** Both `spm-mcp/auth.py` (Task 8) and `spm-llm-proxy/main.py` (Task 7) look up an agent by its bearer token. Without this helper, those tasks would fail to import. Defined once here, used by both.
+
+**Files:**
+- Create: `platform_shared/agent_tokens.py`
+- Test: `tests/test_agent_tokens.py`
+
+- [ ] **Step 1: Failing tests**
+
+```python
+# tests/test_agent_tokens.py
+import pytest, uuid
+from platform_shared.agent_tokens import (
+    resolve_agent_by_mcp_token, resolve_agent_by_llm_token,
+)
+from spm.db.models import Agent
+
+@pytest.mark.asyncio
+async def test_resolve_known_mcp_token(db_session):
+    a = Agent(id=uuid.uuid4(), name="x", version="1", agent_type="custom",
+              provider="internal", owner="o", code_path="x", code_sha256="0"*64,
+              mcp_token="mcp-good", llm_api_key="llm-good", tenant_id="t1")
+    db_session.add(a); db_session.commit()
+
+    out = await resolve_agent_by_mcp_token("mcp-good")
+    assert out["id"] == str(a.id)
+    assert out["tenant_id"] == "t1"
+
+@pytest.mark.asyncio
+async def test_resolve_unknown_token_returns_none():
+    assert await resolve_agent_by_mcp_token("nope") is None
+    assert await resolve_agent_by_llm_token("nope") is None
+```
+
+- [ ] **Step 2: Run, expect fail**
+
+- [ ] **Step 3: Implement**
+
+```python
+# platform_shared/agent_tokens.py
+"""Lookup helpers for the bearer tokens issued to each deployed agent.
+
+V1 stores tokens in plaintext on the agents row (admin-only access; never
+returned in API responses). V2 will encrypt at rest using the same Fernet
+key already used for integration_credentials.
+
+Cached for 30s in Redis (best-effort; fall through to DB on cache miss).
+"""
+from __future__ import annotations
+import os
+from sqlalchemy import select
+from spm.db.session import get_session
+from spm.db.models import Agent
+
+_CACHE_TTL_S = 30
+
+async def _lookup(column, token: str) -> dict | None:
+    # In test mode (no Redis configured) just hit the DB directly.
+    with get_session() as db:
+        row = db.execute(select(Agent).where(column == token)).scalar_one_or_none()
+        if not row: return None
+        return {"id": str(row.id), "tenant_id": row.tenant_id, "name": row.name}
+
+async def resolve_agent_by_mcp_token(token: str) -> dict | None:
+    return await _lookup(Agent.mcp_token, token)
+
+async def resolve_agent_by_llm_token(token: str) -> dict | None:
+    return await _lookup(Agent.llm_api_key, token)
+```
+
+- [ ] **Step 4: Run, pass; commit**
+
+```
+pytest tests/test_agent_tokens.py -v
+git add platform_shared/agent_tokens.py tests/test_agent_tokens.py
+git commit -m "feat(platform-shared): agent_tokens lookup helpers"
 ```
 
 ---
@@ -1233,7 +1375,14 @@ def validate_agent_code(code: str, *, dry_import: bool = True) -> ValidationResu
     return res
 ```
 
-(In Task 17 we'll switch the dry-import to actually run inside the agent-runtime-base container; for now an in-process import is good enough for V1 since the runtime image is what spm-api runs in.)
+**Phase 1 scoping note on dry-import:**
+
+The spec § 9 calls for the dry-import to happen inside an ephemeral `agent-runtime-base` container so the validation environment matches the deploy environment exactly. **In Phase 1, we run the dry-import in-process via `subprocess.run(["python","-c", ...])` in the spm-api container.** This catches Python-syntax errors and missing-stdlib errors but does NOT catch missing third-party packages that exist in agent-runtime-base but not in spm-api (or vice versa). That's acceptable for Phase 1 because:
+
+- The spm-api container and the agent-runtime-base container both use Python 3.12-slim as their base.
+- The only common gap (LangChain, etc.) shows up as a *warning* not an *error* — customer agent can still upload, just with a "this import won't be available at runtime" warning.
+
+Phase 2 task: switch the dry-import to spawn a one-off `agent-runtime-base` container for validation. Tracked in the spec § 11 open questions.
 
 - [ ] **Step 4: Run tests; commit**
 
@@ -1500,6 +1649,14 @@ async def deploy_agent(db, agent_id) -> None:
         mcp_token=a.mcp_token, llm_api_key=a.llm_api_key,
         mem_mb=512, cpu_quota=0.5,
     )
+    # V1 readiness check: hardcoded 5-second sleep, then mark running.
+    # The SDK's aispm.ready() signal mechanism (Phase 2) will replace this
+    # with a real poll on a /ready endpoint or Kafka consumer-group join.
+    # Keep this comment so it's flagged when Phase 2 lands.
+    import asyncio as _asyncio
+    await _asyncio.sleep(5)
+    a.runtime_state = "running"
+    db.commit()
 
 async def start_agent(db, agent_id) -> None:
     """Idempotent — used by the run/stop toggle."""
@@ -1633,6 +1790,10 @@ async def create_agent(
 def list_agents(
     db = Depends(get_session), claims = Depends(verify_jwt),
 ):
+    # Phase 1: AI-SPM is single-tenant; tenant_id defaults to "t1" if the
+    # JWT lacks the claim. The seed migration uses "t1" for all rows so
+    # this filter returns everything in dev. Phase 2 makes the JWT claim
+    # mandatory and enforces strict tenant isolation.
     tenant_id = _tenant_from_claims(claims) or "t1"
     rows = db.query(Agent).filter(Agent.tenant_id == tenant_id).all()
     return [_to_dict(a) for a in rows]
@@ -1763,6 +1924,73 @@ git commit -am "feat(spm-api): GET/PATCH/DELETE /agents/{id} + start/stop endpoi
 
 ---
 
+## Task 16a: agent-runtime image stub
+
+**Why this task exists:** Task 13's `spawn_agent_container` references `aispm-agent-runtime:latest`. Without an image with that tag, deploys fail at the docker run step. Phase 2 will fill this image with the real `aispm` SDK package; Phase 1 only needs a stub that boots and exits cleanly so the spawn pathway works end-to-end.
+
+**Files:**
+- Create: `agent_runtime/Dockerfile`
+- Create: `agent_runtime/stub_main.py`
+
+- [ ] **Step 1: Stub entrypoint**
+
+```python
+# agent_runtime/stub_main.py
+"""V1 stub. Phase 2 replaces this with the real aispm SDK + agent loader.
+
+For Phase 1, this just prints the env vars the controller injected
+and sleeps so the container stays up long enough for orchestration
+tests to verify it's running.
+"""
+import os, time, sys
+print(f"[stub-runtime] AGENT_ID={os.environ.get('AGENT_ID')}", flush=True)
+print(f"[stub-runtime] MCP_URL={os.environ.get('MCP_URL')}",   flush=True)
+print(f"[stub-runtime] LLM_BASE_URL={os.environ.get('LLM_BASE_URL')}", flush=True)
+sys.stdout.flush()
+# Stay running so docker reports state=running for ~10 minutes.
+time.sleep(600)
+```
+
+- [ ] **Step 2: Dockerfile**
+
+```dockerfile
+# agent_runtime/Dockerfile
+FROM python:3.12-slim
+WORKDIR /agent
+COPY agent_runtime/stub_main.py /agent/stub_main.py
+# Customer agent.py will be bind-mounted to /agent/agent.py at runtime.
+# In Phase 1 we ignore it and run the stub.
+CMD ["python","/agent/stub_main.py"]
+```
+
+- [ ] **Step 3: Build it**
+
+```
+cd /Users/danyshapiro/PycharmProjects/AISPM
+docker build -f agent_runtime/Dockerfile -t aispm-agent-runtime:latest .
+docker images | grep aispm-agent-runtime
+```
+
+Expected: image present.
+
+- [ ] **Step 4: Smoke run**
+
+```
+docker run --rm -e AGENT_ID=test -e MCP_URL=x -e LLM_BASE_URL=y \
+  aispm-agent-runtime:latest python -c "import os; print(os.environ['AGENT_ID'])"
+```
+
+Expected: prints `test`.
+
+- [ ] **Step 5: Commit**
+
+```
+git add agent_runtime/
+git commit -m "feat(agent-runtime): Phase 1 stub Dockerfile + entrypoint"
+```
+
+---
+
 ## Task 17: docker-compose — wire spm-mcp + spm-llm-proxy
 
 **Files:**
@@ -1785,6 +2013,11 @@ git commit -am "feat(spm-api): GET/PATCH/DELETE /agents/{id} + start/stop endpoi
     ports:
       - "8500:8500"
     networks: [default, agent-net]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8500/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   spm-llm-proxy:
     build:
@@ -1799,11 +2032,30 @@ git commit -am "feat(spm-api): GET/PATCH/DELETE /agents/{id} + start/stop endpoi
     ports:
       - "8501:8500"
     networks: [default, agent-net]
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8500/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # NOTE: agent-runtime is built but not run as a service. spm-api spawns
+  # individual `agent-{id}` containers from this image at deploy time.
+  # We declare a one-shot build here so `docker compose build` produces
+  # the image without leaving a service running.
+  agent-runtime-build:
+    build:
+      context: .
+      dockerfile: agent_runtime/Dockerfile
+    image: aispm-agent-runtime:latest
+    profiles: ["build-only"]      # never started by `compose up`
+    command: ["true"]
 
 networks:
   agent-net:
     driver: bridge
-    internal: true   # No outbound internet from agents in this network
+    internal: true   # No outbound internet from agents in this network.
+                     # spm-mcp and spm-llm-proxy bridge default + agent-net,
+                     # so agents can reach them but cannot reach the internet.
 ```
 
 (Network `agent-net` is created internal-only so agent containers can't egress to the internet directly. spm-mcp and spm-llm-proxy bridge the two networks.)
@@ -1817,22 +2069,23 @@ docker compose -f docker-compose.yml config > /dev/null
 
 Expected: no errors, no output. If it errors, fix syntax.
 
-- [ ] **Step 3: Build the new images**
+- [ ] **Step 3: Build the new images (including agent-runtime)**
 
 ```
+docker compose --profile build-only build agent-runtime-build
 docker compose build spm-mcp spm-llm-proxy
 ```
 
-Expected: two images built successfully.
+Expected: three images built successfully (`aispm-agent-runtime:latest`, `aispm-spm-mcp:latest`, `aispm-spm-llm-proxy:latest`).
 
-- [ ] **Step 4: Bring them up**
+- [ ] **Step 4: Bring them up (wait for healthy)**
 
 ```
-docker compose up -d spm-mcp spm-llm-proxy
+docker compose up -d --wait spm-mcp spm-llm-proxy
 docker ps | grep -E "spm-mcp|spm-llm-proxy"
 ```
 
-Expected: both `Up` and healthy.
+Expected: both `Up X seconds (healthy)`. The `--wait` flag blocks until healthchecks pass.
 
 - [ ] **Step 5: Smoke-test health endpoints**
 
@@ -1937,7 +2190,15 @@ git commit -m "test(e2e): smoke test for agent upload + list + delete"
 
 - [ ] **Step 1: Write `docs/agents/operator-quickstart.md`**
 
-A short ~50-line markdown file with: how to upload an agent (curl example), how to start/stop, how to delete, where the spm-mcp and spm-llm-proxy run. Reference the spec for the design rationale.
+Cover these sections (50-80 lines total):
+
+1. **What's new** — one paragraph naming the three new services (spm-mcp, spm-llm-proxy, agent-runtime image) and where they sit in the stack. Link to spec.
+2. **Upload an agent** — curl example using `/api/dev-token` then `POST /api/spm/agents` multipart with a hello-world agent.py.
+3. **List / inspect / delete** — curl examples for `GET /agents`, `GET /agents/{id}`, `DELETE /agents/{id}`.
+4. **Start / stop / restart** — curl examples for the lifecycle endpoints + how to read `runtime_state`.
+5. **Configure the host** — point to Integrations → AI Providers → "AI-SPM Agent Host (MCP)"; show how to switch the default LLM dropdown.
+6. **Logs and debugging** — `docker logs cpm-spm-mcp`, `docker logs agent-{id}`, `docker logs cpm-spm-llm-proxy`.
+7. **Phase 1 limitations** — call out: stub agent runtime (real SDK in Phase 2), no UI changes (Phase 3), no chat pipeline integration (Phase 4). Link the spec's V1 non-goals section.
 
 - [ ] **Step 2: Commit**
 
