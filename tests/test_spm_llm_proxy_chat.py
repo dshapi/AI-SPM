@@ -15,8 +15,13 @@ from services.spm_llm_proxy.main import app
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 async def _ok_resolve(tenant_id: str = "t1"):
-    """Stub resolver — returns a config that points at Ollama."""
+    """Stub resolver — returns (connector_type, config, creds) pointing at
+    Ollama (native, no /v1 suffix). Phase-4 update: the resolver now returns
+    a 3-tuple including the upstream's connector_type so main.py can
+    branch into provider-native dispatch (anthropic / ollama-openai-compat
+    / ollama-native)."""
     return (
+        "ollama",
         {"base_url": "http://ollama-test:11434", "model_name": "llama3.1:8b"},
         {},  # ollama needs no creds
     )

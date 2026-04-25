@@ -264,12 +264,13 @@ async def chat_completions(
         # doesn't have to know that the proxy translates differently
         # for one vs. the other.
         base = (cfg.get("base_url") or _DEFAULT_OLLAMA_BASE).rstrip("/")
-        # Operator's configured model wins; only honour payload.model
-        # if the caller explicitly pinned an Ollama-shaped name (i.e.
-        # not the legacy SDK default for some other provider).
+        # Ollama can serve any pulled model — let the caller pin
+        # whichever one they want via payload.model. Fall back to the
+        # operator's configured cfg model only when the caller didn't
+        # specify one.
         cfg_model = cfg.get("model") or cfg.get("model_name")
         pl_model  = (payload.get("model") or "").strip()
-        chosen_model = (cfg_model or pl_model or "llama3.1:8b")
+        chosen_model = (pl_model or cfg_model or "llama3.1:8b")
 
         if base.endswith("/v1"):
             # OpenAI-compatible mode — forward verbatim.
