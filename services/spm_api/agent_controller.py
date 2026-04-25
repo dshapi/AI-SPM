@@ -399,10 +399,33 @@ async def retire_agent(db, agent_id) -> None:
     container already gone, broker quirks, topic never existed). We
     swallow those failures so the DB row still gets cleaned up.
     Otherwise a half-deployed agent becomes un-deletable from the UI.
-    """
-    from spm.db.models import Agent  # type: ignore
 
-    a = await _db_get(db, Agent, agent_id)
+    Loading note
+    ────────────
+    The Agent → AgentChatSession relationship has
+    ``cascade="all, delete-orphan"``. Under AsyncSession that means
+    the delete handler needs the ``sessions`` collection populated up
+    front; otherwise SQLAlchemy tries to lazy-load it synchronously
+    inside the async context and raises ``MissingGreenlet``. We
+    selectinload it explicitly here.
+    """
+    from sqlalchemy import select                                  # type: ignore
+    from sqlalchemy.orm import selectinload                        # type: ignore
+    from spm.db.models import Agent                                # type: ignore
+
+    # Eager-load sessions so cascade-delete doesn't trigger a sync
+    # lazy-load. Falls back to plain _db_get for sync mock sessions
+    # used by the test suite.
+    if hasattr(db, "execute"):
+        stmt = (
+            select(Agent)
+            .where(Agent.id == agent_id)
+            .options(selectinload(Agent.sessions))
+        )
+        result = await db.execute(stmt)
+        a = result.scalar_one_or_none()
+    else:
+        a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
 

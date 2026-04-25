@@ -200,8 +200,24 @@ def _fake_agent_row(*, agent_id="ag-001", tenant_id="t1",
 
 
 def _fake_db_with(row):
+    """Mock async-session shape used by the lifecycle controllers.
+
+    - ``db.get`` is sync (returns ``row``) — ``_db_get`` handles both
+      sync MagicMock returns and real AsyncSession coroutines.
+    - ``db.execute`` is AsyncMock returning a result whose
+      ``scalar_one_or_none()`` yields the same row. Used by
+      ``retire_agent``'s eager-load path.
+    - ``db.delete`` and ``db.commit`` are AsyncMock so the
+      ``_db_delete`` / ``_db_commit`` helpers' ``await`` succeeds.
+    """
     db = MagicMock()
     db.get.return_value = row
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = row
+    db.execute = AsyncMock(return_value=result)
+    db.delete  = AsyncMock()
+    db.commit  = AsyncMock()
     return db
 
 
