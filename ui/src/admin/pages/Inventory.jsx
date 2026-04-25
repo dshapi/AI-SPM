@@ -23,6 +23,7 @@ import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
 import { deleteAgent } from '../api/agents.js'
 import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
 import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
+import PolicySelector       from '../agents/PolicySelector.jsx'
 import RegisterAgentPanel   from '../agents/RegisterAgentPanel.jsx'
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
@@ -650,13 +651,15 @@ function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
         {/* Linked policies */}
         <div className="px-4 py-3">
           <SectionLabel>Linked Policies</SectionLabel>
-          {asset.linkedPolicies.length > 0
-            ? <div className="flex flex-wrap gap-1.5">
-                {asset.linkedPolicies.map(p => (
-                  <Badge key={p} variant="info" className="text-[10px]">{p}</Badge>
-                ))}
-              </div>
-            : <p className="text-[12px] text-orange-500 font-medium">No policies applied</p>}
+          {isLiveAgent
+            ? <PolicySelector agent={asset} />
+            : asset.linkedPolicies.length > 0
+              ? <div className="flex flex-wrap gap-1.5">
+                  {asset.linkedPolicies.map(p => (
+                    <Badge key={p} variant="info" className="text-[10px]">{p}</Badge>
+                  ))}
+                </div>
+              : <p className="text-[12px] text-orange-500 font-medium">No policies applied</p>}
         </div>
 
         {/* Active alerts */}

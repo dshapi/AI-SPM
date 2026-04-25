@@ -854,3 +854,16 @@ try:
 except ModuleNotFoundError:
     from services.spm_api.agent_routes import router as agent_router  # noqa: E402
 app.include_router(agent_router)
+
+# Phase 4 — agent → policy attachment + chat pipeline.
+try:
+    from agent_policies_routes import router as agent_policies_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_policies_routes import router as agent_policies_router  # noqa: E402
+app.include_router(agent_policies_router)
+
+try:
+    from agent_chat import router as agent_chat_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_chat import router as agent_chat_router  # noqa: E402
+app.include_router(agent_chat_router)

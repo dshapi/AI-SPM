@@ -238,6 +238,11 @@ async def create_agent(
         id=agent_id, name=name, version=version, agent_type=agent_type,
         provider="internal", owner=owner, description=description,
         code_path=host_code_path, code_sha256=sha,
+        # Phase 4 — also store the raw text in the DB so the platform
+        # owns the source of truth. spawn_agent_container rewrites the
+        # bind-mount source from this on every spawn, so manual host
+        # cleanup of DataVolums/agents/<id>/agent.py is now safe.
+        code_blob=raw,
         mcp_token=mcp_t, llm_api_key=llm_t,
         tenant_id=tenant_id, runtime_state="stopped",
     )

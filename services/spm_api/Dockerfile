@@ -19,4 +19,7 @@ COPY services/spm_api/connector_probes.py .
 COPY services/spm_api/agent_routes.py .
 COPY services/spm_api/agent_controller.py .
 COPY services/spm_api/agent_validator.py .
+# Phase 4 — chat pipeline + policy attachment.
+COPY services/spm_api/agent_policies_routes.py .
+COPY services/spm_api/agent_chat.py .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8092"]

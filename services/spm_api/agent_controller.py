@@ -187,11 +187,48 @@ def _resolve_host_code_path(code_path: str) -> str:
     return f"{host_dir}/{code_path.lstrip('/')}"
 
 
+def _ensure_code_on_disk(host_path: str, code_blob: Optional[str]) -> None:
+    """Phase 4 self-heal: rewrite the agent.py bind-mount source from
+    the DB blob if the host file is missing.
+
+    This is called right before ``client.containers.run()`` so the
+    docker daemon's bind-mount can resolve the path. Without this an
+    operator who cleaned up ``DataVolums/agents/`` (or anyone /
+    anything that touched the host directory) would be left with a
+    permanently broken agent — which is exactly the surprise that
+    motivated the Phase 4 ``code_blob`` column.
+
+    The path inside spm-api's container view is computed from
+    ``host_path`` by undoing the AGENT_CODE_HOST_DIR translation. If
+    ``code_blob`` is empty (legacy Phase 1-3 row), no-op — the
+    operator must re-upload to recover.
+    """
+    if not code_blob:
+        return  # legacy row; nothing to restore from
+    container_dir = os.environ.get("AGENT_CODE_CONTAINER_DIR",
+                                     "/app/DataVolums/agents")
+    host_dir = os.environ.get("AGENT_CODE_HOST_DIR", "")
+    if host_dir and host_path.startswith(host_dir):
+        rel = host_path[len(host_dir):].lstrip("/")
+        container_path = os.path.join(container_dir, rel)
+    else:
+        # Best-effort: try the host path directly (bind-mount may share it).
+        container_path = host_path
+    if os.path.isfile(container_path):
+        return                                                  # already there
+    log.info("ensure_code_on_disk: regenerating %s from DB blob",
+             container_path)
+    os.makedirs(os.path.dirname(container_path), exist_ok=True)
+    with open(container_path, "w", encoding="utf-8") as f:
+        f.write(code_blob)
+
+
 async def spawn_agent_container(*, agent_id: str, tenant_id: str,
                                  code_path: str,
                                  mcp_token: str, llm_api_key: str,
                                  mem_mb: int = 512,
                                  cpu_quota: float = 0.5,
+                                 code_blob: Optional[str] = None,
                                  ) -> str:
     """Spawn an ``aispm-agent-runtime`` container for the given agent.
 
@@ -224,6 +261,11 @@ async def spawn_agent_container(*, agent_id: str, tenant_id: str,
     host_path = _resolve_host_code_path(code_path)
     log.info("spawn_agent_container: agent=%s code_path=%s host_path=%s",
              agent_id, code_path, host_path)
+
+    # Self-heal: if the host volume's agent.py is missing (operator
+    # ran rm by mistake, fresh dev box, retired agent re-attempted,
+    # etc.), rewrite it from the DB blob before docker bind-mounts it.
+    _ensure_code_on_disk(host_path, code_blob)
 
     # Idempotency — if a previous container with the same name still
     # exists (crashed, exited, or even still running), Docker would
@@ -343,6 +385,9 @@ async def deploy_agent(db, agent_id) -> None:
         code_path=a.code_path,
         mcp_token=a.mcp_token, llm_api_key=a.llm_api_key,
         mem_mb=512, cpu_quota=0.5,
+        # Phase 4 self-heal — pass the DB-stored source so spawn can
+        # regenerate the bind-mount source if the host file is gone.
+        code_blob=getattr(a, "code_blob", None),
     )
 
     # Phase 2: poll for the SDK's /ready handshake. The endpoint
@@ -415,6 +460,7 @@ async def start_agent(db, agent_id) -> None:
         agent_id=str(a.id), tenant_id=a.tenant_id,
         code_path=a.code_path,
         mcp_token=a.mcp_token, llm_api_key=a.llm_api_key,
+        code_blob=getattr(a, "code_blob", None),
     )
     a.runtime_state = "starting"
     await _db_commit(db)

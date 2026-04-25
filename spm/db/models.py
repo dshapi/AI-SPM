@@ -417,6 +417,14 @@ class Agent(Base):
     runtime_state= Column(Enum(RuntimeState, name="runtime_state"), nullable=False, default=RuntimeState.stopped)
     code_path    = Column(Text, nullable=False)
     code_sha256  = Column(Text, nullable=False)
+    # Phase 4 — full text of the customer's agent.py at registration
+    # time. Source-of-truth for the runtime: spawn_agent_container
+    # rewrites code_path from this on every spawn so the platform
+    # self-heals if the host volume gets cleaned up. Legacy rows
+    # (Phase 1-3 registrations) have NULL here and fall back to
+    # reading code_path; once those are re-uploaded the blob takes
+    # over.
+    code_blob    = Column(Text, nullable=True)
     mcp_token    = Column(Text, nullable=False)        # encrypted at rest (V2)
     llm_api_key  = Column(Text, nullable=False)        # encrypted at rest (V2)
     last_seen_at = Column(DateTime(timezone=True))
@@ -430,6 +438,8 @@ class Agent(Base):
     )
 
     sessions = relationship("AgentChatSession", back_populates="agent",
+                           cascade="all, delete-orphan")
+    policies = relationship("AgentPolicy", back_populates="agent",
                            cascade="all, delete-orphan")
 
 
@@ -476,3 +486,32 @@ class AgentChatMessage(Base):
     trace_id   = Column(Text, index=True)
 
     session    = relationship("AgentChatSession", back_populates="messages")
+
+
+class AgentPolicy(Base):
+    """
+    Join table: which CPM policies are attached to which agent.
+
+    ``policy_id`` is plain Text — not an FK — because the source-of-
+    truth policy registry lives in the CPM orchestrator, not spm-db.
+    The UI fetches policy metadata (name, coverage, status) from
+    ``GET /api/v1/policies`` and matches by ID. Phase 4's chat
+    pipeline reads this set when building the policy-decider input.
+
+    Cascade on agent delete is enforced by the FK below. Deleting a
+    policy in CPM does NOT cascade here — that's a manual cleanup the
+    operator runs if needed. The chat pipeline tolerates dangling
+    policy_ids by simply not finding them in the /api/v1/policies
+    response (no crash).
+    """
+    __tablename__ = "agent_policies"
+
+    agent_id    = Column(UUID(as_uuid=True),
+                         ForeignKey("agents.id", ondelete="CASCADE"),
+                         primary_key=True)
+    policy_id   = Column(Text, primary_key=True)
+    attached_at = Column(DateTime(timezone=True),
+                         server_default=func.now(), nullable=False)
+    attached_by = Column(Text)
+
+    agent = relationship("Agent", back_populates="policies")

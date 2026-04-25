@@ -218,6 +218,48 @@ export function createAgentWithFile({
 }
 
 
+// ── Phase 4 — policy attachment ────────────────────────────────────────────
+//
+// Read + atomic-replace surface the UI's PolicySelector component
+// uses. The fine-grained POST/DELETE endpoints exist on the backend
+// but the UI calls PUT for every change for atomicity (the user
+// "saves" their selection by toggling a chip; we PUT the full list).
+
+export async function listAgentPolicies(agentId) {
+  if (!agentId) throw new Error('listAgentPolicies: agentId required')
+  const res = await fetch(
+    `${SPM_BASE}/agents/${encodeURIComponent(agentId)}/policies`,
+    { headers: await _authHeaders() },
+  )
+  const body = await res.json().catch(() => [])
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+
+
+/**
+ * Replace the agent's full policy set in one call.
+ * @param {string}   agentId
+ * @param {string[]} policyIds  — final list (empty array clears).
+ * @returns {Promise<Array>}    — the new full set.
+ */
+export async function setAgentPolicies(agentId, policyIds) {
+  if (!agentId) throw new Error('setAgentPolicies: agentId required')
+  const res = await fetch(
+    `${SPM_BASE}/agents/${encodeURIComponent(agentId)}/policies`,
+    {
+      method:  'PUT',
+      headers: { 'Content-Type': 'application/json',
+                  ...await _authHeaders() },
+      body:    JSON.stringify({ policy_ids: policyIds || [] }),
+    },
+  )
+  const body = await res.json().catch(() => [])
+  if (!res.ok) throw _errFrom(res, body)
+  return Array.isArray(body) ? body : []
+}
+
+
 // ── Internal — exported only for tests ─────────────────────────────────────
 
 function _resetTokenCache() {
