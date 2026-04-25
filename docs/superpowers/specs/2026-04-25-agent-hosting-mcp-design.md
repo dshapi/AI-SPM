@@ -109,7 +109,7 @@ No direct internet, no DB, no other services.
 | `risk` | enum | `low` / `medium` / `high` / `critical` (derived later) |
 | `policy_status` | enum | reuses existing: `covered` / `partial` / `none` |
 | `runtime_state` | enum | `stopped` / `starting` / `running` / `crashed` |
-| `code_path` | text | `./DataVolums/agents/{id}/agent.py` |
+| `code_path` | text | `./DataVolums/agents/{id}/agent.py` (note: `DataVolums` is the actual repo directory name — kept as-is to match existing layout, not a typo introduced by this spec) |
 | `code_sha256` | text | tamper detection |
 | `mcp_token` | text | bearer for spm-mcp; encrypted at rest |
 | `llm_api_key` | text | bearer for spm-llm-proxy; encrypted at rest |
@@ -198,6 +198,65 @@ ConnectorType key: `agent-host`. Schema (in `connector_registry.py`):
 
 **Test Connection probe** — verifies (1) spm-mcp HTTP health, (2) referenced LLM integration's Test Connection passes, (3) referenced Tavily integration's Test Connection passes.
 
+### `connector_registry.py` entry (concrete)
+
+The "Internal endpoint" and "Health status" rows are display-only metadata, not user-editable fields, so they don't appear in the registry — the detail page composes them from container state. The actual `CONNECTOR_TYPES["agent-host"]` entry is:
+
+```python
+"agent-host": ConnectorType(
+    key="agent-host",
+    label="AI-SPM Agent Host (MCP)",
+    category="AI Providers",
+    vendor="AI-SPM",
+    icon_hint="bot",
+    description=(
+        "Hosts customer-uploaded AI agents in sandboxed containers. "
+        "Provides MCP tools (web_fetch) and an OpenAI-compatible LLM proxy. "
+        "Configure the default LLM and Tavily integration here."
+    ),
+    fields=[
+        # Defaults
+        FieldSpec(key="default_llm_integration_id", label="Default LLM",
+                  type="enum_integration", required=True,
+                  group="Defaults",
+                  hint="Active AI Provider integration that backs spm-llm-proxy.",
+                  options_provider="ai_provider_integrations"),
+        FieldSpec(key="tavily_integration_id", label="Tavily Integration",
+                  type="enum_integration", required=True,
+                  group="Defaults",
+                  options_provider="tavily_integrations"),
+        FieldSpec(key="default_model_name", label="Default model name",
+                  type="string", default="llama3.1:8b", group="Defaults"),
+        # Resource limits
+        FieldSpec(key="default_memory_mb", label="Memory per agent (MB)",
+                  type="integer", default=512, group="Resources"),
+        FieldSpec(key="default_cpu_quota", label="CPU quota",
+                  type="float", default=0.5, group="Resources"),
+        FieldSpec(key="tool_call_timeout_s", label="Tool call timeout (s)",
+                  type="integer", default=30, group="Resources"),
+        FieldSpec(key="max_concurrent_agents", label="Max concurrent agents",
+                  type="integer", default=50, group="Resources"),
+        FieldSpec(key="max_sessions_per_agent", label="Max chat sessions per agent",
+                  type="integer", default=100, group="Resources"),
+        # Tool behaviour
+        FieldSpec(key="tavily_max_results", label="Tavily max results",
+                  type="integer", default=5, group="Tool behaviour"),
+        FieldSpec(key="tavily_max_chars", label="Tavily max chars per result",
+                  type="integer", default=4000, group="Tool behaviour"),
+        # Audit
+        FieldSpec(key="log_llm_prompts", label="Log LLM prompts",
+                  type="boolean", default=True, group="Audit"),
+        FieldSpec(key="audit_topic_suffix", label="Audit topic suffix",
+                  type="string", default="audit_events", group="Audit"),
+    ],
+    probe=connector_probes.probe_agent_host,
+),
+```
+
+Two notes:
+- `enum_integration` is a new `FieldSpec.type` — renders as a dropdown of currently-active integrations matching the `options_provider` filter (`ai_provider_integrations` returns Anthropic, OpenAI, Bedrock, Vertex, Ollama; `tavily_integrations` returns just Tavily). Implemented in `SchemaForm.jsx` by hitting a new `GET /api/spm/integrations?category=...` endpoint. This is reusable beyond agent-host — any integration that references another integration.
+- `probe_agent_host` is a new function in `connector_probes.py` that runs the three checks above.
+
 ## 6. Agent detail panel
 
 Opens from a single-click on a row in the Agents tab, or from the Configure menu item in the right-click context menu.
@@ -268,18 +327,20 @@ Two topics per agent, named via the existing `platform_shared/topics.py` pattern
 
 | Topic | Producer | Consumer | Key |
 |---|---|---|---|
-| `aispm.agent.{id}.chat.in` | spm-api (after prompt-guard / policy-decider) | the agent's container | `session_id` |
-| `aispm.agent.{id}.chat.out` | the agent's container | spm-api (then output-guard, then SSE to UI) | `session_id` |
+| `cpm.{tenant_id}.agents.{agent_id}.chat.in` | spm-api (after prompt-guard / policy-decider) | the agent's container | `session_id` |
+| `cpm.{tenant_id}.agents.{agent_id}.chat.out` | the agent's container | spm-api (then output-guard, then SSE to UI) | `session_id` |
 
-Partition-by-session_id preserves per-conversation ordering. Topics created on agent deploy, deleted on agent retire. With `max_concurrent_agents=50`, the topic count stays ≤100.
+Names follow the existing `cpm.{tenant_id}.*` per-tenant pattern from `platform_shared/topics.py` (`topics_for_tenant`). For V1's single tenant the values resolve to e.g. `cpm.t1.agents.ag-001.chat.in`; multi-tenant V2 needs no naming change. Add a new helper `agent_topics_for(tenant_id, agent_id)` in `topics.py` so consumers don't hand-build the strings.
+
+Partition-by-session_id preserves per-conversation ordering. Topics created on agent deploy, deleted on agent retire. With `max_concurrent_agents=50`, the topic count stays ≤100 per tenant.
 
 **End-to-end flow for one user message:**
 
 1. UI POSTs to `/api/spm/agents/{id}/chat`, opens SSE.
 2. spm-api → prompt-guard → policy-decider.
-3. spm-api produces to `aispm.agent.{id}.chat.in` (key=session_id).
+3. spm-api produces to `cpm.{tenant_id}.agents.{agent_id}.chat.in` (key=session_id).
 4. Agent consumes, processes (may call `web_fetch` via HTTP MCP, may call LLM via `spm-llm-proxy`). Tool calls and LLM calls go through tool-parser / policy-decider on the way out.
-5. Agent produces reply to `aispm.agent.{id}.chat.out`.
+5. Agent produces reply to `cpm.{tenant_id}.agents.{agent_id}.chat.out`.
 6. spm-api consumes, runs output-guard, streams SSE chunks to UI.
 
 **Tool calls remain HTTP** — the agent calls spm-mcp directly. spm-mcp publishes a `ToolCallEvent` to the existing audit topic so tool calls are still in the lineage pipeline. Putting tool calls through Kafka adds latency for no benefit.
@@ -287,6 +348,76 @@ Partition-by-session_id preserves per-conversation ordering. Topics created on a
 ## 8. Agent SDK contract — the `aispm` module
 
 Pre-installed in `agent-runtime-base`. Customer imports and codes against it.
+
+### Package layout
+
+```
+agent_runtime/
+├── Dockerfile                  # Python 3.12-slim + the aispm package
+└── aispm/
+    ├── __init__.py             # public re-exports + connection-info constants
+    ├── chat.py                 # Kafka in/out wrappers
+    ├── mcp.py                  # HTTP MCP client
+    ├── llm.py                  # OpenAI-compat HTTP client (convenience)
+    ├── secrets.py              # `get_secret()` — read from /api/spm/agents/{id}/secrets
+    ├── lifecycle.py            # `ready()`, signal handling, graceful shutdown
+    ├── log.py                  # `log()` — structured to lineage
+    └── types.py                # ChatMessage, Completion, ToolResult dataclasses
+```
+
+`aispm/__init__.py` re-exports the public API so customers write `aispm.chat.subscribe()` not `aispm.chat.chat.subscribe()`. Connection info (`AGENT_ID`, `LLM_BASE_URL`, etc.) is module-level — populated at import time from env vars the controller injects at container start (these env vars are infrastructure-injected, NOT customer secrets — the no-env-vars rule from §6 applies to customer config, not to platform-injected wiring).
+
+### Public API — concrete signatures
+
+```python
+# aispm/types.py
+@dataclass
+class ChatMessage:
+    id: str            # message UUID
+    session_id: str    # session UUID, partition key
+    user_id: str
+    text: str
+    ts: datetime
+
+@dataclass
+class HistoryEntry:
+    role: Literal["user", "agent"]
+    text: str
+    ts: datetime
+
+@dataclass
+class Completion:
+    text: str
+    model: str
+    usage: dict        # {"prompt_tokens": int, "completion_tokens": int}
+
+# aispm/chat.py
+async def subscribe() -> AsyncIterator[ChatMessage]: ...
+async def reply(session_id: str, text: str) -> None: ...
+async def stream(session_id: str) -> AsyncContextManager[StreamWriter]: ...    # V1.5
+async def history(session_id: str, limit: int = 10) -> list[HistoryEntry]: ...
+
+# aispm/mcp.py
+async def call(tool: str, **kwargs) -> dict: ...
+# V1: only tool="web_fetch" with {query: str, max_results: int = 5}
+
+# aispm/llm.py
+async def complete(messages: list[dict], *, model: str | None = None,
+                   max_tokens: int = 2048, temperature: float = 0.7) -> Completion: ...
+
+# aispm/secrets.py
+async def get_secret(name: str) -> str: ...
+
+# aispm/lifecycle.py
+async def ready() -> None: ...     # signals controller; sets runtime_state=running
+
+# aispm/log.py
+def log(message: str, *, trace: str | None = None, **fields) -> None: ...
+```
+
+The full type signatures matter because the V1 quickstart docs will reference them and customer IDEs need them for autocomplete.
+
+
 
 ```python
 # Connection info — injected at container start; no secrets in code
@@ -400,14 +531,23 @@ Will be in the docs.
    Form fields: Name, Version, Owner, Description, Asset type=Agent,
                 Agent type, Upload agent.py, Deploy after registration ☑
    Submit → POST /api/spm/agents
-     - Validates agent.py syntactically (lint + basic import check)
+     - Validates agent.py — three checks, all blocking:
+       (a) `ast.parse()` — must be syntactically valid Python 3.12
+       (b) Top-level `async def main()` must exist (parsed from AST)
+       (c) Dry-import inside an ephemeral agent-runtime-base container
+           (`python -c "import importlib.util; spec=...; spec.loader.exec_module(...)"`):
+           catches missing imports / NameError at module top-level.
+       Failures return 422 with the offending line + reason; warnings (e.g.
+       `import langchain_extensions` not in base image) are returned as
+       warnings but do NOT block — customer can add via Tab 2 → Custom env
+       vars or by waiting for V2's "extra packages" feature.
      - Inserts row in `agents` (runtime_state=stopped)
      - Mints mcp_token + llm_api_key
      - Optionally triggers deploy
 
 2. DEPLOY
    spm-api orchestrator:
-     a. Creates Kafka topics aispm.agent.{id}.chat.in/.out
+     a. Creates Kafka topics cpm.{tenant_id}.agents.{agent_id}.chat.in/.out
      b. Spawns container from agent-runtime-base with the agent's code
         bind-mounted, env populated from DB
      c. Container runs main(); SDK connects to Kafka + MCP
