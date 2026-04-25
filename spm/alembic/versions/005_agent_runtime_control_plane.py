@@ -1,4 +1,4 @@
-"""agent hosting tables
+"""agent runtime control plane tables
 
 Revision ID: 005
 Revises: 004

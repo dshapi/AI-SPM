@@ -1,4 +1,4 @@
-# Agent Hosting + MCP Server — Design Spec
+# Agent Runtime Control Plane + MCP Server — Design Spec
 
 **Status:** draft for review
 **Date:** 2026-04-25
@@ -142,7 +142,7 @@ Backs the chat history helper (`aispm.chat.history()`) and the Sessions tab.
 
 ### Existing tables touched
 
-- **`integrations`** — Alembic seeds one `agent-host` integration row pointing at `spm-mcp`. Configure tab fields (Section 5) are stored in `integrations.config` (non-secret) and `integration_credentials` (secret, but V1 has no secrets).
+- **`integrations`** — Alembic seeds one `agent-runtime` integration row pointing at `spm-mcp`. Configure tab fields (Section 5) are stored in `integrations.config` (non-secret) and `integration_credentials` (secret, but V1 has no secrets).
 - **`audit_events` / Kafka audit topic** — new event types: `AgentDeployed`, `AgentStarted`, `AgentStopped`, `AgentChatMessage`, `AgentToolCall`, `AgentLLMCall`. Published via existing `platform_shared/lineage_events.py`.
 
 ### No changes to `model_registry`
@@ -153,7 +153,7 @@ Agents have a distinct lifecycle (running container, code file, runtime state) a
 
 The spm-mcp server appears in Integrations under category **"AI Providers"** with the standard Configure / Test Connection / Recent Activity tabs (`SchemaForm` component handles the form rendering).
 
-ConnectorType key: `agent-host`. Schema (in `connector_registry.py`):
+ConnectorType key: `agent-runtime`. Schema (in `connector_registry.py`):
 
 **Connection group**
 
@@ -200,12 +200,12 @@ ConnectorType key: `agent-host`. Schema (in `connector_registry.py`):
 
 ### `connector_registry.py` entry (concrete)
 
-The "Internal endpoint" and "Health status" rows are display-only metadata, not user-editable fields, so they don't appear in the registry — the detail page composes them from container state. The actual `CONNECTOR_TYPES["agent-host"]` entry is:
+The "Internal endpoint" and "Health status" rows are display-only metadata, not user-editable fields, so they don't appear in the registry — the detail page composes them from container state. The actual `CONNECTOR_TYPES["agent-runtime"]` entry is:
 
 ```python
-"agent-host": ConnectorType(
-    key="agent-host",
-    label="AI-SPM Agent Host (MCP)",
+"agent-runtime": ConnectorType(
+    key="agent-runtime",
+    label="AI-SPM Agent Runtime Control Plane (MCP)",
     category="AI Providers",
     vendor="AI-SPM",
     icon_hint="bot",
@@ -249,13 +249,13 @@ The "Internal endpoint" and "Health status" rows are display-only metadata, not 
         FieldSpec(key="audit_topic_suffix", label="Audit topic suffix",
                   type="string", default="audit_events", group="Audit"),
     ],
-    probe=connector_probes.probe_agent_host,
+    probe=connector_probes.probe_agent_runtime,
 ),
 ```
 
 Two notes:
-- `enum_integration` is a new `FieldSpec.type` — renders as a dropdown of currently-active integrations matching the `options_provider` filter (`ai_provider_integrations` returns Anthropic, OpenAI, Bedrock, Vertex, Ollama; `tavily_integrations` returns just Tavily). Implemented in `SchemaForm.jsx` by hitting a new `GET /api/spm/integrations?category=...` endpoint. This is reusable beyond agent-host — any integration that references another integration.
-- `probe_agent_host` is a new function in `connector_probes.py` that runs the three checks above.
+- `enum_integration` is a new `FieldSpec.type` — renders as a dropdown of currently-active integrations matching the `options_provider` filter (`ai_provider_integrations` returns Anthropic, OpenAI, Bedrock, Vertex, Ollama; `tavily_integrations` returns just Tavily). Implemented in `SchemaForm.jsx` by hitting a new `GET /api/spm/integrations?category=...` endpoint. This is reusable beyond agent-runtime — any integration that references another integration.
+- `probe_agent_runtime` is a new function in `connector_probes.py` that runs the three checks above.
 
 ## 6. Agent detail panel
 
@@ -574,7 +574,7 @@ Will be in the docs.
 - `services/spm_llm_proxy/` — minimal OpenAI-compat HTTP shim
 - `services/spm_api/agent_routes.py` — `POST /agents`, `GET /agents/{id}`, `POST /agents/{id}/start|stop`, `POST /agents/{id}/chat`
 - `services/spm_api/agent_controller.py` — docker spawn/stop, Kafka topic CRUD
-- `connector_registry.py` — `agent-host` connector type schema
+- `connector_registry.py` — `agent-runtime` connector type schema
 - Pytest: target ≥80% coverage on new modules
 
 **Phase 2 — agent runtime SDK (3-4 days)**
@@ -598,7 +598,7 @@ Will be in the docs.
 **Phase 5 — docs + polish (2 days)**
 - "How to deploy your first agent" guide
 - LangChain quickstart with the example from §8
-- Operator runbook for the agent-host integration
+- Operator runbook for the agent-runtime integration
 - README updates
 
 **Total ~3 weeks, parallelizable across two devs after Phase 1 lands.**

@@ -368,7 +368,7 @@ class IntegrationLog(Base):
     integration = relationship("Integration", back_populates="logs")
 
 
-# ─── Agent Hosting models ───────────────────────────────────────────────────────
+# ─── Agent Runtime Control Plane models ───────────────────────────────────────────────────────
 # Support for customer-uploaded AI agents running in sandboxed containers.
 
 

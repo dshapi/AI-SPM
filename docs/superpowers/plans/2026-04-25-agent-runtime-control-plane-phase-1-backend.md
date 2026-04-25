@@ -1,14 +1,14 @@
-# Agent Hosting — Phase 1: Backend Foundation Implementation Plan
+# Agent Runtime Control Plane — Phase 1: Backend Foundation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Stand up the backend services and database for hosting customer-uploaded AI agents — `agents`/`chat_sessions`/`chat_messages` tables, the `spm-mcp` MCP server (web_fetch tool only), the `spm-llm-proxy` OpenAI-compat shim, the `agent-host` connector registry entry, and the `/api/spm/agents/*` endpoints with a docker+kafka orchestrator.
+**Goal:** Stand up the backend services and database for hosting customer-uploaded AI agents — `agents`/`chat_sessions`/`chat_messages` tables, the `spm-mcp` MCP server (web_fetch tool only), the `spm-llm-proxy` OpenAI-compat shim, the `agent-runtime` connector registry entry, and the `/api/spm/agents/*` endpoints with a docker+kafka orchestrator.
 
-**Architecture:** Three new services in docker-compose (`spm-mcp`, `spm-llm-proxy`, plus N customer agent containers spawned on demand), one new module in `spm-api` (`agent_controller.py`), one new connector type (`agent-host`) in the existing registry, two new helper functions in `platform_shared/`. Per-agent Kafka topics named `cpm.{tenant_id}.agents.{agent_id}.chat.in/.out`. All credentials stored encrypted in `integration_credentials`; agents read them via the existing `get_credential()` helper.
+**Architecture:** Three new services in docker-compose (`spm-mcp`, `spm-llm-proxy`, plus N customer agent containers spawned on demand), one new module in `spm-api` (`agent_controller.py`), one new connector type (`agent-runtime`) in the existing registry, two new helper functions in `platform_shared/`. Per-agent Kafka topics named `cpm.{tenant_id}.agents.{agent_id}.chat.in/.out`. All credentials stored encrypted in `integration_credentials`; agents read them via the existing `get_credential()` helper.
 
 **Tech Stack:** Python 3.12, FastAPI, FastMCP, SQLAlchemy 2 + Alembic, Pydantic v2, kafka-python-ng, Docker SDK for Python, pytest, httpx for tests.
 
-**Reference spec:** `docs/superpowers/specs/2026-04-25-agent-hosting-mcp-design.md`
+**Reference spec:** `docs/superpowers/specs/2026-04-25-agent-runtime-control-plane-mcp-design.md`
 
 ---
 
@@ -17,7 +17,7 @@
 ### New files
 
 ```
-spm/alembic/versions/005_agent_hosting.py             # migration
+spm/alembic/versions/005_agent_runtime_control_plane.py             # migration
 
 services/spm_mcp/
   Dockerfile
@@ -45,7 +45,7 @@ services/spm_api/agent_validator.py                    # agent.py 3-step validat
 services/spm_api/tests/test_agent_routes.py
 services/spm_api/tests/test_agent_controller.py
 services/spm_api/tests/test_agent_validator.py
-services/spm_api/tests/test_connector_registry_agent_host.py
+services/spm_api/tests/test_connector_registry_agent_runtime.py
 ```
 
 ### Modified files
@@ -53,8 +53,8 @@ services/spm_api/tests/test_connector_registry_agent_host.py
 ```
 spm/db/models.py                                       # add Agent, AgentChatSession, AgentChatMessage ORM
 services/spm_api/app.py                                # mount agent_routes router
-services/spm_api/connector_registry.py                 # add agent-host entry; enum_integration FieldSpec type
-services/spm_api/connector_probes.py                   # add probe_agent_host
+services/spm_api/connector_registry.py                 # add agent-runtime entry; enum_integration FieldSpec type
+services/spm_api/connector_probes.py                   # add probe_agent_runtime
 services/spm_api/integrations_routes.py                # add ?category= query param to GET /integrations
 platform_shared/topics.py                              # add agent_topics_for(tenant_id, agent_id)
 platform_shared/lineage_events.py                      # add AgentDeployed, AgentStarted, AgentStopped event types
@@ -205,10 +205,10 @@ git commit -m "feat(spm-db): add Agent / AgentChatSession / AgentChatMessage ORM
 
 ---
 
-## Task 2: Alembic 005 — agent hosting migration
+## Task 2: Alembic 005 — agent runtime control plane migration
 
 **Files:**
-- Create: `spm/alembic/versions/005_agent_hosting.py`
+- Create: `spm/alembic/versions/005_agent_runtime_control_plane.py`
 - Modify: existing latest migration's `down_revision` chain — Alembic auto-resolves; verify with `alembic history` after.
 
 - [ ] **Step 1: Find the current latest revision**
@@ -223,8 +223,8 @@ Note the highest-numbered file (likely `004_integrations_connector_type.py`). Th
 - [ ] **Step 2: Create the migration file**
 
 ```python
-# spm/alembic/versions/005_agent_hosting.py
-"""agent hosting tables
+# spm/alembic/versions/005_agent_runtime_control_plane.py
+"""agent runtime control plane tables
 
 Revision ID: 005
 Revises: 004
@@ -350,7 +350,7 @@ cd /Users/danyshapiro/PycharmProjects/AISPM/spm
 SPM_DB_URL="postgresql://spm_rw:spmpass@localhost:5432/spm" alembic upgrade head
 ```
 
-Expected output: `Running upgrade 004 -> 005, agent hosting tables`. No errors.
+Expected output: `Running upgrade 004 -> 005, agent runtime control plane tables`. No errors.
 
 - [ ] **Step 4: Verify by querying the seed data**
 
@@ -373,7 +373,7 @@ Expected: clean down + up. (Don't leave the DB in `downgrade` state — finish a
 - [ ] **Step 6: Commit**
 
 ```
-git add spm/alembic/versions/005_agent_hosting.py
+git add spm/alembic/versions/005_agent_runtime_control_plane.py
 git commit -m "feat(alembic): 005 add agents/sessions/messages tables, seed mock rows"
 ```
 
@@ -609,35 +609,35 @@ git commit -m "feat(connectors): enum_integration FieldSpec + ?category/?vendor 
 
 ---
 
-## Task 5: Connector registry — `agent-host` entry
+## Task 5: Connector registry — `agent-runtime` entry
 
 **Files:**
-- Modify: `services/spm_api/connector_registry.py` — add `agent-host` ConnectorType
-- Modify: `services/spm_api/connector_probes.py` — add `probe_agent_host`
-- Test: `services/spm_api/tests/test_connector_registry_agent_host.py` (new)
+- Modify: `services/spm_api/connector_registry.py` — add `agent-runtime` ConnectorType
+- Modify: `services/spm_api/connector_probes.py` — add `probe_agent_runtime`
+- Test: `services/spm_api/tests/test_connector_registry_agent_runtime.py` (new)
 
 - [ ] **Step 1: Write failing test**
 
 ```python
-# services/spm_api/tests/test_connector_registry_agent_host.py
+# services/spm_api/tests/test_connector_registry_agent_runtime.py
 from services.spm_api.connector_registry import CONNECTOR_TYPES, list_connector_types
 
-def test_agent_host_present():
-    assert "agent-host" in CONNECTOR_TYPES
-    ct = CONNECTOR_TYPES["agent-host"]
+def test_agent_runtime_present():
+    assert "agent-runtime" in CONNECTOR_TYPES
+    ct = CONNECTOR_TYPES["agent-runtime"]
     assert ct.category == "AI Providers"
     assert ct.vendor   == "AI-SPM"
 
-def test_agent_host_required_fields():
-    ct = CONNECTOR_TYPES["agent-host"]
+def test_agent_runtime_required_fields():
+    ct = CONNECTOR_TYPES["agent-runtime"]
     keys = {f.key for f in ct.fields}
     assert "default_llm_integration_id" in keys
     assert "tavily_integration_id"      in keys
     assert "default_memory_mb"          in keys
     assert "max_concurrent_agents"      in keys
 
-def test_agent_host_field_groups():
-    ct = CONNECTOR_TYPES["agent-host"]
+def test_agent_runtime_field_groups():
+    ct = CONNECTOR_TYPES["agent-runtime"]
     groups = {f.group for f in ct.fields if f.group}
     assert {"Defaults","Resources","Tool behaviour","Audit"} <= groups
 ```
@@ -649,9 +649,9 @@ def test_agent_host_field_groups():
 Append to `connector_registry.py` (use the exact field list from the spec § 5):
 
 ```python
-CONNECTOR_TYPES["agent-host"] = ConnectorType(
-    key="agent-host",
-    label="AI-SPM Agent Host (MCP)",
+CONNECTOR_TYPES["agent-runtime"] = ConnectorType(
+    key="agent-runtime",
+    label="AI-SPM Agent Runtime Control Plane (MCP)",
     category="AI Providers",
     vendor="AI-SPM",
     icon_hint="bot",
@@ -689,11 +689,11 @@ CONNECTOR_TYPES["agent-host"] = ConnectorType(
         FieldSpec(key="audit_topic_suffix", label="Audit topic suffix",
                   type="string", default="audit_events", group="Audit"),
     ],
-    probe=connector_probes.probe_agent_host,
+    probe=connector_probes.probe_agent_runtime,
 )
 ```
 
-- [ ] **Step 4: Add `probe_agent_host` to `connector_probes.py`**
+- [ ] **Step 4: Add `probe_agent_runtime` to `connector_probes.py`**
 
 First, **verify whether `probe_integration_by_id` exists** in `connector_registry.py`:
 
@@ -720,11 +720,11 @@ async def probe_integration_by_id(integration_id: str) -> tuple[bool, str, int |
         return await ct.probe(row.config or {}, creds)
 ```
 
-Then add `probe_agent_host` itself:
+Then add `probe_agent_runtime` itself:
 
 ```python
 # connector_probes.py
-async def probe_agent_host(config, credentials) -> tuple[bool, str, int | None]:
+async def probe_agent_runtime(config, credentials) -> tuple[bool, str, int | None]:
     """Verify (1) spm-mcp /health, (2) referenced LLM integration probe,
     (3) referenced Tavily integration probe — short-circuit on first failure."""
     import time, httpx
@@ -753,10 +753,10 @@ async def probe_agent_host(config, credentials) -> tuple[bool, str, int | None]:
 - [ ] **Step 5: Run tests, commit**
 
 ```
-pytest services/spm_api/tests/test_connector_registry_agent_host.py -v
+pytest services/spm_api/tests/test_connector_registry_agent_runtime.py -v
 git add services/spm_api/connector_registry.py services/spm_api/connector_probes.py \
-        services/spm_api/tests/test_connector_registry_agent_host.py
-git commit -m "feat(connectors): agent-host ConnectorType + probe"
+        services/spm_api/tests/test_connector_registry_agent_runtime.py
+git commit -m "feat(connectors): agent-runtime ConnectorType + probe"
 ```
 
 ---
@@ -926,8 +926,8 @@ import pytest
 from services.spm_llm_proxy.router import resolve_llm_integration
 
 @pytest.mark.asyncio
-async def test_resolve_uses_agent_host_default(mock_db):
-    """When agent-host integration has default_llm_integration_id=ollama-1,
+async def test_resolve_uses_agent_runtime_default(mock_db):
+    """When agent-runtime integration has default_llm_integration_id=ollama-1,
     resolve_llm_integration() returns that integration's config + creds."""
     cfg, creds = await resolve_llm_integration(tenant_id="t1")
     assert cfg["base_url"] == "http://host.docker.internal:11434"
@@ -942,7 +942,7 @@ async def test_resolve_uses_agent_host_default(mock_db):
 # services/spm_llm_proxy/router.py
 """Resolve which LLM integration backs the proxy at request time.
 
-Reads the agent-host integration row's config.default_llm_integration_id
+Reads the agent-runtime integration row's config.default_llm_integration_id
 field, then loads that integration's config + credentials via the existing
 get_credential() helper. Cached per-tenant for 60s; cache invalidated on
 write-through from /api/spm/integrations PATCH.
@@ -951,12 +951,12 @@ from platform_shared.integration_config import get_integration_by_key, get_integ
 from platform_shared.credentials import get_credential
 
 async def resolve_llm_integration(tenant_id: str) -> tuple[dict, dict]:
-    host = await get_integration_by_key("agent-host", tenant_id=tenant_id)
+    host = await get_integration_by_key("agent-runtime", tenant_id=tenant_id)
     if not host:
-        raise RuntimeError("agent-host integration not configured")
+        raise RuntimeError("agent-runtime integration not configured")
     target_id = host.config.get("default_llm_integration_id")
     if not target_id:
-        raise RuntimeError("default_llm_integration_id not set on agent-host")
+        raise RuntimeError("default_llm_integration_id not set on agent-runtime")
     target = await get_integration_by_id(target_id)
     creds = {}
     for ct in target.required_credentials:
@@ -1234,10 +1234,10 @@ from .tools.web_fetch import web_fetch as _web_fetch
 @mcp.tool()
 async def web_fetch(query: str, max_results: int = 5) -> dict:
     """Search the web via Tavily."""
-    # Per-call: resolve tavily key from agent-host integration's tavily_integration_id
+    # Per-call: resolve tavily key from agent-runtime integration's tavily_integration_id
     from platform_shared.integration_config import get_integration_by_key, get_integration_by_id
     from platform_shared.credentials import get_credential
-    host = await get_integration_by_key("agent-host", tenant_id="t1")  # single-tenant V1
+    host = await get_integration_by_key("agent-runtime", tenant_id="t1")  # single-tenant V1
     tavily_id = host.config["tavily_integration_id"]
     api_key = await get_credential(tavily_id, "api_key")
     max_chars = host.config.get("tavily_max_chars", 4000)
@@ -2196,7 +2196,7 @@ Cover these sections (50-80 lines total):
 2. **Upload an agent** — curl example using `/api/dev-token` then `POST /api/spm/agents` multipart with a hello-world agent.py.
 3. **List / inspect / delete** — curl examples for `GET /agents`, `GET /agents/{id}`, `DELETE /agents/{id}`.
 4. **Start / stop / restart** — curl examples for the lifecycle endpoints + how to read `runtime_state`.
-5. **Configure the host** — point to Integrations → AI Providers → "AI-SPM Agent Host (MCP)"; show how to switch the default LLM dropdown.
+5. **Configure the control plane** — point to Integrations → AI Providers → "AI-SPM Agent Runtime Control Plane (MCP)"; show how to switch the default LLM dropdown.
 6. **Logs and debugging** — `docker logs cpm-spm-mcp`, `docker logs agent-{id}`, `docker logs cpm-spm-llm-proxy`.
 7. **Phase 1 limitations** — call out: stub agent runtime (real SDK in Phase 2), no UI changes (Phase 3), no chat pipeline integration (Phase 4). Link the spec's V1 non-goals section.
 
@@ -2204,7 +2204,7 @@ Cover these sections (50-80 lines total):
 
 ```
 git add docs/agents/operator-quickstart.md README.md
-git commit -m "docs: phase-1 operator quickstart for agent hosting"
+git commit -m "docs: phase-1 operator quickstart for agent runtime control plane"
 ```
 
 ---
