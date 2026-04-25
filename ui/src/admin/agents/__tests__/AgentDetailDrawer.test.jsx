@@ -25,6 +25,9 @@ const AGENT = {
   runtime_state:  "running",
   code_path:      "/agents/x/agent.py",
   code_sha256:    "deadbeef",
+  // Live-marker so OverviewTab renders Open Chat + run/stop toggle.
+  // Mock seed rows omit this and intentionally hide those controls.
+  _live:          true,
 }
 
 

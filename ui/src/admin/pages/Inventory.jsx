@@ -21,6 +21,7 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
 import AgentDetailDrawer from '../agents/AgentDetailDrawer.jsx'
 import AgentChatPanel    from '../agents/AgentChatPanel.jsx'
+import RegisterAgentPanel from '../agents/RegisterAgentPanel.jsx'
 
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
@@ -1284,7 +1285,11 @@ export default function Inventory() {
     return true
   })
 
-  const canRegister = activeTab === 'models'
+  // Phase 3 — Register Asset is now available on the agents tab too
+  // (agents go through their own RegisterAgentPanel). The button gates
+  // a separate panel per asset kind so the model + agent flows don't
+  // bleed into each other.
+  const canRegister = activeTab === 'models' || activeTab === 'agents'
 
   return (
     <PageContainer>
@@ -1299,7 +1304,11 @@ export default function Inventory() {
               size="sm"
               onClick={() => canRegister && setShowRegister(v => !v)}
               disabled={!canRegister}
-              title={canRegister ? 'Register a new model' : 'Register Asset is only available on the Models tab'}
+              title={
+                canRegister
+                  ? (activeTab === 'agents' ? 'Register a new agent (upload agent.py)' : 'Register a new model')
+                  : 'Register Asset is only available on the Models and Agents tabs'
+              }
             >
               + Register Asset
             </Button>
@@ -1337,12 +1346,18 @@ export default function Inventory() {
                   assets={filtered}
                   selectedId={selected?.id}
                   onSelect={(asset) => {
-                    // Phase 3 — live agents click straight into the new
-                    // detail drawer instead of the inline PreviewPanel.
-                    // Mocks fall through to the existing route-based
-                    // selection so the rest of the UI doesn't change.
-                    if (asset && asset.kind === 'agent' && asset._live) {
-                      setDetailAgent(asset)
+                    // Phase 3 — any agent row opens the new detail
+                    // drawer (Overview / Configure / Activity / Sessions
+                    // / Lineage tabs + Open Chat button). Mocks open
+                    // the same UI so the operator can preview the
+                    // layout even before registering a real agent;
+                    // lifecycle actions on mocks fail with a 404 from
+                    // the backend, which surfaces inline on the
+                    // run/stop toggle so it's a no-op rather than a
+                    // confusing silent miss.
+                    if (asset && asset.kind === 'agent') {
+                      // Toggle: clicking the same agent row again closes the drawer.
+                      setDetailAgent((cur) => cur && cur.id === asset.id ? null : asset)
                       return
                     }
                     if (asset?.id === assetId) {
@@ -1356,19 +1371,33 @@ export default function Inventory() {
             }
           </div>
 
-          {/* Register panel takes precedence over preview when open */}
-          {showRegister && canRegister
-            ? <RegisterAssetPanel
+          {/* Register panel takes precedence over preview when open.
+              Phase 3 splits this by tab: agents have their own panel
+              (RegisterAgentPanel) so the model-registration flow
+              stays uncluttered. */}
+          {showRegister && canRegister && activeTab === 'agents'
+            ? <RegisterAgentPanel
                 onClose={() => setShowRegister(false)}
-                onRegistered={{
-                  ownerOptions,
-                  onCreated: async () => {
-                    // Refresh live list so the new row appears at the top
-                    await reloadLiveModels()
-                  },
+                ownerOptions={ownerOptions}
+                onRegistered={async () => {
+                  // Pull the live agents poll forward so the new row
+                  // shows up immediately instead of waiting 5s.
+                  if (refreshAgents) await refreshAgents()
+                  setShowRegister(false)
                 }}
               />
-            : selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />
+            : showRegister && canRegister && activeTab === 'models'
+              ? <RegisterAssetPanel
+                  onClose={() => setShowRegister(false)}
+                  onRegistered={{
+                    ownerOptions,
+                    onCreated: async () => {
+                      // Refresh live list so the new row appears at the top
+                      await reloadLiveModels()
+                    },
+                  }}
+                />
+              : selected && <PreviewPanel asset={selected} onClose={() => navigate('/admin/inventory', { replace: true })} />
           }
 
         </div>

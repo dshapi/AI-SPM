@@ -85,20 +85,34 @@ export default function OverviewTab({ agent, onOpenChat, onStateChange }) {
               {agent.runtime_state || "stopped"}
             </span>
           </div>
-          <AgentRunStopToggle agent={agent} onChange={onStateChange} />
+          {/* Run/stop only renders for live agents — mock seed rows
+              don't have a real backend container behind them. */}
+          {agent._live && (
+            <AgentRunStopToggle agent={agent} onChange={onStateChange} />
+          )}
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenChat}
-          className={
-            "mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-md " +
-            "border border-slate-300 hover:bg-slate-50 text-[12px] font-medium"
-          }
-        >
-          <MessageSquare size={13} aria-hidden />
-          Open Chat
-        </button>
+        {/* Open Chat — only for live agents. Mocks would 404 on the
+            chat endpoint (the seed rows aren't registered with a real
+            mcp_token / llm_api_key), so hiding the button avoids a
+            confusing dead-end click. */}
+        {agent._live ? (
+          <button
+            type="button"
+            onClick={onOpenChat}
+            className={
+              "mt-3 inline-flex items-center gap-2 px-3 py-1.5 rounded-md " +
+              "border border-slate-300 hover:bg-slate-50 text-[12px] font-medium"
+            }
+          >
+            <MessageSquare size={13} aria-hidden />
+            Open Chat
+          </button>
+        ) : (
+          <p className="mt-3 text-[11px] text-slate-500 italic">
+            This is a seed mock — register an agent.py to enable chat &amp; lifecycle controls.
+          </p>
+        )}
       </section>
 
       {/* Linked policies + alerts (Phase 4 will hydrate the counts —
