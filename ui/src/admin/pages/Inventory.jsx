@@ -17,6 +17,11 @@ import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
 import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js'
 
+// ── Phase 3 — agent runtime control plane wiring ──────────────────────────
+import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
+import AgentDetailDrawer from '../agents/AgentDetailDrawer.jsx'
+import AgentChatPanel    from '../agents/AgentChatPanel.jsx'
+
 // ── Mock data ──────────────────────────────────────────────────────────────────
 
 const RISK_VARIANT  = { Critical: 'critical', High: 'high', Medium: 'medium', Low: 'low' }
@@ -1135,6 +1140,48 @@ function adaptLiveModel(m) {
   }
 }
 
+// ── Phase 3 — adapt /api/spm/agents row to the Inventory UI shape ─────────
+
+const AGENT_TYPE_LABEL = {
+  langchain:        'LangChain Agent',
+  llamaindex:       'LlamaIndex Agent',
+  autogpt:          'AutoGPT',
+  openai_assistant: 'OpenAI Assistant',
+  custom:           'Custom Agent',
+}
+
+// The backend uses lowercase risk + a different policy_status vocabulary
+// than the Inventory mocks. Translate so the existing filter chips +
+// PolicyIcon + RiskChip render the live rows the same way as mocks.
+const POLICY_FROM_BACKEND = { covered: 'full', partial: 'partial', none: 'none' }
+
+function adaptLiveAgent(a) {
+  return {
+    // Prefix so the URL-param selector can't accidentally match a mock row.
+    id:            `live-${a.id}`,
+    _backendId:    a.id,
+    kind:          'agent',
+    name:          a.name,
+    type:          AGENT_TYPE_LABEL[a.agent_type] || (a.agent_type || 'Agent'),
+    risk:          riskDisplayFromBackend(a.risk),
+    owner:         a.owner || undefined,
+    provider:      PROVIDER_DISPLAY[a.provider] ?? (a.provider || '—'),
+    policyStatus:  POLICY_FROM_BACKEND[a.policy_status] || 'none',
+    lastSeen:      a.last_seen_at ? formatAgo(a.last_seen_at) : '—',
+    description:   a.description || 'Uploaded via Inventory.',
+    linkedPolicies: [],
+    linkedAlerts:   0,
+    // Pass-throughs the AgentDetailDrawer / chat panel need:
+    runtime_state:  a.runtime_state,
+    version:        a.version,
+    agent_type:     a.agent_type,
+    code_path:      a.code_path,
+    code_sha256:    a.code_sha256,
+    policy_status:  a.policy_status,  // backend value for the drawer's Configure tab
+    _live: true,
+  }
+}
+
 // ── Inventory page ────────────────────────────────────────────────────────────
 
 export default function Inventory() {
@@ -1156,6 +1203,21 @@ export default function Inventory() {
   const [liveModels, setLiveModels] = useState([])
   const [showRegister, setShowRegister] = useState(false)
 
+  // Phase 3 — live agents from /api/spm/agents. Polled every 5s; same
+  // offline-friendly fall-through as models (errors get swallowed by
+  // the hook so we just see no live rows).
+  const { live: liveAgentsRaw, refresh: refreshAgents } =
+    useAgentList({ pollMs: 5000 })
+  const liveAgents = useMemo(
+    () => (liveAgentsRaw || []).map(adaptLiveAgent),
+    [liveAgentsRaw],
+  )
+
+  // Drawer + chat-panel state. Both can be open simultaneously so an
+  // operator can keep configuration visible while chatting.
+  const [detailAgent, setDetailAgent] = useState(null)
+  const [chatAgent,   setChatAgent]   = useState(null)
+
   async function reloadLiveModels() {
     try {
       const rows = await fetchModels()
@@ -1168,12 +1230,19 @@ export default function Inventory() {
 
   useEffect(() => { reloadLiveModels() }, [])
 
-  // Merged view per tab — live models prepend to the Models list
+  // Merged view per tab — live models prepend to the Models list, and
+  // live agents merge with mock agents (live wins on name collision so
+  // a live "CustomerSupport-GPT" replaces the mock of the same name).
   const mergedAssets = useMemo(() => {
     const next = { ...ASSETS }
     next.models = [...liveModels, ...ASSETS.models]
+    // Tag the mock agent rows so the row click dispatcher below can
+    // route both mock + live agents to the new drawer (mocks open the
+    // same UI in read-only mode — no live API actions fire).
+    const taggedMockAgents = ASSETS.agents.map(a => ({ ...a, kind: 'agent' }))
+    next.agents = mergeAgents(taggedMockAgents, liveAgents)
     return next
-  }, [liveModels])
+  }, [liveModels, liveAgents])
 
   const mergedAllAssets = useMemo(() => Object.values(mergedAssets).flat(), [mergedAssets])
 
@@ -1268,6 +1337,14 @@ export default function Inventory() {
                   assets={filtered}
                   selectedId={selected?.id}
                   onSelect={(asset) => {
+                    // Phase 3 — live agents click straight into the new
+                    // detail drawer instead of the inline PreviewPanel.
+                    // Mocks fall through to the existing route-based
+                    // selection so the rest of the UI doesn't change.
+                    if (asset && asset.kind === 'agent' && asset._live) {
+                      setDetailAgent(asset)
+                      return
+                    }
                     if (asset?.id === assetId) {
                       navigate('/admin/inventory', { replace: true })
                     } else {
@@ -1309,6 +1386,28 @@ export default function Inventory() {
         )}
 
       </div>
+
+      {/* Phase 3 — agent detail + chat drawers. Both float over the
+          page; closing them just clears the state. They do NOT live in
+          the route since linkability isn't a Phase-3 requirement. */}
+      <AgentDetailDrawer
+        open={Boolean(detailAgent)}
+        agent={detailAgent}
+        onClose={() => setDetailAgent(null)}
+        onOpenChat={() => setChatAgent(detailAgent)}
+        onAgentChanged={(updated) => {
+          // Optimistically update the row the drawer shows so run/stop
+          // toggles + saves reflect immediately. The next poll tick
+          // overwrites with the canonical row.
+          setDetailAgent(updated)
+          refreshAgents && refreshAgents()
+        }}
+      />
+      <AgentChatPanel
+        open={Boolean(chatAgent)}
+        agent={chatAgent}
+        onClose={() => setChatAgent(null)}
+      />
 
     </PageContainer>
   )
