@@ -546,6 +546,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    # Phase 1 — agent runtime control plane. Customer agent containers
+    # run on the internal-only `agent-net` and need to call back to
+    # spm-api for the ready() handshake, /secrets/*, and history. Dual-
+    # homing spm-api on both networks lets the SDK reach it without
+    # exposing it to the public internet from agent-net.
+    networks: [default, agent-net]
     depends_on:
       spm-db:
         condition: service_healthy
@@ -754,6 +760,13 @@ services:
 
 networks:
   agent-net:
+    # Pin the network name so Docker doesn't auto-prefix it with the
+    # compose project name. spm-api spawns customer agent containers
+    # via the docker SDK with `network="agent-net"` (literal); without
+    # this `name:` override the actual network would be e.g.
+    # `aispm_agent-net` and the spawn would fail with
+    # "network agent-net not found".
+    name: agent-net
     driver: bridge
     # Agents have no direct internet egress: they can only reach
     # spm-mcp and spm-llm-proxy (which bridge default + agent-net),
