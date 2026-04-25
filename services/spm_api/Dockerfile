@@ -13,4 +13,10 @@ COPY services/spm_api/integrations_routes.py .
 COPY services/spm_api/integrations_seed_data.py .
 COPY services/spm_api/connector_registry.py .
 COPY services/spm_api/connector_probes.py .
+# Phase 1 — agent runtime control plane modules. Flat-COPYed so the
+# bare imports in app.py (`from agent_routes import router`) resolve
+# at runtime the same way the existing model/integration modules do.
+COPY services/spm_api/agent_routes.py .
+COPY services/spm_api/agent_controller.py .
+COPY services/spm_api/agent_validator.py .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8092"]
