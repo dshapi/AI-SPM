@@ -179,9 +179,90 @@ full V2 list:
   unencrypted. The row is admin-only and never returned in responses,
   but V2 will encrypt with the existing Fernet key.
 
+## Phase 4 — chat actually works
+
+End-to-end chat is live as of 2026-04-25. The full path:
+
+```
+UI → POST /agents/{id}/chat (SSE)
+      ↓
+   prompt-guard /screen   ── allow/block (Llama Guard 3)
+      ↓
+   policy-decider /v1/data/spm/prompt/allow  ── OPA, takes attached agent_policies into account
+      ↓
+   Persist user turn (agent_chat_messages) + emit AgentChatMessageEvent
+      ↓
+   Kafka cpm.{tenant}.agents.{id}.chat.in
+      ↓
+   ────── agent runtime ─────────────────────────────
+      aispm.chat.subscribe()  (consumer with auto_offset_reset=earliest
+                                so first message is never lost)
+      aispm.chat.history()    ← prior turns (real conversation memory)
+      aispm.mcp.call('web_fetch', ...) → spm-mcp /mcp (Tavily)
+      aispm.llm.complete(...)  → spm-llm-proxy /v1/chat/completions
+      aispm.chat.reply(...)    → Kafka cpm.{tenant}.agents.{id}.chat.out
+   ─────────────────────────────────────────────────
+      ↓
+   output-guard regex (secrets/PII) + policy-decider /v1/data/spm/output/allow
+      ↓
+   Persist agent turn + AgentChatMessageEvent
+      ↓
+   SSE: data: {"type":"done","text":"..."}
+```
+
+### Bring-up checklist
+
+1. `docker compose up -d` (everything).
+2. **Configure the agent-runtime row** under Integrations → AI Providers → *AI-SPM Agent Runtime Control Plane (MCP)*. **Default LLM** and **Tavily Integration** are real dropdowns now — pick from the list.
+3. Verify **Default LLM**'s upstream is itself configured (Anthropic API key set, or Ollama serving the model named on its row).
+4. Click *Test* on the agent-runtime row. Should turn green.
+5. Inventory → Agents → Register Asset → drop in `Example agents/custom_agent.py` → type `custom` → Register.
+6. Wait for runtime state to flip to **running** (~5–15 s on first deploy).
+7. Click *Open Chat* → send a message.
+
+### Provider dispatch
+
+`spm-llm-proxy` branches on the upstream integration's `connector_type`:
+
+| `connector_type` | URL                                            | Auth header                   | Model source           |
+|------------------|------------------------------------------------|-------------------------------|------------------------|
+| `anthropic`      | `{base_url}/v1/messages` (default `api.anthropic.com`) | `x-api-key` + `anthropic-version: 2023-06-01` | integration `model` field — payload model is honoured only if it starts with `claude` |
+| `ollama` (base ends in `/v1`) | `{base_url}/chat/completions` (OpenAI-compat) | none                          | integration `model` (e.g. `llama3.2`) |
+| `ollama` (base does NOT end in `/v1`) | `{base_url}/api/chat` (native)                  | none                          | integration `model` field   |
+
+The operator's configured model wins over whatever the agent's SDK sent. The SDK leaves `model` unset by default; only an explicit `aispm.llm.complete(model="...")` call overrides.
+
+### Switching providers
+
+Just change the **Default LLM** dropdown on the agent-runtime row. The proxy resolves on every request — no restart, no agent re-deploy. Works for Anthropic ↔ Ollama (and any other provider once dispatch is added).
+
+### Common gotchas (and what they look like)
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Agent stuck `paused` / shows Restart immediately after deploy | `spm-api` reading stale identity-mapped Agent row in `_wait_for_ready` | Already fixed (`db.expire_all()` per poll). Just rebuild `spm-api`. |
+| First chat after deploy silently lost | Kafka consumer hadn't joined the group yet | Already fixed (`auto_offset_reset="earliest"`). Rebuild agent-runtime image. |
+| Chat returns `(error: Load failed)` | `spm-api` crashed. Common causes: missing `aiokafka`, `204 must not have a response body` import-time assertion, missing `spm_api` package import. | All inlined / fixed. Check `docker compose logs spm-api`. |
+| Chat returns `502 Bad Gateway` from `/v1/chat/completions` | Upstream integration not configured, wrong model name, or `connector_type` mismatch (e.g. `/v1/api/chat`). | Check `docker compose logs spm-llm-proxy` — the new `dispatching connector_type=...` line names the cause. |
+| `web_fetch` 404 on `http://spm-mcp:8500/mcp` | `spm-mcp` had FastMCP tools but the HTTP route wasn't mounted | Already fixed (explicit `POST /mcp` JSON-RPC handler). |
+| `Prompt blocked by safety guard. (S2)` on the literal word "yes" | Guard model returns benign category on short input; old code force-blocked on any S1–S15 cat | Already fixed (8-char short-input bypass + score ≥ `GUARD_BLOCK_SCORE` only). |
+| Agent has no memory between turns | The example agent didn't fetch `aispm.chat.history()` | Already fixed in `Example agents/custom_agent.py`. Re-upload it. |
+
+### Configuration knobs (env, mostly safe defaults)
+
+| Env var | Service | Default | Purpose |
+|---|---|---|---|
+| `GUARD_BLOCK_SCORE` | `api`, `spm-api` | `0.6` | Min guard score to escalate `allow + category` → `block`. |
+| `GUARD_MIN_TEXT_LEN` | `api`, `spm-api` | `8` | Inputs shorter than this skip the guard entirely. |
+| `AGENT_READY_TIMEOUT_S` | `spm-api` | `30` | Deploy poll budget for the SDK's `ready()` handshake. |
+| `AGENT_CHAT_REPLY_TIMEOUT_S` | `spm-api` | `120` | How long the chat round-trip waits for an agent reply on `chat.out`. |
+| `AGENT_CONTROLLER_URL` | `spm-api` | `http://spm-api:8092` | What gets injected as `CONTROLLER_URL` into spawned agent containers. |
+
 ## Reference
 
 - Design spec: [`docs/superpowers/specs/2026-04-25-agent-runtime-control-plane-mcp-design.md`](../superpowers/specs/2026-04-25-agent-runtime-control-plane-mcp-design.md)
 - Implementation plan: [`docs/superpowers/plans/2026-04-25-agent-runtime-control-plane-phase-1-backend.md`](../superpowers/plans/2026-04-25-agent-runtime-control-plane-phase-1-backend.md)
+- Phase 4 plan: [`docs/superpowers/plans/2026-04-25-agent-runtime-control-plane-phase-4-pipeline.md`](../superpowers/plans/2026-04-25-agent-runtime-control-plane-phase-4-pipeline.md)
+- Example agents: [`Example agents/`](../../Example%20agents/)
 - V1 non-goals: spec §2
 - V2 candidates: spec §11
