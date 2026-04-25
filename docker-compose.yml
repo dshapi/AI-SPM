@@ -89,6 +89,12 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    # Phase 1 — agent runtime control plane. Customer agent containers
+    # run on the internal-only `agent-net` and need to consume their
+    # per-agent chat.in / chat.out topics directly from this broker.
+    # Dual-home so name resolution of `kafka-broker` works from both
+    # the default network (existing services) and agent-net.
+    networks: [default, agent-net]
 
   redis:
     image: redis:7-alpine

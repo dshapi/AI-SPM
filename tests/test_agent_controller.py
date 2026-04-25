@@ -122,12 +122,13 @@ class TestSpawnAgentContainer:
         assert cid == "ctr-abc"
 
         env = captured["environment"]
-        assert env["AGENT_ID"]      == "ag-001"
-        assert env["TENANT_ID"]     == "t1"
-        assert env["MCP_TOKEN"]     == "mcp-x"
-        assert env["LLM_API_KEY"]   == "llm-x"
-        assert env["MCP_URL"]       == "http://spm-mcp:8500/mcp"
-        assert env["LLM_BASE_URL"]  == "http://spm-llm-proxy:8500/v1"
+        assert env["AGENT_ID"]       == "ag-001"
+        assert env["TENANT_ID"]      == "t1"
+        assert env["MCP_TOKEN"]      == "mcp-x"
+        assert env["LLM_API_KEY"]    == "llm-x"
+        assert env["MCP_URL"]        == "http://spm-mcp:8500/mcp"
+        assert env["LLM_BASE_URL"]   == "http://spm-llm-proxy:8500/v1"
+        assert env["CONTROLLER_URL"] == "http://spm-api:8092"
         assert "KAFKA_BOOTSTRAP_SERVERS" in env
 
         assert captured["mem_limit"] == "256m"
