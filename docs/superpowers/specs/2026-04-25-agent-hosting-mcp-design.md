@@ -49,7 +49,7 @@ These are deliberately out of scope and tracked for V2:
 │ EXISTING SECURITY PIPELINE                                       │
 │   prompt-guard  ──►  policy-decider                              │
 └─────────┬───────────────────────────────────────────────────────┘
-          │  produce → aispm.agent.{id}.chat.in   (Kafka)
+          │  produce → cpm.{tenant_id}.agents.{agent_id}.chat.in   (Kafka)
           ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │ NEW: agent container  (one per uploaded agent.py, always-on)    │
@@ -71,7 +71,7 @@ These are deliberately out of scope and tracked for V2:
    (existing pipeline intercepts every tool call and every LLM call)
 
    ▲
-   │  consume ◄ aispm.agent.{id}.chat.out
+   │  consume ◄ cpm.{tenant_id}.agents.{agent_id}.chat.out
    │
    spm-api → output-guard → SSE chunks to UI
 ```
@@ -170,7 +170,7 @@ ConnectorType key: `agent-host`. Schema (in `connector_registry.py`):
 | Tavily integration | enum (dropdown of Tavily integrations) | yes | first Tavily integration |
 | Default fallback model | text | no | `llama3.1:8b` |
 
-**Resource limits group**
+**Resources group**
 
 | Field | Type | Default |
 |---|---|---|
