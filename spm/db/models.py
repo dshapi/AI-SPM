@@ -366,3 +366,71 @@ class IntegrationLog(Base):
     detail          = Column(JSONB, nullable=False, default=dict, server_default="{}")
 
     integration = relationship("Integration", back_populates="logs")
+
+
+# ─── Agent Hosting module ────────────────────────────────────────────────────────
+
+import uuid as _uuid  # avoid name clash with Column("id") pattern
+
+
+class Agent(Base):
+    __tablename__ = "agents"
+    id           = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+    name         = Column(Text, nullable=False)
+    version      = Column(Text, nullable=False)
+    agent_type   = Column(Enum("langchain","llamaindex","autogpt","openai_assistant","custom",
+                                name="agent_type"), nullable=False)
+    provider     = Column(Enum("local","openai","anthropic","other","aws","azure","gcp","internal",
+                                name="provider"), nullable=False, default="internal")
+    owner        = Column(Text)
+    description  = Column(Text, default="")
+    risk         = Column(Enum("low","medium","high","critical", name="risk_level"),
+                          default="low")
+    policy_status= Column(Enum("covered","partial","none", name="policy_status"),
+                          default="none")
+    runtime_state= Column(Enum("stopped","starting","running","crashed",
+                                name="runtime_state"), nullable=False, default="stopped")
+    code_path    = Column(Text, nullable=False)
+    code_sha256  = Column(Text, nullable=False)
+    mcp_token    = Column(Text, nullable=False)
+    llm_api_key  = Column(Text, nullable=False)
+    last_seen_at = Column(DateTime(timezone=True))
+    tenant_id    = Column(Text, nullable=False, default="t1", index=True)
+    created_at   = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at   = Column(DateTime(timezone=True), server_default=func.now(),
+                          onupdate=func.now())
+    __table_args__ = (
+        UniqueConstraint("name","version","tenant_id", name="uq_agents_name_ver_tenant"),
+        Index("ix_agents_tenant_state", "tenant_id", "runtime_state"),
+    )
+    sessions = relationship("AgentChatSession", back_populates="agent",
+                             cascade="all, delete-orphan")
+
+
+class AgentChatSession(Base):
+    __tablename__ = "agent_chat_sessions"
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+    agent_id        = Column(UUID(as_uuid=True),
+                              ForeignKey("agents.id", ondelete="CASCADE"),
+                              nullable=False, index=True)
+    user_id         = Column(Text, nullable=False, index=True)
+    started_at      = Column(DateTime(timezone=True), server_default=func.now())
+    last_message_at = Column(DateTime(timezone=True))
+    message_count   = Column(Integer, nullable=False, default=0)
+    agent    = relationship("Agent", back_populates="sessions")
+    messages = relationship("AgentChatMessage", back_populates="session",
+                             cascade="all, delete-orphan",
+                             order_by="AgentChatMessage.ts")
+
+
+class AgentChatMessage(Base):
+    __tablename__ = "agent_chat_messages"
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=_uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True),
+                         ForeignKey("agent_chat_sessions.id", ondelete="CASCADE"),
+                         nullable=False, index=True)
+    role       = Column(Enum("user","agent", name="chat_role"), nullable=False)
+    text       = Column(Text, nullable=False)
+    ts         = Column(DateTime(timezone=True), server_default=func.now())
+    trace_id   = Column(Text, index=True)
+    session    = relationship("AgentChatSession", back_populates="messages")
