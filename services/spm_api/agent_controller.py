@@ -205,6 +205,36 @@ async def stop_agent_container(agent_id: str) -> None:
             pass
 
 # ─── 4. High-level orchestration ───────────────────────────────────────────
+#
+# spm-api uses SQLAlchemy AsyncSession in production. AsyncSession.get()
+# and AsyncSession.commit() return coroutines that MUST be awaited;
+# without the await the row is a coroutine object that has no .id /
+# .runtime_state, so any access raises AttributeError → 500. The unit
+# tests use a MagicMock that returns sync values, which is why the
+# bug only surfaces against the real DB.
+#
+# These two helpers paper over the difference so each lifecycle
+# function can call them uniformly. They detect the awaitable shape
+# at runtime instead of checking the session class.
+
+async def _db_get(db, model, pk):
+    res = db.get(model, pk)
+    if hasattr(res, "__await__"):
+        res = await res
+    return res
+
+
+async def _db_commit(db) -> None:
+    res = db.commit()
+    if hasattr(res, "__await__"):
+        await res
+
+
+async def _db_delete(db, obj) -> None:
+    res = db.delete(obj)
+    if hasattr(res, "__await__"):
+        await res
+
 
 async def deploy_agent(db, agent_id) -> None:
     """Deploy: create topics → mark starting → spawn → mark running.
@@ -214,14 +244,14 @@ async def deploy_agent(db, agent_id) -> None:
     """
     from spm.db.models import Agent  # type: ignore
 
-    a = db.get(Agent, agent_id)
+    a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
 
     await create_agent_topics(tenant_id=a.tenant_id, agent_id=str(a.id))
 
     a.runtime_state = "starting"
-    db.commit()
+    await _db_commit(db)
 
     await spawn_agent_container(
         agent_id=str(a.id), tenant_id=a.tenant_id,
@@ -238,7 +268,7 @@ async def deploy_agent(db, agent_id) -> None:
         # Compatibility branch — explicit opt-in only.
         await asyncio.sleep(_READY_SLEEP_S)
         a.runtime_state = "running"
-        db.commit()
+        await _db_commit(db)
         return
 
     await _wait_for_ready(db, agent_id, timeout_s=_READY_TIMEOUT_S)
@@ -256,7 +286,7 @@ async def _wait_for_ready(db, agent_id, *, timeout_s: float) -> None:
 
     started = time.monotonic()
     while time.monotonic() - started < timeout_s:
-        a = db.get(Agent, agent_id)
+        a = await _db_get(db, Agent, agent_id)
         if a is None:
             raise ValueError(f"agent {agent_id!r} disappeared during ready poll")
         if a.runtime_state == "running":
@@ -277,7 +307,7 @@ async def start_agent(db, agent_id) -> None:
     """
     from spm.db.models import Agent  # type: ignore
 
-    a = db.get(Agent, agent_id)
+    a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
     if a.runtime_state == "running":
@@ -289,7 +319,7 @@ async def start_agent(db, agent_id) -> None:
         mcp_token=a.mcp_token, llm_api_key=a.llm_api_key,
     )
     a.runtime_state = "starting"
-    db.commit()
+    await _db_commit(db)
 
 
 async def stop_agent(db, agent_id) -> None:
@@ -297,13 +327,13 @@ async def stop_agent(db, agent_id) -> None:
     preserved so resuming a chat session keeps history."""
     from spm.db.models import Agent  # type: ignore
 
-    a = db.get(Agent, agent_id)
+    a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
 
     await stop_agent_container(str(a.id))
     a.runtime_state = "stopped"
-    db.commit()
+    await _db_commit(db)
 
 
 async def retire_agent(db, agent_id) -> None:
@@ -311,7 +341,7 @@ async def retire_agent(db, agent_id) -> None:
     row. Soft-delete is V2 (we'd flip a deleted_at column instead)."""
     from spm.db.models import Agent  # type: ignore
 
-    a = db.get(Agent, agent_id)
+    a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
 
@@ -319,5 +349,5 @@ async def retire_agent(db, agent_id) -> None:
     aid_str   = str(a.id)
     await stop_agent_container(aid_str)
     await delete_agent_topics(tenant_id=tenant_id, agent_id=aid_str)
-    db.delete(a)
-    db.commit()
+    await _db_delete(db, a)
+    await _db_commit(db)

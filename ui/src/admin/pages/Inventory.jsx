@@ -20,6 +20,7 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 
 // ── Phase 3 — agent runtime control plane wiring ──────────────────────────
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
+import { deleteAgent } from '../api/agents.js'
 import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
 import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
 import RegisterAgentPanel   from '../agents/RegisterAgentPanel.jsx'
@@ -516,7 +517,7 @@ function MetaRow({ icon: Icon, label, value }) {
   )
 }
 
-function PreviewPanel({ asset, onClose, onOpenChat }) {
+function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
   if (!asset) return null
 
   const riskBg = {
@@ -526,10 +527,33 @@ function PreviewPanel({ asset, onClose, onOpenChat }) {
     Low:      'bg-emerald-50',
   }[asset.risk] ?? 'bg-gray-50'
 
-  // Phase 3 — live agents get an extra "Open Chat" + run/stop control
-  // appended to the action footer. Mocks and other asset types render
-  // the panel exactly as before.
+  // Phase 3 — live agents get an extra "Open Chat" + run/stop +
+  // Delete control appended to the action footer. Mocks and other
+  // asset types render the panel exactly as before.
   const isLiveAgent = asset.kind === 'agent' && asset._live === true
+
+  // Delete (retire) state for the live-agent footer.
+  const [deleting, setDeleting] = useState(false)
+  const [deleteErr, setDeleteErr] = useState(null)
+
+  async function handleDelete() {
+    if (deleting) return
+    const ok = window.confirm(
+      `Delete "${asset.name}"?\n\n` +
+      'This stops the container, deletes its Kafka topics, and ' +
+      'removes the row. This cannot be undone.'
+    )
+    if (!ok) return
+    setDeleting(true); setDeleteErr(null)
+    try {
+      await deleteAgent(asset._backendId)
+      if (onDeleted) onDeleted(asset)
+    } catch (e) {
+      setDeleteErr(e.message || 'Delete failed')
+    } finally {
+      setDeleting(false)
+    }
+  }
 
   return (
     <div className="w-[300px] shrink-0 flex flex-col h-full" data-testid="asset-preview-panel">
@@ -631,6 +655,20 @@ function PreviewPanel({ asset, onClose, onOpenChat }) {
               <MessageSquare size={12} />
               Open Chat
             </Button>
+            <Button
+              variant="outline" size="sm"
+              onClick={handleDelete}
+              disabled={deleting}
+              className="w-full h-8 gap-1.5 text-[12px] justify-center text-red-600 border-red-200 hover:bg-red-50"
+            >
+              <X size={12} />
+              {deleting ? 'Deleting…' : 'Delete asset'}
+            </Button>
+            {deleteErr && (
+              <p className="text-[11px] text-red-600 text-center" role="alert">
+                ⚠ {deleteErr}
+              </p>
+            )}
           </>
         )}
         <Button variant="outline" size="sm" className="w-full h-8 gap-1.5 text-[12px] justify-center">
@@ -1426,6 +1464,12 @@ export default function Inventory() {
                     asset={selected}
                     onClose={() => navigate('/admin/inventory', { replace: true })}
                     onOpenChat={(agent) => setChatAgent(agent)}
+                    onDeleted={async () => {
+                      // Close the panel + pull the polling tick forward
+                      // so the row disappears from the list immediately.
+                      navigate('/admin/inventory', { replace: true })
+                      if (refreshAgents) await refreshAgents()
+                    }}
                   />
                 )
           }
