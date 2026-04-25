@@ -224,9 +224,34 @@ async def spawn_agent_container(*, agent_id: str, tenant_id: str,
     host_path = _resolve_host_code_path(code_path)
     log.info("spawn_agent_container: agent=%s code_path=%s host_path=%s",
              agent_id, code_path, host_path)
+
+    # Idempotency — if a previous container with the same name still
+    # exists (crashed, exited, or even still running), Docker would
+    # reject the new run with "name already in use". Force-remove the
+    # stale one first so /start works as a true "give me a fresh
+    # container" verb.
+    container_name = f"agent-{agent_id}"
+    try:
+        existing = client.containers.get(container_name)
+        log.info("spawn_agent_container: removing stale container %s (status=%s)",
+                 container_name, existing.status)
+        try:
+            existing.stop(timeout=5)
+        except Exception:                                # noqa: BLE001
+            pass
+        existing.remove(force=True)
+    except _NotFound:
+        pass
+    except Exception as e:                               # noqa: BLE001
+        # Don't block spawn if cleanup hits a transient docker hiccup —
+        # the run() below will surface a clearer error if it can't
+        # actually create the new container.
+        log.warning("spawn_agent_container: cleanup failed for %s: %s",
+                    container_name, e)
+
     ctr = client.containers.run(
         _AGENT_IMAGE,
-        name=f"agent-{agent_id}",
+        name=container_name,
         environment=env,
         volumes={host_path: {"bind": "/agent/agent.py", "mode": "ro"}},
         mem_limit=f"{mem_mb}m",
