@@ -62,6 +62,20 @@ Implement proper governance controls around AI usage.
 
 ## Features
 
+### Agent runtime control plane (Phase 1)
+
+AI-SPM hosts customer-uploaded AI agents in sandboxed containers and
+routes their I/O through the existing security pipeline. Phase 1 ships
+the backend foundation: `agents` / `agent_chat_sessions` /
+`agent_chat_messages` tables, the `spm-mcp` MCP server (one tool:
+`web_fetch`), the `spm-llm-proxy` OpenAI-compatible LLM shim, and the
+`/api/spm/agents/*` REST surface (upload + validate, list, detail,
+patch, start/stop, retire). See the
+[operator quickstart](docs/agents/operator-quickstart.md) for the HTTP
+API and config flow, and the
+[design spec](docs/superpowers/specs/2026-04-25-agent-runtime-control-plane-mcp-design.md)
+for architecture and V2 roadmap.
+
 ## Platform at a Glance
 
 |                          |                                                                  |

@@ -730,6 +730,14 @@ def _actor(claims: Dict[str, Any]) -> str:
 @router.get("", response_model=List[IntegrationSummary])
 async def list_integrations(
     category: Optional[str] = Query(None),
+    vendor:   Optional[str] = Query(
+        None,
+        description=(
+            "Exact-match vendor filter (e.g. 'Tavily'). Used by FieldSpec "
+            "type='enum_integration' dropdowns that need a vendor-specific "
+            "subset of an integration category."
+        ),
+    ),
     status_: Optional[str] = Query(None, alias="status"),
     q: Optional[str] = Query(None, description="Case-insensitive name/description search"),
     db: AsyncSession = Depends(get_db),
@@ -738,6 +746,8 @@ async def list_integrations(
     stmt = select(Integration)
     if category:
         stmt = stmt.where(Integration.category == category)
+    if vendor:
+        stmt = stmt.where(Integration.vendor == vendor)
     if status_:
         stmt = stmt.where(Integration.status == IntegrationStatus(status_))
     if q:

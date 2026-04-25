@@ -69,9 +69,44 @@ from typing import (
 
 FieldType = Literal[
     "string", "integer", "password", "enum", "textarea", "boolean", "url",
+    # `enum_integration` renders as a dropdown of currently-active integration
+    # rows matching `options_provider`. Used by connector types that reference
+    # other integrations (e.g. agent-runtime → default LLM, Tavily). The
+    # frontend resolves the `options_provider` string to a query against
+    # `GET /api/spm/integrations?category=...&vendor=...` (see the
+    # `_OPTIONS_PROVIDER_FILTERS` mapping below).
+    "enum_integration",
+    # `float` is used by resource-quota fields (CPU quota etc.) where the
+    # canonical value is a fractional number that the frontend renders as a
+    # number input with step="0.1".
+    "float",
 ]
 
-FieldGroup = Literal["Connection", "Credentials", "Advanced"]
+FieldGroup = Literal[
+    "Connection", "Credentials", "Advanced",
+    # Groups used by the agent-runtime ConnectorType:
+    "Defaults", "Resources", "Tool behaviour", "Audit",
+]
+
+
+# Mapping from `FieldSpec.options_provider` strings to the
+# (category, vendor) filter pair the frontend should pass to
+# `GET /api/spm/integrations`. Single source of truth — both the
+# Phase 3 SchemaForm dropdown and the Phase 1 backend tests reference
+# this dict so adding a new provider category is a one-line change.
+_OPTIONS_PROVIDER_FILTERS: Dict[str, Tuple[Optional[str], Optional[str]]] = {
+    "ai_provider_integrations": ("AI Providers", None),
+    "tavily_integrations":      ("AI Providers", "Tavily"),
+}
+
+
+def options_provider_filters(name: str) -> Tuple[Optional[str], Optional[str]]:
+    """Resolve an options_provider name to (category, vendor) filter values.
+
+    Returns (None, None) for unknown names so callers can choose to
+    surface that as an error or fall back to "list all integrations".
+    """
+    return _OPTIONS_PROVIDER_FILTERS.get(name, (None, None))
 
 
 class FieldSpec(TypedDict, total=False):
@@ -87,6 +122,11 @@ class FieldSpec(TypedDict, total=False):
     options:     List[str]   # only for type="enum"
     hint:        str
     group:       FieldGroup
+    # Only for type="enum_integration": names a filter recipe in
+    # `_OPTIONS_PROVIDER_FILTERS`. Common values:
+    #   - "ai_provider_integrations" → all active AI Provider integrations
+    #   - "tavily_integrations"       → only Tavily integrations
+    options_provider: str
 
 
 # Probe signature: receives the resolved config dict and a credentials dict
@@ -116,6 +156,7 @@ class ConnectorType(TypedDict, total=False):
 # you're adding a new connector-type, write your probe in
 # connector_probes.py first, then reference it from the dict below.
 from connector_probes import (  # noqa: E402  (after-docstring import is deliberate)
+    probe_agent_runtime,
     probe_anthropic,
     probe_azure_openai,
     probe_bedrock_stub,
@@ -564,6 +605,72 @@ CONNECTOR_TYPES: Dict[str, ConnectorType] = {
         ],
         "probe": probe_redis,
     },
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # Agent Runtime Control Plane (1) — internal vendor
+    # ══════════════════════════════════════════════════════════════════════════
+
+    "agent-runtime": {
+        "key": "agent-runtime",
+        "label": "AI-SPM Agent Runtime Control Plane (MCP)",
+        "category": "AI Providers",
+        "vendor": "AI-SPM",
+        "icon_hint": "bot",
+        "description": (
+            "Hosts customer-uploaded AI agents in sandboxed containers. "
+            "Provides MCP tools (web_fetch) and an OpenAI-compatible LLM proxy. "
+            "Configure the default LLM and Tavily integration here."
+        ),
+        "fields": [
+            # ── Defaults ──────────────────────────────────────────────────────
+            {"key": "default_llm_integration_id",
+             "label": "Default LLM",
+             "type": "enum_integration",
+             "required": True, "group": "Defaults",
+             "hint": "Active AI Provider integration that backs spm-llm-proxy.",
+             "options_provider": "ai_provider_integrations"},
+            {"key": "tavily_integration_id",
+             "label": "Tavily Integration",
+             "type": "enum_integration",
+             "required": True, "group": "Defaults",
+             "options_provider": "tavily_integrations"},
+            {"key": "default_model_name",
+             "label": "Default model name",
+             "type": "string", "default": "llama3.1:8b",
+             "group": "Defaults"},
+            # ── Resources ─────────────────────────────────────────────────────
+            {"key": "default_memory_mb",
+             "label": "Memory per agent (MB)",
+             "type": "integer", "default": 512, "group": "Resources"},
+            {"key": "default_cpu_quota",
+             "label": "CPU quota",
+             "type": "float", "default": 0.5, "group": "Resources"},
+            {"key": "tool_call_timeout_s",
+             "label": "Tool call timeout (s)",
+             "type": "integer", "default": 30, "group": "Resources"},
+            {"key": "max_concurrent_agents",
+             "label": "Max concurrent agents",
+             "type": "integer", "default": 50, "group": "Resources"},
+            {"key": "max_sessions_per_agent",
+             "label": "Max chat sessions per agent",
+             "type": "integer", "default": 100, "group": "Resources"},
+            # ── Tool behaviour ────────────────────────────────────────────────
+            {"key": "tavily_max_results",
+             "label": "Tavily max results",
+             "type": "integer", "default": 5, "group": "Tool behaviour"},
+            {"key": "tavily_max_chars",
+             "label": "Tavily max chars per result",
+             "type": "integer", "default": 4000, "group": "Tool behaviour"},
+            # ── Audit ─────────────────────────────────────────────────────────
+            {"key": "log_llm_prompts",
+             "label": "Log LLM prompts",
+             "type": "boolean", "default": True, "group": "Audit"},
+            {"key": "audit_topic_suffix",
+             "label": "Audit topic suffix",
+             "type": "string", "default": "audit_events", "group": "Audit"},
+        ],
+        "probe": probe_agent_runtime,
+    },
 }
 
 
@@ -632,3 +739,84 @@ def validate_submission(
         if f.get("required") and not submission.get(f["key"]):
             return False, f"missing required field '{f['key']}'"
     return True, "ok"
+
+
+# ─── Cross-integration probe helper ─────────────────────────────────────────
+#
+# Used by ConnectorTypes whose "Test Connection" depends on another
+# integration being healthy (today: ``agent-runtime`` checks the
+# referenced default LLM and Tavily integrations). Loads the integration
+# row by primary-key id, decodes its declared secrets, and dispatches to
+# the registry-declared probe.
+
+async def probe_integration_by_id(
+    integration_id: str,
+) -> Tuple[bool, str, Optional[int]]:
+    """Run the registered probe for an integration row, by ID.
+
+    Returns ``(False, "...", None)`` if the row does not exist or its
+    connector_type is unknown — never raises so the caller can surface a
+    clean error to the operator.
+
+    Imports DB access lazily so the registry module remains importable
+    in environments without a database (unit tests, doc generators).
+    """
+    if not integration_id:
+        return False, "integration_id missing", None
+
+    try:
+        from spm.db.session import get_session_factory  # type: ignore
+    except ModuleNotFoundError:  # pragma: no cover — DB always present in deploys
+        return False, "spm.db.session not importable", None
+
+    from sqlalchemy import select          # type: ignore
+    from sqlalchemy.orm import selectinload  # type: ignore
+
+    # Local import — avoids a circular at module-import time since
+    # spm.db.models pulls in platform_shared.models which can in turn
+    # import this module under unusual import orderings.
+    from spm.db.models import Integration  # type: ignore
+
+    # Decode-secret helper lives in integrations_routes; import lazily.
+    try:
+        from integrations_routes import _decode_secret  # type: ignore
+    except ModuleNotFoundError:
+        from services.spm_api.integrations_routes import _decode_secret  # type: ignore
+
+    sf = get_session_factory()
+    async with sf() as db:
+        stmt = (
+            select(Integration)
+            .where(Integration.id == integration_id)
+            .options(selectinload(Integration.credentials))
+        )
+        result = await db.execute(stmt)
+        row = result.scalar_one_or_none()
+        if row is None:
+            return False, f"integration {integration_id!r} not found", None
+
+        ct = get_connector(getattr(row, "connector_type", None))
+        if ct is None:
+            return False, (
+                f"integration {integration_id!r} has unknown "
+                f"connector_type {getattr(row, 'connector_type', None)!r}"
+            ), None
+
+        cfg = dict(row.config or {})
+        creds: Dict[str, Any] = {}
+        for f in ct["fields"]:
+            if not f.get("secret"):
+                continue
+            key = f["key"]
+            c = next(
+                (c for c in (row.credentials or [])
+                 if c.credential_type == key and c.is_configured),
+                None,
+            )
+            if c:
+                creds[key] = _decode_secret(c.value_enc)
+
+        try:
+            return await ct["probe"](cfg, creds)
+        except Exception as e:  # noqa: BLE001 — never raise from a probe
+            return False, f"probe for {ct['key']!r} errored: {e}", None

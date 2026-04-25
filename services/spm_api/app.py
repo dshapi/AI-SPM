@@ -846,3 +846,11 @@ try:
 except ModuleNotFoundError:
     from services.spm_api.integrations_routes import router as integrations_router  # noqa: E402
 app.include_router(integrations_router)
+
+# Agent runtime control plane — Phase 1 backend. Mounted last so its
+# routes appear in OpenAPI under the existing tags grouping.
+try:
+    from agent_routes import router as agent_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.agent_routes import router as agent_router  # noqa: E402
+app.include_router(agent_router)

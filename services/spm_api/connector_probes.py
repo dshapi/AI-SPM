@@ -673,3 +673,65 @@ async def probe_garak_stub(config: Dict[str, Any], creds: Dict[str, Any]) -> Pro
         return False, f"Garak CPM API timed out after {_PROBE_TIMEOUT_S:.0f}s", None
     except httpx.HTTPError as e:
         return True, f"Garak shared_secret configured (CPM API probe inconclusive: {e})", None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tier 3 (internal) — Agent Runtime Control Plane
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Default ops endpoint for the spm-mcp container.  Override via the
+# SPM_MCP_HEALTH_URL env var in tests / non-default deployments.
+_SPM_MCP_DEFAULT_HEALTH_URL = "http://spm-mcp:8500/health"
+
+
+async def probe_agent_runtime(config: Dict[str, Any], creds: Dict[str, Any]) -> ProbeResult:
+    """Probe for the ``agent-runtime`` ConnectorType.
+
+    Three checks, short-circuit on first failure:
+
+    1. ``spm-mcp`` HTTP health endpoint reachable.
+    2. The referenced ``default_llm_integration_id`` integration probes ok.
+    3. The referenced ``tavily_integration_id`` integration probes ok.
+
+    All three must pass for the agent-runtime control plane to function:
+    the MCP server must be up to serve tool calls, the LLM proxy must
+    have a valid upstream LLM, and Tavily is needed for ``web_fetch``.
+    Failure messages name the offending check so operators can fix the
+    right thing without digging through logs.
+    """
+    import os
+    started = time.monotonic()
+
+    # ── 1. spm-mcp /health ──────────────────────────────────────────────────
+    health_url = os.environ.get("SPM_MCP_HEALTH_URL", _SPM_MCP_DEFAULT_HEALTH_URL)
+    try:
+        async with httpx.AsyncClient(timeout=_PROBE_TIMEOUT_S) as c:
+            r = await c.get(health_url)
+        if r.status_code != 200:
+            return False, f"spm-mcp /health returned {r.status_code}", _ms(started)
+    except httpx.TimeoutException:
+        return False, f"spm-mcp /health timed out after {_PROBE_TIMEOUT_S:.0f}s", None
+    except httpx.HTTPError as e:
+        return False, f"spm-mcp unreachable: {e}", None
+
+    # ── 2 & 3. Referenced integrations ──────────────────────────────────────
+    # Imported here (not at module top) to avoid a circular import:
+    # connector_registry imports this module; probe_integration_by_id
+    # is defined in connector_registry.
+    try:
+        from connector_registry import probe_integration_by_id  # type: ignore
+    except ModuleNotFoundError:
+        from services.spm_api.connector_registry import probe_integration_by_id  # type: ignore
+
+    for fk, label in (
+        ("default_llm_integration_id", "Default LLM"),
+        ("tavily_integration_id",      "Tavily"),
+    ):
+        ref_id = (config.get(fk) or "").strip()
+        if not ref_id:
+            return False, f"{label} integration is not configured", _ms(started)
+        ok, msg, _latency = await probe_integration_by_id(ref_id)
+        if not ok:
+            return False, f"{label} integration: {msg}", _ms(started)
+
+    return True, "spm-mcp + default LLM + Tavily all green", _ms(started)
