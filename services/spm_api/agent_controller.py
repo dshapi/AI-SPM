@@ -173,12 +173,22 @@ async def stop_agent_container(agent_id: str) -> None:
     SDK's signal handler (Phase 2) drains in-flight messages cleanly
     inside the grace window.
     """
-    import docker.errors  # type: ignore
     client = _docker_client()
     name = f"agent-{agent_id}"
+
+    # Resolve docker.errors.NotFound lazily so the function is importable
+    # in test envs where the docker SDK isn't installed. The test suite
+    # mocks _docker_client(), so we never actually need a real NotFound
+    # to fire — but Python still has to evaluate the except clause.
+    try:
+        from docker.errors import NotFound as _NotFound  # type: ignore
+    except ImportError:                                  # pragma: no cover
+        class _NotFound(Exception):
+            pass
+
     try:
         ctr = client.containers.get(name)
-    except docker.errors.NotFound:
+    except _NotFound:
         log.info("stop_agent_container: %s not running (no-op)", name)
         return
     try:
@@ -186,9 +196,8 @@ async def stop_agent_container(agent_id: str) -> None:
     finally:
         try:
             ctr.remove(force=True)
-        except docker.errors.NotFound:
+        except _NotFound:
             pass
-
 
 # ─── 4. High-level orchestration ───────────────────────────────────────────
 
