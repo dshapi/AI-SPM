@@ -214,6 +214,12 @@ async def spawn_agent_container(*, agent_id: str, tenant_id: str,
         "LLM_BASE_URL":             "http://spm-llm-proxy:8500/v1",
         "LLM_API_KEY":              llm_api_key,
         "KAFKA_BOOTSTRAP_SERVERS":  _KAFKA_BOOTSTRAP,
+        # SDK reaches back here for the ready() handshake, /secrets/*,
+        # and chat history. spm-api is dual-homed on default+agent-net
+        # so the agent container (on agent-net only) can resolve it.
+        "CONTROLLER_URL": os.environ.get(
+            "AGENT_CONTROLLER_URL", "http://spm-api:8092",
+        ),
     }
     host_path = _resolve_host_code_path(code_path)
     log.info("spawn_agent_container: agent=%s code_path=%s host_path=%s",
@@ -325,7 +331,20 @@ async def deploy_agent(db, agent_id) -> None:
         await _db_commit(db)
         return
 
-    await _wait_for_ready(db, agent_id, timeout_s=_READY_TIMEOUT_S)
+    try:
+        await _wait_for_ready(db, agent_id, timeout_s=_READY_TIMEOUT_S)
+    except TimeoutError as e:
+        # Agent spawned but never called aispm.ready() within the
+        # window. Most common cause: running the Phase 1 stub image
+        # (which never calls ready()), or network mis-wiring (the
+        # agent can't resolve spm-api). Flip the row to "crashed" so
+        # the operator sees the failure in the UI instead of a row
+        # frozen at "starting" forever. Container is still up — the
+        # operator can read its logs to diagnose.
+        log.warning("deploy_agent: ready timeout — marking crashed: %s", e)
+        a.runtime_state = "crashed"
+        await _db_commit(db)
+        return
 
 
 async def _wait_for_ready(db, agent_id, *, timeout_s: float) -> None:
