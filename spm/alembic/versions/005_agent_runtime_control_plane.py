@@ -12,23 +12,25 @@ sandboxed containers:
     agent_chat_messages   — immutable message log per session
 
 Also creates necessary enums for agent lifecycle (agent_type, runtime_state)
-and chat modeling (chat_role).
+and chat modeling (chat_role). The risk_level and policy_status enums are
+reused from existing tables (ModelRegistry); they are created with
+idempotent guards since they may already exist from prior migrations.
 
-The risk_level and policy_status enums are reused from existing tables
-(ModelRegistry); they are created with idempotent guards since they may
-already exist from prior migrations.
-
-Seeds five mock agents (CustomerSupport-GPT, CodeReview-Assistant,
-DataPipeline-Orchestrator, HRIntake-Bot, ThreatHunter-AI) so the Inventory
-UI can switch from hardcoded mocks to live database rows without losing
-existing rows.
+Idempotency
+───────────
+agent_type / runtime_state / chat_role are owned by THIS migration. We
+let SQLAlchemy create them via the column definitions (create_type=True
++ checkfirst=True) instead of using explicit op.execute("CREATE TYPE")
+calls. This avoids the duplicate-create error that fires when the
+explicit CREATE TYPE collides with SQLAlchemy's own before_create
+listener on subsequent column references.
 """
 from __future__ import annotations
 
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
 
 # revision identifiers, used by Alembic.
@@ -37,20 +39,28 @@ down_revision: Union[str, None] = "004"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-AGENT_TYPE = ("langchain", "llamaindex", "autogpt", "openai_assistant", "custom")
+AGENT_TYPE    = ("langchain", "llamaindex", "autogpt", "openai_assistant", "custom")
 RUNTIME_STATE = ("stopped", "starting", "running", "crashed")
-RISK_LEVEL = ("low", "medium", "high", "critical")
+RISK_LEVEL    = ("low", "medium", "high", "critical")
 POLICY_STATUS = ("covered", "partial", "none")
-CHAT_ROLE = ("user", "agent")
+CHAT_ROLE     = ("user", "agent")
+
+
+# Build the postgresql ENUM objects ONCE and reuse them across columns.
+# Reusing the SAME instance ensures SQLAlchemy's before_create listener
+# only fires for the first column that mentions each type — subsequent
+# columns just reference the already-known type. checkfirst=True makes
+# re-running the migration on a partially-applied DB safe.
+agent_type_enum    = sa.Enum(*AGENT_TYPE,    name="agent_type",    create_type=True)
+runtime_state_enum = sa.Enum(*RUNTIME_STATE, name="runtime_state", create_type=True)
+chat_role_enum     = sa.Enum(*CHAT_ROLE,     name="chat_role",     create_type=True)
 
 
 def upgrade() -> None:
-    # ── Create enums ────────────────────────────────────────────────────────
-    op.execute("CREATE TYPE agent_type AS ENUM " + str(AGENT_TYPE))
-    op.execute("CREATE TYPE runtime_state AS ENUM " + str(RUNTIME_STATE))
-    op.execute("CREATE TYPE chat_role AS ENUM " + str(CHAT_ROLE))
+    # ── Bind the connection so checkfirst can probe pg_type ─────────────────
+    bind = op.get_bind()
 
-    # risk_level / policy_status reuse existing if already present; idempotent guard:
+    # ── Reused enums: create only if not already present ────────────────────
     op.execute(
         "DO $$ BEGIN CREATE TYPE risk_level AS ENUM " + str(RISK_LEVEL)
         + "; EXCEPTION WHEN duplicate_object THEN null; END $$;"
@@ -60,7 +70,12 @@ def upgrade() -> None:
         + "; EXCEPTION WHEN duplicate_object THEN null; END $$;"
     )
 
-    # ── Create agents table ──────────────────────────────────────────────────
+    # ── Owned enums: idempotent create via SQLAlchemy ───────────────────────
+    agent_type_enum.create(bind, checkfirst=True)
+    runtime_state_enum.create(bind, checkfirst=True)
+    chat_role_enum.create(bind, checkfirst=True)
+
+    # ── Create agents table ─────────────────────────────────────────────────
     op.create_table(
         "agents",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -106,7 +121,7 @@ def upgrade() -> None:
     )
     op.create_index("ix_agents_tenant_state", "agents", ["tenant_id", "runtime_state"])
 
-    # ── Create agent_chat_sessions table ─────────────────────────────────────
+    # ── Create agent_chat_sessions table ────────────────────────────────────
     op.create_table(
         "agent_chat_sessions",
         sa.Column("id", UUID(as_uuid=True), primary_key=True),
@@ -122,7 +137,7 @@ def upgrade() -> None:
         sa.Column("message_count", sa.Integer, nullable=False, server_default="0"),
     )
     op.create_index("ix_chat_sessions_agent", "agent_chat_sessions", ["agent_id"])
-    op.create_index("ix_chat_sessions_user", "agent_chat_sessions", ["user_id"])
+    op.create_index("ix_chat_sessions_user",  "agent_chat_sessions", ["user_id"])
 
     # ── Create agent_chat_messages table ────────────────────────────────────
     op.create_table(
@@ -144,7 +159,7 @@ def upgrade() -> None:
         sa.Column("trace_id", sa.Text),
     )
     op.create_index("ix_chat_messages_session", "agent_chat_messages", ["session_id"])
-    op.create_index("ix_chat_messages_trace", "agent_chat_messages", ["trace_id"])
+    op.create_index("ix_chat_messages_trace",   "agent_chat_messages", ["trace_id"])
 
     # ── Seed the 5 mock agents ──────────────────────────────────────────────
     op.execute(
@@ -163,7 +178,7 @@ def upgrade() -> None:
            'people-ops', '', 'low','covered','stopped','-','-','-','-','t1'),
           (gen_random_uuid(), 'ThreatHunter-AI', '1.0', 'langchain', 'internal',
            'security-ops', '', 'high','partial','running','-','-','-','-','t1');
-    """
+        """
     )
 
 
@@ -171,6 +186,7 @@ def downgrade() -> None:
     op.drop_table("agent_chat_messages")
     op.drop_table("agent_chat_sessions")
     op.drop_table("agents")
-    op.execute("DROP TYPE chat_role")
-    op.execute("DROP TYPE runtime_state")
-    op.execute("DROP TYPE agent_type")
+    bind = op.get_bind()
+    chat_role_enum.drop(bind,     checkfirst=True)
+    runtime_state_enum.drop(bind, checkfirst=True)
+    agent_type_enum.drop(bind,    checkfirst=True)
