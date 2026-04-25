@@ -50,6 +50,18 @@ _READY_TIMEOUT_S       = float(os.environ.get("AGENT_READY_TIMEOUT_S",       "30
 _READY_SLEEP_S = float(os.environ.get("AGENT_READY_SLEEP_S", "0"))
 
 
+# Resolved once at import time. Real ``docker.errors.NotFound`` when the
+# SDK is installed, a stub Exception subclass otherwise. Exported (no
+# leading underscore on the import-resolved alias) so tests can construct
+# the same class agent_controller catches without needing the docker SDK
+# installed in their environment.
+try:
+    from docker.errors import NotFound as _NotFound  # type: ignore
+except ImportError:                                  # pragma: no cover
+    class _NotFound(Exception):
+        pass
+
+
 # ─── 1. Token minting ──────────────────────────────────────────────────────
 
 def mint_agent_tokens() -> Tuple[str, str]:
@@ -172,19 +184,12 @@ async def stop_agent_container(agent_id: str) -> None:
     SIGTERM with 10s grace, then SIGKILL via Docker's force-stop. The
     SDK's signal handler (Phase 2) drains in-flight messages cleanly
     inside the grace window.
+
+    ``_NotFound`` is resolved at module import time (above) so the
+    behaviour is identical whether the docker SDK is installed or not.
     """
     client = _docker_client()
     name = f"agent-{agent_id}"
-
-    # Resolve docker.errors.NotFound lazily so the function is importable
-    # in test envs where the docker SDK isn't installed. The test suite
-    # mocks _docker_client(), so we never actually need a real NotFound
-    # to fire — but Python still has to evaluate the except clause.
-    try:
-        from docker.errors import NotFound as _NotFound  # type: ignore
-    except ImportError:                                  # pragma: no cover
-        class _NotFound(Exception):
-            pass
 
     try:
         ctr = client.containers.get(name)

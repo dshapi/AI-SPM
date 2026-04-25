@@ -168,9 +168,14 @@ class TestStopAgentContainer:
 
     @pytest.mark.asyncio
     async def test_missing_container_is_noop(self, monkeypatch):
-        import docker.errors  # type: ignore
+        # Use the same _NotFound class agent_controller catches — it's
+        # docker.errors.NotFound when the SDK is installed, a stub
+        # Exception subclass otherwise. Either way, the test runs in
+        # any environment without depending on the docker package.
+        NotFound = agent_controller._NotFound
+
         client = MagicMock()
-        client.containers.get.side_effect = docker.errors.NotFound("nope")
+        client.containers.get.side_effect = NotFound("nope")
         monkeypatch.setattr(agent_controller, "_docker_client", lambda: client)
 
         # Must NOT raise.
