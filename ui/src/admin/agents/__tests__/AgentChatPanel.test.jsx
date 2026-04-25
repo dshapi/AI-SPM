@@ -56,7 +56,11 @@ describe("AgentChatPanel — visibility", () => {
 
   it("shows agent name in header when open", () => {
     render(<AgentChatPanel open agent={RUNNING} />)
-    expect(screen.getByRole("heading", { level: 2 })).toHaveTextContent("Test")
+    // Header structure mirrors PreviewPanel — agent name is in a <p>,
+    // not a heading. Match by aria-label of the dialog wrapper.
+    expect(screen.getByRole("dialog", { name: /chat with test/i }))
+      .toBeInTheDocument()
+    expect(screen.getByText("Test")).toBeInTheDocument()
   })
 })
 

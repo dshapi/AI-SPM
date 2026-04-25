@@ -1488,51 +1488,60 @@ export default function Inventory() {
             }
           </div>
 
-          {/* Register panel takes precedence over preview when open.
-              Phase 3 splits this by tab: agents have their own panel
-              (RegisterAgentPanel) so the model-registration flow
-              stays uncluttered. */}
-          {showRegister && canRegister && activeTab === 'agents'
-            ? <RegisterAgentPanel
-                onClose={() => setShowRegister(false)}
-                ownerOptions={ownerOptions}
-                onRegistered={async () => {
-                  // Pull the live agents poll forward so the new row
-                  // shows up immediately instead of waiting 5s.
-                  if (refreshAgents) await refreshAgents()
-                  setShowRegister(false)
+          {/* Right-hand slot priority — only one panel renders at a
+              time, all share the same 300px column dimensions:
+                1. AgentChatPanel — if chat is open
+                2. Register panel — agents (RegisterAgentPanel) or
+                   models (RegisterAssetPanel)
+                3. PreviewPanel — selected asset */}
+          {chatAgent
+            ? <AgentChatPanel
+                open
+                agent={{
+                  // Map the inventory-shape row onto the fields the
+                  // chat panel expects — id is the real backend id.
+                  id:            chatAgent._backendId || chatAgent.id,
+                  name:          chatAgent.name,
+                  risk:          chatAgent.risk,
+                  runtime_state: chatAgent.runtime_state || 'stopped',
                 }}
+                onClose={() => setChatAgent(null)}
               />
-            : showRegister && canRegister && activeTab === 'models'
-              ? <RegisterAssetPanel
+            : showRegister && canRegister && activeTab === 'agents'
+              ? <RegisterAgentPanel
                   onClose={() => setShowRegister(false)}
-                  onRegistered={{
-                    ownerOptions,
-                    onCreated: async () => {
-                      // Refresh live list so the new row appears at the top
-                      await reloadLiveModels()
-                    },
+                  ownerOptions={ownerOptions}
+                  onRegistered={async () => {
+                    // Pull the live agents poll forward so the new row
+                    // shows up immediately instead of waiting 5s.
+                    if (refreshAgents) await refreshAgents()
+                    setShowRegister(false)
                   }}
                 />
-              : selected && (
-                  <PreviewPanel
-                    asset={selected}
-                    onClose={() => navigate('/admin/inventory', { replace: true })}
-                    onOpenChat={(agent) => setChatAgent(agent)}
-                    onDeleted={async () => {
-                      // Refresh BEFORE navigating away so the list
-                      // updates first; otherwise the URL still points
-                      // at a row that no longer exists in the merged
-                      // list and React unmounts mid-render, surfacing
-                      // an "null is not an object" stack from its
-                      // internal listener accumulator.
-                      try {
-                        if (refreshAgents) await refreshAgents()
-                      } catch { /* swallow — navigate anyway */ }
-                      navigate('/admin/inventory', { replace: true })
+              : showRegister && canRegister && activeTab === 'models'
+                ? <RegisterAssetPanel
+                    onClose={() => setShowRegister(false)}
+                    onRegistered={{
+                      ownerOptions,
+                      onCreated: async () => {
+                        // Refresh live list so the new row appears at the top
+                        await reloadLiveModels()
+                      },
                     }}
                   />
-                )
+                : selected && (
+                    <PreviewPanel
+                      asset={selected}
+                      onClose={() => navigate('/admin/inventory', { replace: true })}
+                      onOpenChat={(agent) => setChatAgent(agent)}
+                      onDeleted={async () => {
+                        try {
+                          if (refreshAgents) await refreshAgents()
+                        } catch { /* swallow — navigate anyway */ }
+                        navigate('/admin/inventory', { replace: true })
+                      }}
+                    />
+                  )
           }
 
         </div>
@@ -1550,21 +1559,6 @@ export default function Inventory() {
         )}
 
       </div>
-
-      {/* Chat drawer — floats over the page, opens from the
-          Open Chat button on PreviewPanel for live agents. */}
-      <AgentChatPanel
-        open={Boolean(chatAgent)}
-        agent={chatAgent ? {
-          // Map the inventory-shape row onto the fields AgentChatPanel
-          // expects (id is the real backend id, runtime_state pass-through).
-          id:            chatAgent._backendId || chatAgent.id,
-          name:          chatAgent.name,
-          risk:          (chatAgent.risk || '').toLowerCase(),
-          runtime_state: chatAgent.runtime_state || 'stopped',
-        } : null}
-        onClose={() => setChatAgent(null)}
-      />
 
     </PageContainer>
   )

@@ -1,11 +1,14 @@
 // ui/src/admin/agents/AgentChatPanel.jsx
 //
-// Right-side drawer for chatting with one agent. Independent of the
-// AgentDetailDrawer so an operator can keep both open at once.
+// Inline right-side panel for chatting with one agent. Sits in the
+// same 300px slot as PreviewPanel + RegisterAgentPanel so the
+// inventory layout doesn't shift — only the panel content swaps.
 //
-// Visual style mirrors PreviewPanel + AgentDetailDrawer for
-// consistency: risk-tinted header, scrollable body, sticky input
-// composer at the bottom.
+// Visual contract is identical to PreviewPanel:
+//   - 300px fixed width (no overflow over the table)
+//   - h-full so the parent flexbox owns vertical sizing (no h-screen
+//     so the bottom composer can't get clipped by browser chrome)
+//   - risk-tinted header, scrollable body, sticky composer footer
 
 import { Loader2, MessageSquare, RefreshCw, Send, X } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
@@ -13,11 +16,17 @@ import { useEffect, useRef, useState } from "react"
 import { useAgentChat } from "./hooks/useAgentChat"
 
 
+// Same risk-tint vocabulary as PreviewPanel uses (capitalised keys)
+// PLUS lowercase keys for callers that pass the backend value directly.
 const RISK_TINT = {
-  critical: "bg-rose-100   border-rose-300   text-rose-900",
-  high:     "bg-rose-50    border-rose-200   text-rose-900",
-  medium:   "bg-amber-50   border-amber-200  text-amber-900",
-  low:      "bg-emerald-50 border-emerald-200 text-emerald-900",
+  Critical: "bg-red-50",
+  High:     "bg-orange-50",
+  Medium:   "bg-yellow-50",
+  Low:      "bg-emerald-50",
+  critical: "bg-red-50",
+  high:     "bg-orange-50",
+  medium:   "bg-yellow-50",
+  low:      "bg-emerald-50",
 }
 
 
@@ -50,7 +59,7 @@ export default function AgentChatPanel({ open, agent, onClose }) {
 
   if (!open || !agent) return null
 
-  const tint = RISK_TINT[agent.risk] || RISK_TINT.low
+  const riskBg = RISK_TINT[agent.risk] || "bg-gray-50"
   const canSend = !isStreaming && draft.trim().length > 0
 
   const onSubmit = (e) => {
@@ -61,68 +70,69 @@ export default function AgentChatPanel({ open, agent, onClose }) {
   }
 
   return (
-    <aside
+    <div
       role="dialog" aria-modal="false" aria-label={`Chat with ${agent.name}`}
-      className={
-        "fixed top-0 right-0 z-40 h-screen w-[420px] max-w-[90vw] " +
-        "bg-white border-l border-slate-200 shadow-2xl flex flex-col"
-      }
+      className="w-[300px] shrink-0 flex flex-col h-full bg-white"
       data-testid="agent-chat-panel"
     >
-      <header className={`flex items-start justify-between p-4 border-b ${tint}`}>
-        <div>
-          <div className="text-[11px] font-medium uppercase tracking-wider opacity-70 flex items-center gap-1">
+      {/* Header — mirrors PreviewPanel exactly. */}
+      <div className={`px-4 py-3.5 border-b border-gray-100 flex items-start justify-between gap-2 ${riskBg}`}>
+        <div className="min-w-0">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-gray-500 flex items-center gap-1">
             <MessageSquare size={11} aria-hidden /> Chat
           </div>
-          <h2 className="text-[15px] font-semibold mt-0.5">{agent.name}</h2>
-          <div className="text-[11px] mt-1 opacity-80">
-            {agent.runtime_state}
+          <p className="text-[13px] font-semibold text-gray-900 leading-snug truncate mt-0.5">
+            {agent.name}
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5">
+            {agent.runtime_state || "stopped"}
             {agent.runtime_state !== "running" && (
-              <span className="ml-2 text-rose-700">· paused</span>
+              <span className="ml-2 text-red-600">· paused</span>
             )}
-          </div>
+          </p>
         </div>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5 shrink-0 mt-0.5">
           <button
             type="button" onClick={reset}
             aria-label="New chat"
-            className="p-1 rounded hover:bg-black/10 text-current"
+            className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors"
             title="Start a new session"
           >
-            <RefreshCw size={14} />
+            <RefreshCw size={12} />
           </button>
           <button
             type="button" onClick={onClose}
             aria-label="Close chat"
-            className="p-1 rounded hover:bg-black/10 text-current"
+            className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors"
           >
-            <X size={16} />
+            <X size={13} />
           </button>
         </div>
-      </header>
+      </div>
 
-      {/* Conversation body */}
+      {/* Conversation body — scrollable. */}
       <div
         ref={bodyRef} data-testid="chat-body"
-        className="flex-1 overflow-y-auto p-3 space-y-2 bg-slate-50"
+        className="flex-1 overflow-y-auto px-3 py-3 space-y-2 bg-gray-50"
       >
         {messages.length === 0 && (
-          <p className="text-[12px] text-slate-500 italic">
+          <p className="text-[12px] text-gray-500 italic">
             Type a message below to start the conversation.
           </p>
         )}
         {messages.map(m => <Bubble key={m.id} m={m} />)}
         {error && (
-          <p className="text-[11px] text-rose-700 mt-2" role="alert">
+          <p className="text-[11px] text-red-600 mt-2" role="alert">
             ⚠ {error.message}
           </p>
         )}
       </div>
 
-      {/* Composer */}
+      {/* Composer — sticky bottom; bg-white so it stands out from
+          the bg-gray-50 body. */}
       <form
         onSubmit={onSubmit}
-        className="border-t border-slate-200 p-2 bg-white"
+        className="border-t border-gray-100 px-3 py-2 bg-white shrink-0"
       >
         <div className="flex items-end gap-2">
           <textarea
@@ -143,9 +153,9 @@ export default function AgentChatPanel({ open, agent, onClose }) {
             rows={2}
             disabled={agent.runtime_state !== "running"}
             className={
-              "flex-1 resize-none border border-slate-300 rounded-md px-2 py-1.5 " +
+              "flex-1 resize-none border border-gray-300 rounded-md px-2 py-1.5 " +
               "text-[12px] focus:outline-none focus:ring-2 focus:ring-blue-400 " +
-              "disabled:bg-slate-50 disabled:text-slate-500"
+              "disabled:bg-gray-50 disabled:text-gray-400"
             }
           />
           <button
@@ -156,14 +166,14 @@ export default function AgentChatPanel({ open, agent, onClose }) {
               "px-2.5 py-1.5 rounded-md border " +
               (canSend && agent.runtime_state === "running"
                 ? "bg-blue-600 hover:bg-blue-700 text-white border-blue-700"
-                : "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed")
+                : "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed")
             }
           >
             {isStreaming ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
           </button>
         </div>
       </form>
-    </aside>
+    </div>
   )
 }
 
