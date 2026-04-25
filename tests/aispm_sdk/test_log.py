@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from aispm import log as log_mod
+from aispm import _log_module as log_mod
 from aispm.log import log
 
 

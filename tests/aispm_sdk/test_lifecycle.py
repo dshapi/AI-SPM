@@ -20,7 +20,7 @@ async def test_ready_posts_to_controller(monkeypatch):
     monkeypatch.setattr(lifecycle, "_CONTROLLER_URL", "http://spm-api:8092")
 
     await lifecycle.ready()
-    assert captured["url"].endswith("/api/spm/agents/ag-001/ready")
+    assert captured["url"].endswith("/agents/ag-001/ready")
 
 
 @pytest.mark.asyncio

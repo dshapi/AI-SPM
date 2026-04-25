@@ -52,7 +52,11 @@ async def ready() -> None:
         log.warning("aispm.ready(): AGENT_ID env var not set; skipping handshake")
         return
 
-    url = f"{_CONTROLLER_URL}/api/spm/agents/{_AGENT_ID}/ready"
+    # NB: NO ``/api/spm`` prefix — that's added by the Vite/Traefik
+    # proxy in front of the browser. The agent container talks
+    # directly to spm-api, which mounts the routes at ``/agents/...``
+    # (see services/spm_api/agent_routes.py).
+    url = f"{_CONTROLLER_URL}/agents/{_AGENT_ID}/ready"
     try:
         async with httpx.AsyncClient(timeout=_READY_TIMEOUT_S) as c:
             r = await c.post(url)

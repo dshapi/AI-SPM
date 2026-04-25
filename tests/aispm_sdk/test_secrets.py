@@ -25,7 +25,7 @@ async def test_get_secret_returns_value(monkeypatch):
     val = await get_secret("MY_API_KEY")
     assert val == "sk-test-1234"
     assert captured["url"].endswith(
-        "/api/spm/agents/ag-001/secrets/MY_API_KEY"
+        "/agents/ag-001/secrets/MY_API_KEY"
     )
     assert captured["headers"]["Authorization"] == "Bearer tok"
 

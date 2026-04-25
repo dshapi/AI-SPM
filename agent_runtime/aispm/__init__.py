@@ -53,9 +53,16 @@ CONTROLLER_URL: str = os.environ.get(
 # We import the submodules eagerly (rather than on first use) so any
 # import-time side effects — env reads, kafka client construction —
 # fire predictably at agent startup, before ``main()`` runs.
-from . import chat, lifecycle, llm, log, mcp, secrets, types  # noqa: E402, F401
-from .lifecycle import ready                                  # noqa: E402, F401
-from .secrets   import get_secret                             # noqa: E402, F401
+from . import chat, lifecycle, llm, mcp, secrets, types  # noqa: E402, F401
+from . import log as _log_module                          # noqa: E402  — submodule
+from .lifecycle import ready                              # noqa: E402, F401
+from .log       import log                                # noqa: E402, F401  — function
+from .secrets   import get_secret                         # noqa: E402, F401
+# Customers may have written either ``aispm.log("msg")`` (the function,
+# per spec § 8) or ``aispm.log.log("msg")`` (sub-module access). The
+# function-form takes precedence because it's the documented public
+# API; the sub-module form keeps working via ``aispm._log_module`` if
+# anyone needs to introspect the module itself.
 
 __all__ = [
     # Connection info
@@ -71,7 +78,7 @@ __all__ = [
     "chat",
     "lifecycle",
     "llm",
-    "log",
+    "log",          # the function — see _log_module for the submodule
     "mcp",
     "secrets",
     "types",

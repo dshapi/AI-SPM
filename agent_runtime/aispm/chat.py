@@ -208,7 +208,9 @@ async def history(session_id: str, limit: int = 10) -> List[HistoryEntry]:
     if not _AGENT_ID:
         raise RuntimeError("aispm.chat.history: AGENT_ID env var not set")
 
-    url = (f"{_CONTROLLER_URL}/api/spm/agents/{_AGENT_ID}"
+    # No ``/api/spm`` — direct call to spm-api; that prefix is only
+    # added by the front-end proxy.
+    url = (f"{_CONTROLLER_URL}/agents/{_AGENT_ID}"
            f"/sessions/{session_id}/messages")
     headers = {"Authorization": f"Bearer {_MCP_TOKEN}"}
     async with httpx.AsyncClient(timeout=10) as c:

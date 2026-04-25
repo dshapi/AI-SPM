@@ -53,8 +53,9 @@ async def get_secret(name: str) -> str:
     if not _AGENT_ID:
         raise RuntimeError("aispm.get_secret: AGENT_ID env var not set")
 
-    url = (f"{_CONTROLLER_URL}/api/spm/agents/{_AGENT_ID}"
-           f"/secrets/{name}")
+    # No ``/api/spm`` — the agent talks directly to spm-api, not via
+    # the front-end proxy that adds that prefix.
+    url = f"{_CONTROLLER_URL}/agents/{_AGENT_ID}/secrets/{name}"
     headers = {"Authorization": f"Bearer {_MCP_TOKEN}"}
     async with httpx.AsyncClient(timeout=_TIMEOUT_S) as c:
         r = await c.get(url, headers=headers)
