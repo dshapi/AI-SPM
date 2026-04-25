@@ -134,30 +134,57 @@ ALLOWED_PATCH_FIELDS = {
 }
 
 
+def _safe_get(obj, name, default=None):
+    """Read ``obj.name`` and tolerate any failure (lazy-load mishaps,
+    detached instance, missing column on a partial select). The route
+    returns ``default`` for that one field instead of 500-ing the
+    whole response."""
+    try:
+        return getattr(obj, name, default)
+    except Exception:                                     # noqa: BLE001
+        return default
+
+
+def _enum_value(v):
+    if v is None:
+        return None
+    if hasattr(v, "value"):
+        return v.value
+    return v
+
+
+def _iso(dt):
+    try:
+        return dt.isoformat() if dt else None
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
 def _to_dict(a: Agent, *, warnings: Optional[List[str]] = None) -> Dict[str, Any]:
-    """Public JSON shape. NEVER includes mcp_token / llm_api_key."""
+    """Public JSON shape. NEVER includes mcp_token / llm_api_key.
+
+    Every attribute access is wrapped in ``_safe_get`` so a single
+    column hiccup (e.g. an expired-after-commit attribute that
+    SQLAlchemy can't lazy-load in this async context) returns
+    ``None`` for that field instead of bringing down the whole route.
+    """
     d: Dict[str, Any] = {
-        "id":             str(a.id),
-        "name":           a.name,
-        "version":        a.version,
-        "agent_type":     a.agent_type if not hasattr(a.agent_type, "value")
-                          else a.agent_type.value,
-        "provider":       a.provider if not hasattr(a.provider, "value")
-                          else a.provider.value,
-        "owner":          a.owner,
-        "description":    a.description,
-        "risk":           a.risk if not hasattr(a.risk, "value")
-                          else a.risk.value,
-        "policy_status":  a.policy_status if not hasattr(a.policy_status, "value")
-                          else a.policy_status.value,
-        "runtime_state":  a.runtime_state if not hasattr(a.runtime_state, "value")
-                          else a.runtime_state.value,
-        "code_path":      a.code_path,
-        "code_sha256":    a.code_sha256,
-        "tenant_id":      a.tenant_id,
-        "created_at":     a.created_at.isoformat() if a.created_at else None,
-        "updated_at":     a.updated_at.isoformat() if a.updated_at else None,
-        "last_seen_at":   a.last_seen_at.isoformat() if a.last_seen_at else None,
+        "id":             str(_safe_get(a, "id", "")),
+        "name":           _safe_get(a, "name"),
+        "version":        _safe_get(a, "version"),
+        "agent_type":     _enum_value(_safe_get(a, "agent_type")),
+        "provider":       _enum_value(_safe_get(a, "provider")),
+        "owner":          _safe_get(a, "owner"),
+        "description":    _safe_get(a, "description"),
+        "risk":           _enum_value(_safe_get(a, "risk")),
+        "policy_status":  _enum_value(_safe_get(a, "policy_status")),
+        "runtime_state":  _enum_value(_safe_get(a, "runtime_state")),
+        "code_path":      _safe_get(a, "code_path"),
+        "code_sha256":    _safe_get(a, "code_sha256"),
+        "tenant_id":      _safe_get(a, "tenant_id"),
+        "created_at":     _iso(_safe_get(a, "created_at")),
+        "updated_at":     _iso(_safe_get(a, "updated_at")),
+        "last_seen_at":   _iso(_safe_get(a, "last_seen_at")),
     }
     if warnings is not None:
         d["warnings"] = warnings
@@ -247,6 +274,15 @@ async def create_agent(
             # Deploy failures shouldn't lose the row — the operator
             # can fix and retry via the start endpoint. Log and keep.
             log.warning("deploy after upload failed: %s", e)
+
+    # deploy_agent's commit expires server-side-modified columns
+    # (updated_at via onupdate=func.now). Refresh once more so the
+    # subsequent _to_dict can read every column without triggering
+    # a sync lazy-load → MissingGreenlet inside this async route.
+    try:
+        await _maybe_async_refresh(db, a)
+    except Exception as e:                                # noqa: BLE001
+        log.warning("create_agent: post-deploy refresh failed: %s", e)
 
     return _to_dict(a, warnings=res.warnings)
 
