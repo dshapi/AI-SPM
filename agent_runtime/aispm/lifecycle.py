@@ -31,6 +31,7 @@ import httpx
 from . import (
     AGENT_ID       as _AGENT_ID,
     CONTROLLER_URL as _CONTROLLER_URL,
+    MCP_TOKEN      as _MCP_TOKEN,
 )
 
 log = logging.getLogger(__name__)
@@ -49,7 +50,8 @@ async def ready() -> None:
     crash an otherwise-healthy agent.
     """
     if not _AGENT_ID:
-        log.warning("aispm.ready(): AGENT_ID env var not set; skipping handshake")
+        print("[aispm.ready] AGENT_ID env var not set; skipping handshake",
+              flush=True)
         return
 
     # NB: NO ``/api/spm`` prefix — that's added by the Vite/Traefik
@@ -57,14 +59,23 @@ async def ready() -> None:
     # directly to spm-api, which mounts the routes at ``/agents/...``
     # (see services/spm_api/agent_routes.py).
     url = f"{_CONTROLLER_URL}/agents/{_AGENT_ID}/ready"
+    # The /ready endpoint authenticates the caller with the agent's
+    # own mcp_token (proves we're the agent the controller just
+    # spawned). Without it the controller answers 401 and the row
+    # never flips to running.
+    headers = {"Authorization": f"Bearer {_MCP_TOKEN}"} if _MCP_TOKEN else {}
+    print(f"[aispm.ready] POST {url} (auth={'yes' if _MCP_TOKEN else 'NO'})",
+          flush=True)
     try:
         async with httpx.AsyncClient(timeout=_READY_TIMEOUT_S) as c:
-            r = await c.post(url)
+            r = await c.post(url, headers=headers)
+        print(f"[aispm.ready] response {r.status_code}", flush=True)
         if r.status_code >= 400:
-            log.warning("aispm.ready(): controller returned %s — %s",
-                         r.status_code, r.text)
+            print(f"[aispm.ready] controller returned {r.status_code} — "
+                  f"{r.text[:200]}", flush=True)
     except httpx.HTTPError as e:
-        log.warning("aispm.ready(): handshake failed: %s", e)
+        print(f"[aispm.ready] handshake FAILED: {type(e).__name__}: {e}",
+              flush=True)
 
 
 # ─── Signal handling ───────────────────────────────────────────────────────
