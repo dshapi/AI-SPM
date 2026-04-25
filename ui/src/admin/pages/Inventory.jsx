@@ -517,6 +517,59 @@ function MetaRow({ icon: Icon, label, value }) {
   )
 }
 
+// Delete-agent confirmation modal — same visual language as
+// EscalateConfirmModal in Runtime.jsx, just retitled and red-tinted
+// to signal a destructive action. Kept inline here because PreviewPanel
+// is the only consumer; promote to a shared component when a second
+// destructive flow needs it.
+function DeleteAgentConfirmModal({ open, agentName, loading, onConfirm, onCancel }) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      {/* Backdrop */}
+      <div
+        className="absolute inset-0 bg-black/30 backdrop-blur-[2px]"
+        onClick={onCancel}
+      />
+      {/* Dialog */}
+      <div className="relative z-10 bg-white rounded-xl shadow-xl border border-gray-200 w-[360px] p-5">
+        <div className="flex items-start gap-3 mb-4">
+          <div className="w-9 h-9 rounded-lg bg-red-50 border border-red-200 flex items-center justify-center shrink-0">
+            <AlertCircle size={16} className="text-red-600" strokeWidth={2} />
+          </div>
+          <div className="min-w-0">
+            <p className="text-[13px] font-semibold text-gray-900">Delete Agent</p>
+            <p className="text-[12px] text-gray-500 mt-0.5 leading-relaxed">
+              Are you sure you want to delete <span className="font-medium text-gray-700">{agentName}</span>?
+              This stops the container, deletes its Kafka topics, and drops the row.
+              This cannot be undone.
+            </p>
+          </div>
+        </div>
+        <div className="flex gap-2 justify-end">
+          <Button
+            variant="outline"
+            size="sm"
+            className="text-[12px] h-8 px-3"
+            onClick={onCancel}
+            disabled={loading}
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            className="text-[12px] h-8 px-3 bg-red-600 hover:bg-red-700 text-white border-0"
+            onClick={onConfirm}
+            disabled={loading}
+          >
+            {loading ? 'Deleting…' : 'Yes, Delete'}
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
   if (!asset) return null
 
@@ -535,18 +588,13 @@ function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
   // Delete (retire) state for the live-agent footer.
   const [deleting, setDeleting] = useState(false)
   const [deleteErr, setDeleteErr] = useState(null)
+  const [confirmingDelete, setConfirmingDelete] = useState(false)
 
-  async function handleDelete() {
-    if (deleting) return
-    const ok = window.confirm(
-      `Delete "${asset.name}"?\n\n` +
-      'This stops the container, deletes its Kafka topics, and ' +
-      'removes the row. This cannot be undone.'
-    )
-    if (!ok) return
+  async function _runDelete() {
     setDeleting(true); setDeleteErr(null)
     try {
       await deleteAgent(asset._backendId)
+      setConfirmingDelete(false)
       if (onDeleted) onDeleted(asset)
     } catch (e) {
       setDeleteErr(e.message || 'Delete failed')
@@ -657,18 +705,25 @@ function PreviewPanel({ asset, onClose, onOpenChat, onDeleted }) {
             </Button>
             <Button
               variant="outline" size="sm"
-              onClick={handleDelete}
+              onClick={() => setConfirmingDelete(true)}
               disabled={deleting}
               className="w-full h-8 gap-1.5 text-[12px] justify-center text-red-600 border-red-200 hover:bg-red-50"
             >
               <X size={12} />
-              {deleting ? 'Deleting…' : 'Delete asset'}
+              Delete asset
             </Button>
             {deleteErr && (
               <p className="text-[11px] text-red-600 text-center" role="alert">
                 ⚠ {deleteErr}
               </p>
             )}
+            <DeleteAgentConfirmModal
+              open={confirmingDelete}
+              agentName={asset.name}
+              loading={deleting}
+              onConfirm={_runDelete}
+              onCancel={() => { if (!deleting) setConfirmingDelete(false) }}
+            />
           </>
         )}
         <Button variant="outline" size="sm" className="w-full h-8 gap-1.5 text-[12px] justify-center">
