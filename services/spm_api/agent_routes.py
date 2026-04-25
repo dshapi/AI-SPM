@@ -297,6 +297,150 @@ async def delete_endpoint(
     return None
 
 
+# ─── POST /agents/{id}/ready — Phase 2 SDK handshake ───────────────────────
+#
+# Called by ``aispm.lifecycle.ready()`` from inside the agent's
+# container. Auth is the agent's own ``mcp_token`` — proves the caller
+# is the agent we just spawned. Flips ``runtime_state`` to ``running``
+# and stamps ``last_seen_at``; the controller's deploy_agent poll loop
+# observes the transition and returns.
+
+async def _resolve_agent_by_mcp_token(authorization: Optional[str]) -> Dict[str, Any]:
+    """Resolve a Bearer header to the corresponding agent dict via the
+    shared ``platform_shared.agent_tokens`` helper. Raises 401 on miss."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+    from platform_shared.agent_tokens import resolve_agent_by_mcp_token
+    token = authorization.removeprefix("Bearer ").strip()
+    agent = await resolve_agent_by_mcp_token(token)
+    if agent is None:
+        raise HTTPException(status_code=401, detail="Unknown agent token")
+    return agent
+
+
+@router.post("/{agent_id}/ready", status_code=status.HTTP_204_NO_CONTENT)
+async def ready_endpoint(
+    agent_id: str,
+    authorization: Optional[str] = Header(None),
+    db = Depends(get_db),
+):
+    """Idempotent — calling this multiple times keeps the agent in
+    ``running`` and refreshes ``last_seen_at``.
+
+    Auth is by the agent's own ``mcp_token``: a third party cannot
+    flip another agent's state. The bearer must resolve to an agent
+    whose ``id`` matches the path parameter; mismatch → 403.
+    """
+    caller = await _resolve_agent_by_mcp_token(authorization)
+    if str(caller["id"]) != str(agent_id):
+        raise HTTPException(status_code=403,
+                             detail="Bearer token does not match agent_id")
+
+    a = await _get_agent_or_none(db, agent_id)
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    from datetime import datetime, timezone
+    a.runtime_state = "running"
+    a.last_seen_at  = datetime.now(timezone.utc)
+    await _maybe_async_commit(db)
+    return None
+
+
+# ─── GET /agents/{id}/secrets/{name} — Phase 2 ─────────────────────────────
+
+@router.get("/{agent_id}/secrets/{name}")
+async def get_secret_endpoint(
+    agent_id: str,
+    name: str,
+    authorization: Optional[str] = Header(None),
+    db = Depends(get_db),
+):
+    """Return ``{"value": str}`` for a per-agent secret.
+
+    V1 stores per-agent secrets in ``agents.config.env_vars[name]``
+    (added in this phase — the column was placeholder-shaped before).
+    V2 will move the storage to ``integration_credentials`` keyed by
+    ``(agent:{id}, name)`` so existing encryption applies; the wire
+    surface stays the same.
+
+    Auth is by the agent's own ``mcp_token`` — only the agent itself
+    can read its secrets. 404 when the secret is missing.
+    """
+    caller = await _resolve_agent_by_mcp_token(authorization)
+    if str(caller["id"]) != str(agent_id):
+        raise HTTPException(status_code=403,
+                             detail="Bearer token does not match agent_id")
+
+    a = await _get_agent_or_none(db, agent_id)
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    env_vars = (getattr(a, "config", None) or {}).get("env_vars") or {}
+    if name not in env_vars:
+        raise HTTPException(status_code=404, detail=f"secret {name!r} not configured")
+    return {"value": str(env_vars[name])}
+
+
+# ─── GET /agents/{id}/sessions/{sid}/messages — Phase 2 ────────────────────
+
+@router.get("/{agent_id}/sessions/{session_id}/messages")
+async def session_messages_endpoint(
+    agent_id: str,
+    session_id: str,
+    limit: int = 10,
+    authorization: Optional[str] = Header(None),
+    db = Depends(get_db),
+):
+    """Return the last *limit* persisted messages for a session.
+
+    Used by ``aispm.chat.history()``. Same agent-token auth as the
+    other Phase 2 endpoints; the session must belong to the calling
+    agent.
+    """
+    caller = await _resolve_agent_by_mcp_token(authorization)
+    if str(caller["id"]) != str(agent_id):
+        raise HTTPException(status_code=403,
+                             detail="Bearer token does not match agent_id")
+
+    if hasattr(db, "execute"):
+        from sqlalchemy import select  # type: ignore
+        from spm.db.models import (    # type: ignore
+            AgentChatMessage, AgentChatSession,
+        )
+        # Verify session belongs to this agent, then fetch its tail.
+        sess_stmt = (
+            select(AgentChatSession)
+            .where(AgentChatSession.id == session_id)
+            .where(AgentChatSession.agent_id == agent_id)
+        )
+        sess = (await db.execute(sess_stmt)).scalar_one_or_none()
+        if sess is None:
+            raise HTTPException(status_code=404, detail="session not found")
+
+        msg_stmt = (
+            select(AgentChatMessage)
+            .where(AgentChatMessage.session_id == session_id)
+            .order_by(AgentChatMessage.ts.desc())
+            .limit(max(1, min(int(limit), 200)))
+        )
+        rows = list((await db.execute(msg_stmt)).scalars().all())
+    else:                                                      # mock path
+        rows = list(getattr(db, "messages_for", lambda *_: [])(
+            agent_id, session_id, limit
+        ))
+
+    rows.reverse()  # chronological order; the query was DESC for the LIMIT
+    return [
+        {
+            "role": (m.role.value if hasattr(m.role, "value") else m.role),
+            "text": m.text,
+            "ts":   m.ts.isoformat() if m.ts else None,
+        }
+        for m in rows
+    ]
+
+
 # ─── DB helpers — async-vs-sync session compatibility ──────────────────────
 #
 # The dependency ``get_db`` yields an ``AsyncSession`` in production but

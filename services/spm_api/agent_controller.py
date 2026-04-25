@@ -37,9 +37,17 @@ _AGENT_IMAGE   = os.environ.get("AGENT_RUNTIME_IMAGE", "aispm-agent-runtime:late
 _KAFKA_BOOTSTRAP = os.environ.get(
     "KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092",
 )
-# How long to wait between marking starting and running. The SDK's
-# `aispm.ready()` signal (Phase 2) replaces this with a real poll.
-_READY_SLEEP_S = float(os.environ.get("AGENT_READY_SLEEP_S", "5"))
+# Phase 2: replaced the hardcoded sleep with a real handshake. The
+# SDK's ``aispm.ready()`` POSTs to /agents/{id}/ready which flips
+# runtime_state→running. We poll for that transition with a short
+# interval and a generous total budget so slow customer agents
+# (e.g. LangChain warmups) aren't false-positively marked crashed.
+_READY_POLL_INTERVAL_S = float(os.environ.get("AGENT_READY_POLL_INTERVAL_S", "0.5"))
+_READY_TIMEOUT_S       = float(os.environ.get("AGENT_READY_TIMEOUT_S",       "30"))
+
+# Phase 1 fallback — kept for any caller that explicitly opts in via
+# the env var. Default behaviour is poll-based.
+_READY_SLEEP_S = float(os.environ.get("AGENT_READY_SLEEP_S", "0"))
 
 
 # ─── 1. Token minting ──────────────────────────────────────────────────────
@@ -208,13 +216,41 @@ async def deploy_agent(db, agent_id) -> None:
         mem_mb=512, cpu_quota=0.5,
     )
 
-    # V1 readiness check: hardcoded sleep, then mark running. The SDK's
-    # ``aispm.ready()`` signal arrives in Phase 2 and replaces this with
-    # a real poll on a /ready endpoint or a Kafka consumer-group join.
-    # The comment is here so it's flagged when Phase 2 lands.
-    await asyncio.sleep(_READY_SLEEP_S)
-    a.runtime_state = "running"
-    db.commit()
+    # Phase 2: poll for the SDK's /ready handshake. The endpoint
+    # (POST /api/spm/agents/{id}/ready, called by aispm.ready())
+    # flips runtime_state to "running" — we just wait for that
+    # transition to appear on the row.
+    if _READY_SLEEP_S > 0:
+        # Compatibility branch — explicit opt-in only.
+        await asyncio.sleep(_READY_SLEEP_S)
+        a.runtime_state = "running"
+        db.commit()
+        return
+
+    await _wait_for_ready(db, agent_id, timeout_s=_READY_TIMEOUT_S)
+
+
+async def _wait_for_ready(db, agent_id, *, timeout_s: float) -> None:
+    """Poll the agents row until ``runtime_state == 'running'``.
+
+    Raises ``TimeoutError`` if the agent never signals ready within
+    *timeout_s*; the caller (the upload route) catches and converts
+    to a 504 so the operator sees a clear error.
+    """
+    import time
+    from spm.db.models import Agent  # type: ignore
+
+    started = time.monotonic()
+    while time.monotonic() - started < timeout_s:
+        a = db.get(Agent, agent_id)
+        if a is None:
+            raise ValueError(f"agent {agent_id!r} disappeared during ready poll")
+        if a.runtime_state == "running":
+            return
+        await asyncio.sleep(_READY_POLL_INTERVAL_S)
+    raise TimeoutError(
+        f"agent {agent_id} did not signal ready within {timeout_s:.0f}s"
+    )
 
 
 async def start_agent(db, agent_id) -> None:

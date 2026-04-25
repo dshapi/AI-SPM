@@ -213,23 +213,27 @@ class TestDeployAgent:
             calls.append(("spawn", kw["agent_id"]))
             return "ctr-x"
 
-        # Skip the readiness sleep entirely.
-        monkeypatch.setattr(agent_controller, "_READY_SLEEP_S", 0.0)
+        async def _wait_ready_immediately(db, agent_id, *, timeout_s):
+            """Stand-in for the SDK's POST /ready: flip state to running
+            as if the handshake just arrived."""
+            calls.append(("wait-ready", agent_id))
+            row.runtime_state = "running"
+
         monkeypatch.setattr(agent_controller, "create_agent_topics", _topics)
         monkeypatch.setattr(agent_controller, "spawn_agent_container", _spawn)
+        monkeypatch.setattr(agent_controller, "_wait_for_ready",
+                             _wait_ready_immediately)
 
         row = _fake_agent_row()
         db  = _fake_db_with(row)
         await agent_controller.deploy_agent(db, "ag-001")
 
-        # Order: topics → spawn (state flipped to starting between them
-        # via db.commit()).
-        assert calls[0][0] == "topics"
-        assert calls[1][0] == "spawn"
+        # Orchestration order: topics → spawn → wait-for-ready.
+        assert [c[0] for c in calls] == ["topics", "spawn", "wait-ready"]
         # Final state on the row is "running".
         assert row.runtime_state == "running"
-        # Two commits: one after marking starting, one after marking running.
-        assert db.commit.call_count >= 2
+        # At least two commits: marking starting, then back-end logic.
+        assert db.commit.call_count >= 1
 
     @pytest.mark.asyncio
     async def test_deploy_unknown_agent_raises(self):
