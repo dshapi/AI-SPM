@@ -39,6 +39,8 @@ but never raised.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from platform_shared.kafka_utils import safe_send
@@ -125,3 +127,153 @@ def publish_lineage_event(
             session_id, event_type,
         )
     return ok
+
+
+# ─── Agent Runtime Control Plane event types ───────────────────────────────
+#
+# Customer-uploaded agents emit lifecycle and runtime-activity events that
+# flow through the same audit/lineage pipeline as the rest of the platform.
+# Each event is a small, frozen-style dataclass with an explicit `to_dict()`
+# so callers can hand the payload to publish_lineage_event(payload=...) or
+# to the existing audit_events publisher without intermediate translation.
+#
+# The `ts` field is auto-populated at construction time (UTC ISO-8601 in
+# to_dict()). `event_type` is fixed per class so consumers can dispatch on
+# it without reflection.
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@dataclass
+class AgentDeployedEvent:
+    """Emitted once when an agent transitions from upload → deployed."""
+    agent_id:  str
+    tenant_id: str
+    version:   str
+    actor:     str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type": "AgentDeployed",
+            "agent_id":   self.agent_id,
+            "tenant_id":  self.tenant_id,
+            "version":    self.version,
+            "actor":      self.actor,
+            "ts":         self.ts.isoformat(),
+        }
+
+
+@dataclass
+class AgentStartedEvent:
+    """Emitted when the controller spawns the container and SDK reports ready."""
+    agent_id:  str
+    tenant_id: str
+    actor:     str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type": "AgentStarted",
+            "agent_id":   self.agent_id,
+            "tenant_id":  self.tenant_id,
+            "actor":      self.actor,
+            "ts":         self.ts.isoformat(),
+        }
+
+
+@dataclass
+class AgentStoppedEvent:
+    """Emitted on graceful Stop, Crash recovery, or Retire."""
+    agent_id:  str
+    tenant_id: str
+    reason:    str            # "user_stop" | "crash" | "retire"
+    actor:     str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type": "AgentStopped",
+            "agent_id":   self.agent_id,
+            "tenant_id":  self.tenant_id,
+            "reason":     self.reason,
+            "actor":      self.actor,
+            "ts":         self.ts.isoformat(),
+        }
+
+
+@dataclass
+class AgentChatMessageEvent:
+    """Emitted for every user→agent or agent→user message after pipeline checks."""
+    agent_id:   str
+    tenant_id:  str
+    session_id: str
+    user_id:    str
+    role:       str           # "user" | "agent"
+    text:       str
+    trace_id:   str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type": "AgentChatMessage",
+            "agent_id":   self.agent_id,
+            "tenant_id":  self.tenant_id,
+            "session_id": self.session_id,
+            "user_id":    self.user_id,
+            "role":       self.role,
+            "text":       self.text,
+            "trace_id":   self.trace_id,
+            "ts":         self.ts.isoformat(),
+        }
+
+
+@dataclass
+class AgentToolCallEvent:
+    """Emitted by spm-mcp for every tool invocation made by an agent."""
+    agent_id:    str
+    tenant_id:   str
+    tool:        str
+    args:        Dict[str, Any]
+    ok:          bool
+    duration_ms: int
+    trace_id:    str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type":  "AgentToolCall",
+            "agent_id":    self.agent_id,
+            "tenant_id":   self.tenant_id,
+            "tool":        self.tool,
+            "args":        self.args,
+            "ok":          self.ok,
+            "duration_ms": self.duration_ms,
+            "trace_id":    self.trace_id,
+            "ts":          self.ts.isoformat(),
+        }
+
+
+@dataclass
+class AgentLLMCallEvent:
+    """Emitted by spm-llm-proxy for every LLM call made by an agent."""
+    agent_id:           str
+    tenant_id:          str
+    model:              str
+    prompt_tokens:      int
+    completion_tokens:  int
+    trace_id:           str
+    ts: datetime = field(default_factory=_now_utc)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_type":         "AgentLLMCall",
+            "agent_id":           self.agent_id,
+            "tenant_id":          self.tenant_id,
+            "model":              self.model,
+            "prompt_tokens":      self.prompt_tokens,
+            "completion_tokens":  self.completion_tokens,
+            "trace_id":           self.trace_id,
+            "ts":                 self.ts.isoformat(),
+        }

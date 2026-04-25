@@ -672,6 +672,75 @@ services:
       - api
       - agent-orchestrator
 
+  # ── Agent runtime control plane (Phase 1) ───────────────────────────────
+  # Two new services + one image-only build for the customer agent runtime.
+  # Customer agent containers are NOT a service entry — spm-api spawns them
+  # on demand via the docker SDK and bind-mounts the uploaded agent.py.
+
+  spm-mcp:
+    build:
+      context: .
+      dockerfile: services/spm_mcp/Dockerfile
+    image: aispm-spm-mcp:latest
+    container_name: cpm-spm-mcp
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+    ports: ["8500:8500"]
+    networks: [default, agent-net]
+    depends_on:
+      spm-db: { condition: service_healthy }
+      kafka-broker: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  spm-llm-proxy:
+    build:
+      context: .
+      dockerfile: services/spm_llm_proxy/Dockerfile
+    image: aispm-spm-llm-proxy:latest
+    container_name: cpm-spm-llm-proxy
+    environment:
+      <<: *common-env
+      SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+    ports: ["8501:8500"]
+    networks: [default, agent-net]
+    depends_on:
+      spm-db: { condition: service_healthy }
+    extra_hosts:
+      # The default LLM upstream in dev is host Ollama.
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Image-only build for the per-agent runtime container. The image is
+  # produced by `docker compose --profile build-only build agent-runtime-build`
+  # and consumed by spm-api at deploy time. Listed as a service (rather than
+  # a bare build) so `docker compose build` picks it up and Compose's normal
+  # build cache applies.
+  agent-runtime-build:
+    build:
+      context: .
+      dockerfile: agent_runtime/Dockerfile
+    image: aispm-agent-runtime:latest
+    profiles: ["build-only"]
+    command: ["true"]
+
+networks:
+  agent-net:
+    driver: bridge
+    # Agents have no direct internet egress: they can only reach
+    # spm-mcp and spm-llm-proxy (which bridge default + agent-net),
+    # and Kafka (also reachable through default — agents connect to
+    # the broker via the mesh-internal hostname `kafka-broker:9092`).
+    internal: true
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Persistent state lives in ./DataVolums/{redis,spm-db,grafana,agent-orchestrator}
 # (bind mounts on each service above) so the data is visible on the host

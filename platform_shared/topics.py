@@ -77,3 +77,32 @@ class GlobalTopics:
     # group across all tenants and we don't want it to subscribe to a
     # dynamic topic list. tenant_id travels in the envelope payload.
     LINEAGE_EVENTS: str = "cpm.global.lineage_events"
+
+
+# ─── Agent Runtime Control Plane — per-agent chat topics ────────────────────
+#
+# Each customer-uploaded agent gets a dedicated pair of Kafka topics for
+# chat I/O. Names follow the existing per-tenant `cpm.{tenant_id}.*`
+# convention so V1's single tenant resolves to e.g.
+# `cpm.t1.agents.ag-001.chat.in` and multi-tenant V2 needs no naming change.
+# Partition-by-session_id preserves per-conversation ordering. Topics are
+# created on agent deploy and deleted on agent retire.
+
+@dataclass(frozen=True)
+class AgentTopics:
+    chat_in:  str
+    chat_out: str
+
+    def all(self) -> list[str]:
+        return [self.chat_in, self.chat_out]
+
+
+def agent_topics_for(tenant_id: str, agent_id: str) -> AgentTopics:
+    """Compute the per-agent chat topics for a given (tenant, agent) pair.
+
+    Callers must use this helper — never hand-build the strings — so the
+    naming scheme stays in one place when it evolves (e.g. multi-tenant
+    routing in V2).
+    """
+    p = f"cpm.{tenant_id}.agents.{agent_id}"
+    return AgentTopics(chat_in=f"{p}.chat.in", chat_out=f"{p}.chat.out")
