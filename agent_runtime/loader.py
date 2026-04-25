@@ -3,29 +3,42 @@
 Replaces the Phase 1 stub. Steps:
 
   1. Import ``aispm`` so its module-level constants populate from env.
-  2. Install signal handlers so SIGTERM drains in-flight messages
-     during the container's 10-second graceful-stop window.
-  3. ``exec()`` the customer's ``/agent/agent.py`` (bind-mounted by
-     ``spawn_agent_container``).
+  2. ``exec_module`` the customer's ``/agent/agent.py`` so its
+     top-level statements run (imports, decorators, registrations).
+  3. If the customer file has a top-level ``main`` callable, call it.
+     Async ``main()`` is awaited via ``asyncio.run``.
 
-The customer's file is expected to:
-  - import aispm
-  - define ``async def main()``
-  - call ``asyncio.run(main())`` at the bottom
+Why call main() ourselves?
+──────────────────────────
+Customer agents typically end with::
 
-If main() never exits the loader simply waits — the customer agent
-runs as long as Docker keeps the container alive.
+    if __name__ == "__main__":
+        asyncio.run(main())
+
+When we load via ``importlib.util.spec_from_file_location``, the
+module's ``__name__`` is ``"agent"`` — NOT ``"__main__"``. So that
+guard skips, ``main()`` never runs, and the loader exits with status 0
+because there's nothing left to do. The container vanishes silently.
+
+By detecting and calling ``main`` ourselves, we accept BOTH styles —
+agents with the ``__main__`` guard AND agents that simply define
+``async def main()`` — without forcing the customer to remove the
+guard from their development copy.
 
 Loader-side error handling
 ──────────────────────────
-Uncaught exceptions in the customer's code are caught here, logged
-through ``aispm.log`` (so they end up in the lineage pipeline), and
-the loader exits with code 1 — Docker's restart_policy=on-failure
-then kicks in (see spawn_agent_container).
+Uncaught exceptions in customer code are caught here, logged through
+``aispm.log`` (so they land in lineage), and the loader exits with
+code 1 — Docker's ``restart_policy=on-failure`` then kicks in (see
+``spawn_agent_container``). Code 0 means main() completed normally,
+which usually only happens for one-shot agents; long-running chat
+agents loop forever via ``async for msg in aispm.chat.subscribe()``.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import inspect
 import sys
 import traceback
 
@@ -36,6 +49,37 @@ import traceback
 import aispm  # noqa: F401
 
 AGENT_FILE = "/agent/agent.py"
+
+
+def _run_customer_main(mod) -> None:
+    """If the customer module defined a top-level ``main`` callable,
+    invoke it. Async functions are wrapped in ``asyncio.run``.
+
+    No-op if ``main`` is missing — covers agents that did all the
+    interesting work inside their import-time top-level statements
+    (uncommon but valid).
+    """
+    main_fn = getattr(mod, "main", None)
+    if main_fn is None:
+        print("[loader] no top-level main() in agent.py — exiting cleanly",
+              flush=True)
+        return
+
+    if not callable(main_fn):
+        print(f"[loader] 'main' in agent.py is not callable: {type(main_fn)!r}",
+              file=sys.stderr, flush=True)
+        return
+
+    if inspect.iscoroutinefunction(main_fn):
+        print("[loader] running async main()", flush=True)
+        asyncio.run(main_fn())
+    else:
+        print("[loader] running sync main()", flush=True)
+        result = main_fn()
+        # If a sync main returned a coroutine (e.g. customer wrote
+        # `def main(): return some_async_thing()`), drive it.
+        if inspect.iscoroutine(result):
+            asyncio.run(result)
 
 
 def main() -> int:
@@ -54,17 +98,15 @@ def main() -> int:
 
     try:
         spec.loader.exec_module(mod)
+        _run_customer_main(mod)
     except Exception:
-        # The customer's top-level (e.g. ``asyncio.run(main())``) raised.
-        # Log full traceback through aispm.log so it lands in lineage,
-        # then exit non-zero so Docker's on-failure restart kicks in.
         tb = traceback.format_exc()
         try:
             aispm.log("agent crashed", error=tb.splitlines()[-1])
         except Exception:                                # noqa: BLE001
             pass
         print("[loader] agent crashed:\n" + tb,
-               file=sys.stderr, flush=True)
+              file=sys.stderr, flush=True)
         return 1
 
     return 0
