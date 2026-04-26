@@ -212,6 +212,33 @@ class ModelResponse(BaseModel):
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
+async def _auto_bootstrap_integrations() -> None:
+    """Idempotently seed the integrations table on every startup.
+
+    Mirrors the logic in POST /integrations/bootstrap but runs as an
+    internal lifespan task so the operator never has to call the endpoint
+    manually.  Safe to run on every pod restart — _upsert_integration is
+    keyed by external_id and only writes env-sourced credentials on first
+    run (won't overwrite keys already stored in the DB).
+    """
+    try:
+        try:
+            from integrations_seed_data import build_seed
+        except ModuleNotFoundError:
+            from services.spm_api.integrations_seed_data import build_seed
+        from integrations_routes import _upsert_integration  # noqa: PLC0415
+        from spm.db.session import get_session_factory  # noqa: PLC0415
+
+        seed_data = build_seed()
+        async with get_session_factory()() as db:
+            for entry in seed_data:
+                await _upsert_integration(db, entry)
+            await db.commit()
+        log.info("integrations bootstrap complete — %d rows upserted", len(seed_data))
+    except Exception as exc:  # never crash startup over seed failure
+        log.warning("integrations bootstrap failed (non-fatal): %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables if they don't exist (fallback if migrations weren't run)
@@ -219,6 +246,9 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     # Seed compliance evidence from mapping file
     await seed_compliance_evidence()
+    # Auto-seed integrations table so the Integrations page is populated
+    # on first deploy without any manual bootstrap call.
+    await _auto_bootstrap_integrations()
     log.info("spm-api started")
     yield
     await get_engine().dispose()
