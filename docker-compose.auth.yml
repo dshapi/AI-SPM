@@ -51,7 +51,7 @@ services:
     ports:
       - "8180:8080"
     volumes:
-      - ./DataVolums/keycloak:/opt/keycloak/data   # Persist realm config across restarts
+      - ./DataVolumes/keycloak:/opt/keycloak/data   # Persist realm config across restarts
     networks:
       - traefik
     healthcheck:
@@ -83,9 +83,9 @@ services:
       keycloak:
         condition: service_healthy
 
-# Persistent state lives in ./DataVolums/keycloak (bind mount on the
+# Persistent state lives in ./DataVolumes/keycloak (bind mount on the
 # keycloak service above). Migration from the old `keycloak-data` named
-# volume is in DataVolums/migrate-volumes.sh.
+# volume is in DataVolumes/migrate-volumes.sh.
 
 networks:
   traefik:

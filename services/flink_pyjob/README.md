@@ -71,8 +71,8 @@ All three containers share the same image `aispm-flink-pyjob:latest`
 just `image:` it).
 
 Bind mounts:
-- `./DataVolums/flink-checkpoints` → `/flink/checkpoints`  (JM + TM)
-- `./DataVolums/flink-savepoints`  → `/flink/savepoints`   (JM + TM)
+- `./DataVolumes/flink-checkpoints` → `/flink/checkpoints`  (JM + TM)
+- `./DataVolumes/flink-savepoints`  → `/flink/savepoints`   (JM + TM)
 - `./flink/flink-conf.yaml`        → `/opt/flink/conf/flink-conf.yaml:ro`  (JM + TM)
 - `./services/flink_pyjob`         → `/opt/flink-pyjob/services/flink_pyjob:ro`  (TM, for hot iteration)
 - `./platform_shared`              → `/opt/flink-pyjob/platform_shared:ro`  (TM, for hot iteration)
@@ -106,7 +106,7 @@ from the latest completed checkpoint.
 
 ```bash
 make flink-savepoint           # writes to file:///flink/savepoints/<id>
-                               # = ./DataVolums/flink-savepoints/<id> on host
+                               # = ./DataVolumes/flink-savepoints/<id> on host
 make flink-cancel
 # ...deploy new job code via flink-pyjob-submitter rebuild...
 docker exec cpm-flink-jobmanager flink run \

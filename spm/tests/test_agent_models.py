@@ -10,7 +10,7 @@ def test_agent_round_trip(db_session: Session):
         owner="ml-platform", description="hello",
         risk="medium", policy_status="partial",
         runtime_state="stopped",
-        code_path="./DataVolums/agents/x/agent.py",
+        code_path="./DataVolumes/agents/x/agent.py",
         code_sha256="0" * 64,
         mcp_token="t" * 32,
         llm_api_key="k" * 32,

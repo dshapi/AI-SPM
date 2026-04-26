@@ -24,7 +24,7 @@ parallelism.default: 3
 
 # ── State backend: RocksDB with incremental checkpoints to local FS ──────────
 # Single-host deployment — JM and TM both bind-mount the same host dir
-# (./DataVolums/flink-checkpoints) at /flink/checkpoints. No external
+# (./DataVolumes/flink-checkpoints) at /flink/checkpoints. No external
 # blob store required. For multi-host K8s, swap file:// for s3:// here
 # and add the s3-fs-presto plugin.
 state.backend.type: rocksdb

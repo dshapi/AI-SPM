@@ -85,7 +85,7 @@ def test_agent_round_trip(db_session: Session):
         owner="ml-platform", description="hello",
         risk="medium", policy_status="partial",
         runtime_state="stopped",
-        code_path="./DataVolums/agents/x/agent.py",
+        code_path="./DataVolumes/agents/x/agent.py",
         code_sha256="0" * 64,
         mcp_token="t" * 32,
         llm_api_key="k" * 32,
@@ -1752,7 +1752,7 @@ from .db import get_session
 
 router = APIRouter(prefix="/agents", tags=["agents"])
 
-CODE_ROOT = Path("./DataVolums/agents")
+CODE_ROOT = Path("./DataVolumes/agents")
 
 @router.post("", status_code=201)
 async def create_agent(

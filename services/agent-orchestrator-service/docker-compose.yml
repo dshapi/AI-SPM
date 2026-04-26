@@ -59,7 +59,7 @@ services:
     volumes:
       # Shares the same dir as the main compose stack's agent-orchestrator
       # service so dev-mode and full-stack mode see identical persisted state.
-      - ../../DataVolums/agent-orchestrator:/data
+      - ../../DataVolumes/agent-orchestrator:/data
       - ../../platform_shared:/app/platform_shared
     depends_on:
       kafka:
@@ -72,5 +72,5 @@ services:
       timeout: 5s
       retries: 3
 
-# orchestrator_data is now a bind mount to ../../DataVolums/agent-orchestrator
-# (shared with the main compose stack). See DataVolums/migrate-volumes.sh.
+# orchestrator_data is now a bind mount to ../../DataVolumes/agent-orchestrator
+# (shared with the main compose stack). See DataVolumes/migrate-volumes.sh.

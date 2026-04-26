@@ -111,7 +111,7 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 # ─── Disk layout for uploaded code ─────────────────────────────────────────
 
 # Where agent.py files live INSIDE this container — written by POST /agents.
-CODE_ROOT_CONTAINER = Path("./DataVolums/agents")
+CODE_ROOT_CONTAINER = Path("./DataVolumes/agents")
 
 # Host-equivalent of the same directory, populated by docker-compose. The
 # docker daemon resolves bind-mount paths against the HOST filesystem, so
@@ -241,7 +241,7 @@ async def create_agent(
         # Phase 4 — also store the raw text in the DB so the platform
         # owns the source of truth. spawn_agent_container rewrites the
         # bind-mount source from this on every spawn, so manual host
-        # cleanup of DataVolums/agents/<id>/agent.py is now safe.
+        # cleanup of DataVolumes/agents/<id>/agent.py is now safe.
         code_blob=raw,
         mcp_token=mcp_t, llm_api_key=llm_t,
         tenant_id=tenant_id, runtime_state="stopped",

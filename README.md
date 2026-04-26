@@ -1645,7 +1645,7 @@ The auth overlay adds a full OIDC login flow in front of the admin portal, runni
 | Component | Role |
 |---|---|
 | **Traefik v3** | Reverse proxy. Routes `aispm.local` → admin UI via the ForwardAuth middleware. Uses a static file provider — no Docker socket required. |
-| **Keycloak 24** | OIDC identity provider running in dev mode. Realm config is persisted to `./DataVolums/keycloak/` (host bind mount) so it survives restarts and `docker compose down -v`. |
+| **Keycloak 24** | OIDC identity provider running in dev mode. Realm config is persisted to `./DataVolumes/keycloak/` (host bind mount) so it survives restarts and `docker compose down -v`. |
 | **traefik-forward-auth** | Sits in front of every protected route. Inspects every request via `X-Forwarded-Uri` — including `/_oauth` callbacks — and sets a signed session cookie on `aispm.local`. |
 
 ### One-time host setup
@@ -1660,12 +1660,12 @@ sudo sh -c 'echo "127.0.0.1  keycloak.local auth.local aispm.local" >> /etc/host
 
 ```bash
 ./start.sh   # full stack including auth
-./stop.sh    # tear everything down (data preserved in ./DataVolums/)
+./stop.sh    # tear everything down (data preserved in ./DataVolumes/)
 ```
 
 ### First-time Keycloak setup
 
-Only required once — Keycloak persists the realm to `./DataVolums/keycloak/h2/`.
+Only required once — Keycloak persists the realm to `./DataVolumes/keycloak/h2/`.
 
 1. `./start.sh` then open **http://keycloak.local:8180/admin/** (`admin` / `admin`)
 2. Top-left dropdown → **Create realm** → name: `aispm` → **Create**
@@ -1727,7 +1727,7 @@ docker compose exec keycloak $KC add-roles -r aispm \
 
 | File | Purpose |
 |---|---|
-| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth. Keycloak data is bind-mounted from `./DataVolums/keycloak/`. |
+| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth. Keycloak data is bind-mounted from `./DataVolumes/keycloak/`. |
 | `auth/traefik.yml` | Traefik static config (file provider, entrypoints, dashboard on `:9091`) |
 | `auth/traefik-dynamic.yml` | Route + middleware definitions. **Important:** there is a single `aispm` router covering every path — including `/_oauth`. The SSO middleware itself recognizes the OIDC callback via `X-Forwarded-Uri` and short-circuits it. Do **not** add a separate router that routes `/_oauth` directly to the forward-auth backend service (e.g. `aispm-oauth: service: auth-svc`) — that strips the `X-Forwarded-*` headers and forward-auth then can't tell it's a callback, falling into an infinite redirect loop. |
 | `.env.auth` | OIDC client ID, client secret, and cookie signing secret |
@@ -1744,10 +1744,10 @@ docker compose exec keycloak $KC add-roles -r aispm \
 
 ### Persistent data — bind-mounted volumes
 
-Postgres, Keycloak, Redis, Grafana, and the agent-orchestrator all bind-mount their state under `./DataVolums/` instead of using Docker named volumes. Layout:
+Postgres, Keycloak, Redis, Grafana, and the agent-orchestrator all bind-mount their state under `./DataVolumes/` instead of using Docker named volumes. Layout:
 
 ```
-DataVolums/
+DataVolumes/
 ├── spm-db/                ← Postgres data dir (UID 999 inside container)
 ├── keycloak/h2/           ← Keycloak embedded H2 DB (realms, users, secrets)
 ├── redis/                 ← Redis AOF / dump

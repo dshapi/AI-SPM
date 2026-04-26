@@ -125,7 +125,7 @@ services:
       - --maxmemory-policy
       - allkeys-lru
     volumes:
-      - ./DataVolums/redis:/data
+      - ./DataVolumes/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -381,7 +381,7 @@ services:
   # services/flink_pyjob. Writes directly to cpm.<tenant>.audit.
   #
   # Storage: checkpoints write to a local bind-mounted directory
-  # (./DataVolums/flink-checkpoints). Same pattern as spm-db, kafka, etc.
+  # (./DataVolumes/flink-checkpoints). Same pattern as spm-db, kafka, etc.
   # No new database, no MinIO. Fine for single-host docker-compose;
   # multi-host K8s deployment would swap in S3 here.
 
@@ -402,8 +402,8 @@ services:
     # diff in PRs, no risk of compose-vs-yaml drift.
     volumes:
       - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
-      - ./DataVolums/flink-checkpoints:/flink/checkpoints
-      - ./DataVolums/flink-savepoints:/flink/savepoints
+      - ./DataVolumes/flink-checkpoints:/flink/checkpoints
+      - ./DataVolumes/flink-savepoints:/flink/savepoints
 
   flink-taskmanager:
     image: aispm-flink-pyjob:latest
@@ -419,8 +419,8 @@ services:
       - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
       # Checkpoint dirs must be SHARED with the JobManager (single host
       # deployment) — same bind mount on both.
-      - ./DataVolums/flink-checkpoints:/flink/checkpoints
-      - ./DataVolums/flink-savepoints:/flink/savepoints
+      - ./DataVolumes/flink-checkpoints:/flink/checkpoints
+      - ./DataVolumes/flink-savepoints:/flink/savepoints
     depends_on:
       flink-jobmanager:
         condition: service_started
@@ -470,7 +470,7 @@ services:
       POSTGRES_USER: spm_rw
       POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
     volumes:
-      - ./DataVolums/spm-db:/var/lib/postgresql/data
+      - ./DataVolumes/spm-db:/var/lib/postgresql/data
       - ./spm/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
@@ -512,10 +512,10 @@ services:
       # Phase 1 — agent runtime control plane. spawn_agent_container
       # passes a bind-mount path to the docker daemon, which resolves
       # paths against the HOST. spm-api writes agent.py files to its
-      # own container view (/app/DataVolums/agents/<id>/agent.py)
+      # own container view (/app/DataVolumes/agents/<id>/agent.py)
       # but must store the equivalent HOST path so the daemon can
       # find the file when launching the runtime container.
-      AGENT_CODE_HOST_DIR: ${PWD}/DataVolums/agents
+      AGENT_CODE_HOST_DIR: ${PWD}/DataVolumes/agents
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-}
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
@@ -541,7 +541,7 @@ services:
       # bind-mounted into the spawned agent runtime container, so
       # both spm-api AND the runtime container need to see the same
       # path. Bind-mount the host directory.
-      - ./DataVolums/agents:/app/DataVolums/agents
+      - ./DataVolumes/agents:/app/DataVolumes/agents
     # Integrations' Test-connection probe hits host-side Ollama at
     # host.docker.internal:11434.  Docker Desktop auto-resolves this on
     # Mac/Windows, but Linux needs the explicit host-gateway mapping.
@@ -606,7 +606,7 @@ services:
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
       - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
-      - ./DataVolums/grafana:/var/lib/grafana
+      - ./DataVolumes/grafana:/var/lib/grafana
     depends_on:
       spm-api:
         condition: service_healthy
@@ -624,7 +624,7 @@ services:
       KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
       POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     volumes:
-      - ./DataVolums/agent-orchestrator:/data
+      - ./DataVolumes/agent-orchestrator:/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8094/health', timeout=4)"]
       interval: 10s
@@ -781,10 +781,10 @@ networks:
     internal: true
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Persistent state lives in ./DataVolums/{redis,spm-db,grafana,agent-orchestrator}
+# Persistent state lives in ./DataVolumes/{redis,spm-db,grafana,agent-orchestrator}
 # (bind mounts on each service above) so the data is visible on the host
 # filesystem and survives `docker compose down -v`.
 #
 # Migration from the previous named volumes (AISPM_redis-data, etc.) is in
-# DataVolums/migrate-volumes.sh — run it once before `docker compose up`.
+# DataVolumes/migrate-volumes.sh — run it once before `docker compose up`.
 # ─────────────────────────────────────────────────────────────────────────────

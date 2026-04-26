@@ -109,7 +109,7 @@ No direct internet, no DB, no other services.
 | `risk` | enum | `low` / `medium` / `high` / `critical` (derived later) |
 | `policy_status` | enum | reuses existing: `covered` / `partial` / `none` |
 | `runtime_state` | enum | `stopped` / `starting` / `running` / `crashed` |
-| `code_path` | text | `./DataVolums/agents/{id}/agent.py` (note: `DataVolums` is the actual repo directory name — kept as-is to match existing layout, not a typo introduced by this spec) |
+| `code_path` | text | `./DataVolumes/agents/{id}/agent.py` (note: `DataVolumes` is the actual repo directory name — kept as-is to match existing layout, not a typo introduced by this spec) |
 | `code_sha256` | text | tamper detection |
 | `mcp_token` | text | bearer for spm-mcp; encrypted at rest |
 | `llm_api_key` | text | bearer for spm-llm-proxy; encrypted at rest |

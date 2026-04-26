@@ -175,9 +175,9 @@ def _resolve_host_code_path(code_path: str) -> str:
     Three cases:
       1. Absolute path that already lives on the host
          (``${AGENT_CODE_HOST_DIR}/<id>/agent.py``) → use as-is.
-      2. Container path under ``/app/DataVolums/agents/...`` →
+      2. Container path under ``/app/DataVolumes/agents/...`` →
          swap the prefix for ``AGENT_CODE_HOST_DIR``.
-      3. Relative path (``DataVolums/agents/...``) → prepend
+      3. Relative path (``DataVolumes/agents/...``) → prepend
          ``AGENT_CODE_HOST_DIR``.
 
     Falls back to ``code_path`` unchanged if ``AGENT_CODE_HOST_DIR``
@@ -188,11 +188,11 @@ def _resolve_host_code_path(code_path: str) -> str:
         return code_path
     p = code_path.lstrip("./")
     # Strip the well-known container prefixes.
-    for prefix in ("app/DataVolums/agents/", "DataVolums/agents/"):
+    for prefix in ("app/DataVolumes/agents/", "DataVolumes/agents/"):
         if p.startswith(prefix):
             return f"{host_dir}/{p[len(prefix):]}"
-    if code_path.startswith("/app/DataVolums/agents/"):
-        return host_dir + code_path[len("/app/DataVolums/agents"):]
+    if code_path.startswith("/app/DataVolumes/agents/"):
+        return host_dir + code_path[len("/app/DataVolumes/agents"):]
     if code_path.startswith(host_dir):
         return code_path
     # Last-resort: treat code_path as a bare filename relative to the
@@ -206,7 +206,7 @@ def _ensure_code_on_disk(host_path: str, code_blob: Optional[str]) -> None:
 
     This is called right before ``client.containers.run()`` so the
     docker daemon's bind-mount can resolve the path. Without this an
-    operator who cleaned up ``DataVolums/agents/`` (or anyone /
+    operator who cleaned up ``DataVolumes/agents/`` (or anyone /
     anything that touched the host directory) would be left with a
     permanently broken agent — which is exactly the surprise that
     motivated the Phase 4 ``code_blob`` column.
@@ -219,7 +219,7 @@ def _ensure_code_on_disk(host_path: str, code_blob: Optional[str]) -> None:
     if not code_blob:
         return  # legacy row; nothing to restore from
     container_dir = os.environ.get("AGENT_CODE_CONTAINER_DIR",
-                                     "/app/DataVolums/agents")
+                                     "/app/DataVolumes/agents")
     host_dir = os.environ.get("AGENT_CODE_HOST_DIR", "")
     if host_dir and host_path.startswith(host_dir):
         rel = host_path[len(host_dir):].lstrip("/")
