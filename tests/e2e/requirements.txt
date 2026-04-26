@@ -1,0 +1,3 @@
+httpx>=0.27
+kubernetes>=29
+pytest>=8
