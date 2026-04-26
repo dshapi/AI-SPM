@@ -111,6 +111,12 @@ ingress:
   tlsSecretName: aispm-tls
   letsencryptEmail: ops@example.com
 
+# ── Runtime Security ─────────────────────────────────────────────────────────
+# Set falco.enabled=true only when Falco is installed (namespace falco must exist).
+# Blocked on Rancher Desktop / Lima VM — requires shared /sys/fs/bpf mount.
+falco:
+  enabled: false   # prod: true (after: helm install falco falcosecurity/falco -n falco)
+
 # ── Observability ────────────────────────────────────────────────────────────
 prometheus:
   storage: 10Gi

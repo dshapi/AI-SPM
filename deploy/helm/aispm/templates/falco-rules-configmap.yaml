@@ -1,6 +1,8 @@
 # deploy/helm/aispm/templates/falco-rules-configmap.yaml
 # Agent-specific Falco rules — mounted into the Falco DaemonSet via falco-values.yaml.
 # Namespace: falco (where Falco is installed), not aispm.
+# Enabled only when falco.enabled=true (requires falco namespace to exist).
+{{- if .Values.falco.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -89,3 +91,4 @@ data:
         (pod=%k8s.pod.name count=%evt.count agent=%k8s.pod.label.agent-id)
       priority: WARNING
       tags: [agent, network, c2]
+{{- end }}
