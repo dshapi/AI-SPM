@@ -169,11 +169,21 @@ def _build_pod(agent_id: str, mcp_token: str):
             service_account_name="agent-runtime",
             automount_service_account_token=False,
             restart_policy="OnFailure",
+            security_context=k8s.V1PodSecurityContext(
+                run_as_non_root=True,
+                seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
+            ),
             containers=[
                 k8s.V1Container(
                     name="agent",
                     image=_AGENT_IMAGE,
                     image_pull_policy="IfNotPresent",
+                    security_context=k8s.V1SecurityContext(
+                        allow_privilege_escalation=False,
+                        run_as_non_root=True,
+                        capabilities=k8s.V1Capabilities(drop=["ALL"]),
+                        seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
+                    ),
                     env=[
                         k8s.V1EnvVar(name="AGENT_ID",       value=agent_id),
                         k8s.V1EnvVar(name="MCP_TOKEN",      value=mcp_token),
