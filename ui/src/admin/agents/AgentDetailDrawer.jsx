@@ -24,14 +24,21 @@ import OverviewTab  from "./tabs/OverviewTab"
 import SessionsTab  from "./tabs/SessionsTab"
 
 
-// Risk → header tint (mirrors PreviewPanel's `risk-header-bg` pattern
-// from Inventory.jsx). Kept as a literal map here so this file is
-// self-contained and easy to relocate later.
+// Risk → header tint. Mirrors PreviewPanel's lighter palette (bg-red-50
+// etc.) so a user moving from PreviewPanel → "View Detail" → drawer
+// sees the same visual language. The drawer used deeper bg-rose-100
+// + uppercase eyebrow + 15px title before; that read as a different
+// component. Now the header looks like a wider PreviewPanel header.
 const RISK_TINT = {
-  critical: "bg-rose-100   border-rose-300   text-rose-900",
-  high:     "bg-rose-50    border-rose-200   text-rose-900",
-  medium:   "bg-amber-50   border-amber-200  text-amber-900",
-  low:      "bg-emerald-50 border-emerald-200 text-emerald-900",
+  Critical: "bg-red-50",
+  High:     "bg-orange-50",
+  Medium:   "bg-yellow-50",
+  Low:      "bg-emerald-50",
+  // lowercase aliases (backend returns these too)
+  critical: "bg-red-50",
+  high:     "bg-orange-50",
+  medium:   "bg-yellow-50",
+  low:      "bg-emerald-50",
 }
 
 
@@ -59,79 +66,121 @@ export default function AgentDetailDrawer({
 
   if (!open || !agent) return null
 
-  const tint = RISK_TINT[agent.risk] || RISK_TINT.low
+  const riskBg = RISK_TINT[agent.risk] || "bg-gray-50"
 
+  // Layout: this drawer is INLINE — it sits in the same right-side
+  // 300px slot the parent uses for PreviewPanel / AgentChatPanel /
+  // RegisterAgentPanel. The parent (Inventory.jsx) decides which one
+  // to render via a conditional ladder; we just match the slot's
+  // contract: 300px wide, ``shrink-0``, ``h-full``, no overlay.
   return (
     <aside
-      role="dialog" aria-modal="false" aria-label={`Agent ${agent.name}`}
-      className={
-        "fixed top-0 right-0 z-40 h-screen w-[560px] max-w-[90vw] " +
-        "bg-white border-l border-slate-200 shadow-2xl flex flex-col"
-      }
+      role="region" aria-label={`Agent ${agent.name}`}
+      // ``min-h-0`` lets the inner ``flex-1 min-h-0`` tab body actually
+      // collapse to the parent's available height instead of expanding
+      // to fit the largest tab's natural content size — without this
+      // the Activity tab's long timeline would push the close button
+      // off the bottom of the drawer.
+      className="w-[300px] shrink-0 flex flex-col h-full min-h-0 bg-white"
       data-testid="agent-detail-drawer"
     >
-      {/* Risk-tinted header — mirrors PreviewPanel */}
-      <header className={`flex items-start justify-between p-4 border-b ${tint}`}>
-        <div>
-          <div className="text-[11px] font-medium uppercase tracking-wider opacity-70">
-            Agent
-          </div>
-          <h2 className="text-[15px] font-semibold mt-0.5">{agent.name}</h2>
-          <div className="text-[11px] mt-1 opacity-80">
-            {agent.agent_type} · v{agent.version} · {agent.runtime_state}
-          </div>
+      {/* Header — same shape, padding, and typography as PreviewPanel.
+          Risk tint is the lighter palette (bg-red-50 etc.); no
+          uppercase eyebrow, no 15px title, no heavy shadow. */}
+      <div className={`px-4 py-3.5 border-b border-gray-100 flex items-start justify-between gap-2 ${riskBg}`}>
+        <div className="min-w-0">
+          <p className="text-[13px] font-semibold text-gray-900 leading-snug truncate">
+            {agent.name}
+          </p>
+          <p className="text-[11px] text-gray-500 mt-0.5">
+            {agent.agent_type || "agent"}
+            {agent.version ? ` · v${agent.version}` : ""}
+            {agent.runtime_state ? ` · ${agent.runtime_state}` : ""}
+          </p>
         </div>
         <button
           type="button" onClick={onClose}
           aria-label="Close drawer"
-          className="p-1 rounded hover:bg-black/10 text-current"
+          className="w-6 h-6 flex items-center justify-center rounded-md text-gray-400 hover:text-gray-600 hover:bg-black/5 transition-colors shrink-0 mt-0.5"
         >
-          <X size={16} />
+          <X size={13} />
         </button>
-      </header>
+      </div>
 
-      {/* Tab strip */}
+      {/* Tab strip — neutral grays matching the rest of the system.
+          Active state uses gray-900 + a thin gray-900 underline rather
+          than the previous heavy blue treatment, so the strip reads
+          as part of the panel rather than a separate widget. */}
       <nav
         role="tablist"
-        className="flex border-b border-slate-200 bg-slate-50 px-2 overflow-x-auto"
+        // 300px is tight for 5 tabs — px-2 + px-1.5 per item just
+        // barely fits "Overview / Configure / Activity / Sessions /
+        // Lineage" at 11px without truncation. overflow-x-auto is the
+        // safety net for translations that come out longer.
+        className="flex border-b border-gray-100 px-2 overflow-x-auto"
       >
-        {TABS.map(t => (
-          <button
-            key={t.key}
-            role="tab"
-            aria-selected={tab === t.key}
-            data-tab-key={t.key}
-            onClick={() => setTab(t.key)}
-            className={
-              "px-3 py-2 text-[12px] font-medium whitespace-nowrap " +
-              "border-b-2 -mb-px transition-colors " +
-              (tab === t.key
-                ? "border-blue-600 text-blue-700"
-                : "border-transparent text-slate-600 hover:text-slate-900")
-            }
-          >
-            {t.label}
-          </button>
-        ))}
+        {TABS.map(t => {
+          const active = tab === t.key
+          return (
+            <button
+              key={t.key}
+              role="tab"
+              aria-selected={active}
+              data-tab-key={t.key}
+              onClick={() => setTab(t.key)}
+              className={
+                "relative px-1.5 py-2 text-[11px] font-medium whitespace-nowrap transition-colors " +
+                (active
+                  ? "text-gray-900"
+                  : "text-gray-500 hover:text-gray-700")
+              }
+            >
+              {t.label}
+              {active && (
+                <span
+                  aria-hidden
+                  className="absolute left-1 right-1 -bottom-px h-[2px] bg-gray-900 rounded-full"
+                />
+              )}
+            </button>
+          )
+        })}
       </nav>
 
-      {/* Tab body — scrollable. Each tab manages its own internal scroll. */}
-      <div className="flex-1 overflow-y-auto" data-testid="drawer-tab-body">
-        {tab === "overview" && (
-          <OverviewTab
-            agent={agent}
-            onOpenChat={onOpenChat}
-            onStateChange={(newState) =>
-              onAgentChanged && onAgentChanged({ ...agent, runtime_state: newState })
-            }
-          />
+      {/* Tab body — bounded, non-scrolling at this level. Each tab
+          either manages its own scroll (e.g. ActivityTab keeps its
+          header pinned and scrolls only the timeline) or gets wrapped
+          in the default `overflow-y-auto` shell below. ``flex-1
+          min-h-0`` lets the tab actually fill the remaining space
+          inside the parent flex column instead of growing past it.
+          Without ``min-h-0`` the inner ``overflow-y-auto`` doesn't
+          fire because flex children default to ``min-height: auto``. */}
+      <div className="flex-1 min-h-0 bg-white" data-testid="drawer-tab-body">
+        {tab === "activity" ? (
+          // ActivityTab manages its own scroll so its header + Refresh
+          // button stay pinned while the timeline scrolls below them.
+          <ActivityTab agent={agent} />
+        ) : (
+          // All other tabs render naturally; we provide a single
+          // scroll container so long Configure forms / Sessions
+          // tables don't push the close button off-screen.
+          <div className="h-full overflow-y-auto">
+            {tab === "overview" && (
+              <OverviewTab
+                agent={agent}
+                onOpenChat={onOpenChat}
+                onStateChange={(newState) =>
+                  onAgentChanged && onAgentChanged({ ...agent, runtime_state: newState })
+                }
+              />
+            )}
+            {tab === "configure" && (
+              <ConfigureTab agent={agent} onSaved={onAgentChanged} />
+            )}
+            {tab === "sessions" && <SessionsTab agent={agent} />}
+            {tab === "lineage"  && <LineageTab  agent={agent} />}
+          </div>
         )}
-        {tab === "configure" && (
-          <ConfigureTab agent={agent} onSaved={onAgentChanged} />
-        )}
-        {tab === "activity" && <ActivityTab agent={agent} />}
-        {tab === "sessions" && <SessionsTab agent={agent} />}
-        {tab === "lineage"  && <LineageTab  agent={agent} />}
       </div>
     </aside>
   )

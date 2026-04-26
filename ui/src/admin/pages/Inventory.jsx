@@ -1516,10 +1516,10 @@ export default function Inventory() {
 
           {/* Right-hand slot priority — only one panel renders at a
               time, all share the same 300px column dimensions:
-                1. AgentChatPanel — if chat is open
-                2. Register panel — agents (RegisterAgentPanel) or
-                   models (RegisterAssetPanel)
-                3. PreviewPanel — selected asset */}
+                1. AgentChatPanel       — chat is open
+                2. AgentDetailDrawer    — "View Detail" was clicked
+                3. Register panel       — agents / models
+                4. PreviewPanel         — fallback for selected asset */}
           {chatAgent
             ? <AgentChatPanel
                 open
@@ -1533,6 +1533,34 @@ export default function Inventory() {
                 }}
                 onClose={() => setChatAgent(null)}
               />
+            : detailAgent
+              ? <AgentDetailDrawer
+                  open
+                  // Pass the inventory-shape row through the same
+                  // mapping the chat panel uses — drawer fields like
+                  // agent.id need the backend UUID, not the
+                  // ``live-<uuid>`` URL prefix.
+                  agent={{
+                    id:            detailAgent._backendId || detailAgent.id,
+                    name:          detailAgent.name,
+                    risk:          detailAgent.risk,
+                    runtime_state: detailAgent.runtime_state || 'stopped',
+                    version:       detailAgent.version,
+                    agent_type:    detailAgent.agent_type,
+                    code_path:     detailAgent.code_path,
+                    code_sha256:   detailAgent.code_sha256,
+                    policy_status: detailAgent.policy_status,
+                    owner:         detailAgent.owner,
+                  }}
+                  onClose={() => setDetailAgent(null)}
+                  onOpenChat={(a) => {
+                    setDetailAgent(null)
+                    setChatAgent(a)
+                  }}
+                  onAgentChanged={async () => {
+                    if (refreshAgents) await refreshAgents()
+                  }}
+                />
             : showRegister && canRegister && activeTab === 'agents'
               ? <RegisterAgentPanel
                   onClose={() => setShowRegister(false)}
@@ -1586,35 +1614,6 @@ export default function Inventory() {
         )}
 
       </div>
-
-      {/* Detail drawer — opens from PreviewPanel's "View Detail" button.
-          Lives at page root so it can overlay the inventory table. */}
-      <AgentDetailDrawer
-        open={!!detailAgent}
-        agent={detailAgent ? {
-          // Drawer expects the backend agent shape (id, name, runtime_state,
-          // version, etc.). Map our inventory-row shape onto it; fall back
-          // to the inventory id if there's no _backendId (mock rows).
-          id:            detailAgent._backendId || detailAgent.id,
-          name:          detailAgent.name,
-          risk:          detailAgent.risk,
-          runtime_state: detailAgent.runtime_state || 'stopped',
-          version:       detailAgent.version,
-          agent_type:    detailAgent.agent_type,
-          code_path:     detailAgent.code_path,
-          code_sha256:   detailAgent.code_sha256,
-          policy_status: detailAgent.policy_status,
-          owner:         detailAgent.owner,
-        } : null}
-        onClose={() => setDetailAgent(null)}
-        onOpenChat={(agent) => {
-          setDetailAgent(null)
-          setChatAgent(agent)
-        }}
-        onAgentChanged={async () => {
-          if (refreshAgents) await refreshAgents()
-        }}
-      />
 
     </PageContainer>
   )
