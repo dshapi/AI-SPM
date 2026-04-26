@@ -16,6 +16,7 @@ on every write so the audit trail names the actor.
 """
 from __future__ import annotations
 
+import uuid as _uuid_mod
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 
@@ -70,15 +71,16 @@ def _row_to_dict(row: AgentPolicy) -> Dict[str, Any]:
     }
 
 
-async def _list_rows(db, agent_id: str) -> List[AgentPolicy]:
+async def _list_rows(db, agent_id) -> List[AgentPolicy]:
+    pk = _uuid_mod.UUID(str(agent_id))
     if hasattr(db, "execute"):
         result = await db.execute(
-            select(AgentPolicy).where(AgentPolicy.agent_id == agent_id)
+            select(AgentPolicy).where(AgentPolicy.agent_id == pk)
         )
         return list(result.scalars().all())
     # sync mock path
     return list(db.query(AgentPolicy)
-                  .filter(AgentPolicy.agent_id == agent_id).all())
+                  .filter(AgentPolicy.agent_id == pk).all())
 
 
 async def _commit(db) -> None:
@@ -119,7 +121,8 @@ async def replace_agent_policies(
     Body: ``{"policy_ids": ["pol-001", "pol-002"]}``. Empty list clears.
     Returns the new full set so callers don't need a follow-up GET.
     """
-    await _get_agent_or_404(db, agent_id)
+    agent = await _get_agent_or_404(db, agent_id)
+    agent_uuid = agent.id  # already a uuid.UUID from the DB
     raw = body.get("policy_ids") if isinstance(body, dict) else None
     if not isinstance(raw, list):
         raise HTTPException(
@@ -132,10 +135,10 @@ async def replace_agent_policies(
     # rows per agent; saves us the diff complexity.
     if hasattr(db, "execute"):
         await db.execute(
-            sa_delete(AgentPolicy).where(AgentPolicy.agent_id == agent_id)
+            sa_delete(AgentPolicy).where(AgentPolicy.agent_id == agent_uuid)
         )
     else:
-        for r in await _list_rows(db, agent_id):
+        for r in await _list_rows(db, agent_uuid):
             db.delete(r)
 
     actor = _actor(claims)
@@ -143,7 +146,7 @@ async def replace_agent_policies(
         if not pid:
             continue
         db.add(AgentPolicy(
-            agent_id=agent_id, policy_id=pid, attached_by=actor,
+            agent_id=agent_uuid, policy_id=pid, attached_by=actor,
         ))
     await _commit(db)
 
@@ -163,30 +166,27 @@ async def attach_policy(
     db = Depends(get_db),
     claims = Depends(require_admin),
 ) -> Dict[str, Any]:
-    await _get_agent_or_404(db, agent_id)
+    agent = await _get_agent_or_404(db, agent_id)
+    agent_uuid = agent.id
     pid = policy_id.strip()
     if not pid:
         raise HTTPException(status_code=400, detail="policy_id is empty")
 
-    # Upsert-style — if it's already attached, return the existing
-    # row instead of 409. Operators retry attach()/detach() in scripts
-    # and getting a clean idempotent response is friendlier than a
-    # constraint violation.
     if hasattr(db, "execute"):
         existing = (await db.execute(
             select(AgentPolicy)
-            .where(AgentPolicy.agent_id == agent_id)
+            .where(AgentPolicy.agent_id == agent_uuid)
             .where(AgentPolicy.policy_id == pid)
         )).scalar_one_or_none()
     else:
         existing = next(
-            (r for r in await _list_rows(db, agent_id) if r.policy_id == pid),
+            (r for r in await _list_rows(db, agent_uuid) if r.policy_id == pid),
             None,
         )
     if existing is not None:
         return _row_to_dict(existing)
 
-    row = AgentPolicy(agent_id=agent_id, policy_id=pid,
+    row = AgentPolicy(agent_id=agent_uuid, policy_id=pid,
                       attached_by=_actor(claims))
     db.add(row)
     await _commit(db)
@@ -206,16 +206,17 @@ async def detach_policy(
     db = Depends(get_db),
     _claims = Depends(require_admin),
 ):
-    await _get_agent_or_404(db, agent_id)
+    agent = await _get_agent_or_404(db, agent_id)
+    agent_uuid = agent.id
     pid = policy_id.strip()
     if hasattr(db, "execute"):
         await db.execute(
             sa_delete(AgentPolicy)
-            .where(AgentPolicy.agent_id == agent_id)
+            .where(AgentPolicy.agent_id == agent_uuid)
             .where(AgentPolicy.policy_id == pid)
         )
     else:
-        for r in await _list_rows(db, agent_id):
+        for r in await _list_rows(db, agent_uuid):
             if r.policy_id == pid:
                 db.delete(r)
     await _commit(db)
