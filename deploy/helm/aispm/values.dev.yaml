@@ -1,0 +1,23 @@
+# deploy/helm/aispm/values.dev.yaml
+# Rancher Desktop / local k3s overrides.
+# Usage: helm upgrade aispm deploy/helm/aispm/ -n aispm \
+#          -f deploy/helm/aispm/values.yaml \
+#          -f deploy/helm/aispm/values.dev.yaml
+#
+# Prerequisites (one-time):
+#   echo "127.0.0.1  aispm.local" | sudo tee -a /etc/hosts
+#
+# Then browse to: http://aispm.local  (chat UI)
+#                 http://aispm.local/admin  (admin panel — if route exists)
+#                 http://aispm.local/api/spm/docs  (SPM API Swagger)
+#                 http://aispm.local/api/docs      (platform API Swagger)
+
+ingress:
+  host: aispm.local
+  httpsRedirect: false   # no cert on dev — plain HTTP on port 80
+
+prometheus:
+  storageClass: local-path
+
+grafana:
+  storageClass: local-path

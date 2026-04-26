@@ -110,6 +110,7 @@ ingress:
   host: aispm.example.com
   tlsSecretName: aispm-tls
   letsencryptEmail: ops@example.com
+  httpsRedirect: true   # set false in values.dev.yaml
 
 # ── Runtime Security ─────────────────────────────────────────────────────────
 # Set falco.enabled=true only when Falco is installed (namespace falco must exist).

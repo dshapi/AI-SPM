@@ -24,6 +24,8 @@ spec:
         protocol: HTTP
       hosts:
         - {{ .Values.ingress.host }}
+      {{- if .Values.ingress.httpsRedirect }}
       tls:
         httpsRedirect: true
+      {{- end }}
 {{- end }}
