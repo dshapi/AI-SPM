@@ -84,4 +84,20 @@ spec:
     - from:
         - source:
             namespaces: ["{{ .Values.global.namespace }}"]
+---
+# Allow Istio ingress gateway → frontend services (ui, api, spm-api)
+# The ingress gateway runs in istio-system and is not in the aispm namespace,
+# so it would be blocked by the intra-platform policy without this rule.
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-ingress-gateway
+  namespace: {{ .Values.global.namespace }}
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["istio-system"]
+            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
 {{- end }}

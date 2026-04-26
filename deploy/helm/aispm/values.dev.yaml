@@ -14,7 +14,10 @@
 
 ingress:
   host: aispm.local
-  httpsRedirect: false   # no cert on dev — plain HTTP on port 80
+  className: traefik
+  tls: false
+  certManager: false
+  httpsRedirect: false
 
 prometheus:
   storageClass: local-path

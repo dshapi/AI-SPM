@@ -110,6 +110,8 @@ ingress:
   host: aispm.example.com
   tlsSecretName: aispm-tls
   letsencryptEmail: ops@example.com
+  tls: true             # set false in values.dev.yaml
+  certManager: true     # set false in values.dev.yaml
   httpsRedirect: true   # set false in values.dev.yaml
 
 # ── Runtime Security ─────────────────────────────────────────────────────────

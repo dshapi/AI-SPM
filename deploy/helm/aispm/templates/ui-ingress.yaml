@@ -6,33 +6,29 @@ metadata:
   name: aispm
   namespace: {{ .Values.global.namespace }}
   annotations:
-    kubernetes.io/ingress.class: {{ .Values.ingress.className }}
+    {{- if .Values.ingress.certManager }}
     cert-manager.io/cluster-issuer: letsencrypt-prod
+    {{- end }}
+    {{- if eq .Values.ingress.className "nginx" }}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    {{- end }}
 spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
   tls:
     - hosts:
         - {{ .Values.ingress.host }}
       secretName: {{ .Values.ingress.tlsSecretName }}
+  {{- end }}
   rules:
     - host: {{ .Values.ingress.host }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: ui
-                port:
-                  number: 3001
-          - path: /api
-            pathType: Prefix
-            backend:
-              service:
-                name: api
-                port:
-                  number: 8080
           - path: /api/spm
             pathType: Prefix
             backend:
@@ -40,4 +36,25 @@ spec:
                 name: spm-api
                 port:
                   number: 8092
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8080
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ui
+                port:
+                  number: 3001
 {{- end }}
