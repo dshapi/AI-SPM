@@ -76,12 +76,15 @@ export default function AgentDetailDrawer({
   return (
     <aside
       role="region" aria-label={`Agent ${agent.name}`}
-      // ``min-h-0`` lets the inner ``flex-1 min-h-0`` tab body actually
-      // collapse to the parent's available height instead of expanding
-      // to fit the largest tab's natural content size — without this
-      // the Activity tab's long timeline would push the close button
-      // off the bottom of the drawer.
-      className="w-[300px] shrink-0 flex flex-col h-full min-h-0 bg-white"
+      // Height handling — fixed viewport-relative height (not just a
+      // cap). The parent flex container is ``items-stretch`` with no
+      // explicit height, so ``h-full`` would resolve against an
+      // unbounded parent and ``max-h`` alone would just cap an
+      // already-too-tall element. Pinning ``h-[calc(100vh-120px)]``
+      // gives the panel a deterministic height that the inner
+      // ``flex-1 min-h-0`` tab body can actually fill, which is what
+      // makes the timeline's ``overflow-y-auto`` engage.
+      className="w-[300px] shrink-0 flex flex-col h-[calc(100vh-120px)] min-h-0 bg-white"
       data-testid="agent-detail-drawer"
     >
       {/* Header — same shape, padding, and typography as PreviewPanel.
@@ -113,11 +116,12 @@ export default function AgentDetailDrawer({
           as part of the panel rather than a separate widget. */}
       <nav
         role="tablist"
-        // 300px is tight for 5 tabs — px-2 + px-1.5 per item just
-        // barely fits "Overview / Configure / Activity / Sessions /
-        // Lineage" at 11px without truncation. overflow-x-auto is the
-        // safety net for translations that come out longer.
-        className="flex border-b border-gray-100 px-2 overflow-x-auto"
+        // 300px is tight for 5 tabs. ``flex-1`` on each button gives
+        // every tab exactly 1/5 of the width regardless of label
+        // length, and ``truncate`` is the safety net for any
+        // translation that ends up longer than the slot. Avoids the
+        // overflow-x-scroll hidden-tabs problem.
+        className="flex border-b border-gray-100"
       >
         {TABS.map(t => {
           const active = tab === t.key
@@ -129,11 +133,13 @@ export default function AgentDetailDrawer({
               data-tab-key={t.key}
               onClick={() => setTab(t.key)}
               className={
-                "relative px-1.5 py-2 text-[11px] font-medium whitespace-nowrap transition-colors " +
+                "relative flex-1 min-w-0 px-1 py-2 " +
+                "text-[10.5px] font-medium text-center truncate transition-colors " +
                 (active
                   ? "text-gray-900"
                   : "text-gray-500 hover:text-gray-700")
               }
+              title={t.label}
             >
               {t.label}
               {active && (

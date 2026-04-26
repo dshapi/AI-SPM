@@ -78,7 +78,7 @@ export default function AgentChatPanel({ open, agent, onClose }) {
       // composer below the fold even when the parent forgets to size
       // it. Combined with ``flex-1 min-h-0`` on the body below, the
       // message list scrolls and the composer stays pinned.
-      className="w-[300px] shrink-0 flex flex-col h-full min-h-0 max-h-[calc(100vh-120px)] bg-white"
+      className="w-[300px] shrink-0 flex flex-col h-[calc(100vh-120px)] min-h-0 bg-white"
       data-testid="agent-chat-panel"
     >
       {/* Header — mirrors PreviewPanel exactly. */}

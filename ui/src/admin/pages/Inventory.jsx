@@ -606,7 +606,14 @@ function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) 
   }
 
   return (
-    <div className="w-[300px] shrink-0 flex flex-col h-full" data-testid="asset-preview-panel">
+    // Same viewport-height ceiling pattern as AgentChatPanel /
+    // AgentDetailDrawer — the parent flex container just ``items-
+    // stretch``es, so without ``max-h`` a tall content block would
+    // grow the page rather than scrolling inside the panel body.
+    <div
+      className="w-[300px] shrink-0 flex flex-col h-[calc(100vh-120px)] min-h-0"
+      data-testid="asset-preview-panel"
+    >
 
       {/* Header — risk-tinted */}
       <div className={cn('px-4 py-3.5 border-b border-gray-100 flex items-start justify-between gap-2', riskBg)}>
