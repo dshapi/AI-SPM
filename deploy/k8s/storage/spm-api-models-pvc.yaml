@@ -1,0 +1,12 @@
+# deploy/k8s/storage/spm-api-models-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spm-api-models
+  namespace: aispm
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

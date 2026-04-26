@@ -1,0 +1,9 @@
+# deploy/k8s/namespaces/aispm-agents.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aispm-agents
+  labels:
+    purpose: agent-runtime
+    pod-security.kubernetes.io/enforce: restricted
+    istio.io/dataplane-mode: ambient  # ztunnel handles mTLS; no sidecar injected

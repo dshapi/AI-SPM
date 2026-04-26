@@ -1,0 +1,11 @@
+# deploy/helm/aispm/templates/opa-policies-configmap.yaml
+# Loads all .rego files from files/policies/ using Helm's Files API.
+# To update policies: copy new .rego files to deploy/helm/aispm/files/policies/
+# then run helm upgrade.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: opa-policies
+  namespace: {{ .Values.global.namespace }}
+data:
+{{ (.Files.Glob "files/policies/*.rego").AsConfig | indent 2 }}

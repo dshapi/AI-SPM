@@ -1,0 +1,265 @@
+# deploy/helm/aispm/templates/services.yaml
+# Aggregated ClusterIP services for all stateless services.
+# StatefulSets (spm-db, kafka, redis) have their own headless service files.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: redis }
+  ports:
+    - port: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opa
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: opa }
+  ports:
+    - port: 8181
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: guard-model
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: guard-model }
+  ports:
+    - port: 8200
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: garak-runner
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: garak-runner }
+  ports:
+    - port: 8099
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: api }
+  ports:
+    - port: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: retrieval-gateway
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: retrieval-gateway }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: processor
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: processor }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-decider
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: policy-decider }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: agent }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memory-service
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: memory-service }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: executor
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: executor }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tool-parser
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: tool-parser }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: output-guard
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: output-guard }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: freeze-controller
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: freeze-controller }
+  ports:
+    - port: 8090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: policy-simulator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: policy-simulator }
+  ports:
+    - port: 8091
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-jobmanager
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: flink-jobmanager }
+  ports:
+    - name: rest
+      port: 8081
+    - name: rpc
+      port: 6123
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-api
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: spm-api }
+  ports:
+    - port: 8092
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-mcp
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: spm-mcp }
+  ports:
+    - port: 8500
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-llm-proxy
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: spm-llm-proxy }
+  ports:
+    - port: 8500
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-aggregator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: spm-aggregator }
+  ports:
+    - port: 80
+      targetPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: agent-orchestrator }
+  ports:
+    - port: 8094
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: threat-hunting-agent
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: threat-hunting-agent }
+  ports:
+    - port: 8095
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ui
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: ui }
+  ports:
+    - port: 3001
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: prometheus }
+  ports:
+    - port: 9090
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector: { app: grafana }
+  ports:
+    - port: 3000

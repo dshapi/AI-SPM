@@ -1,0 +1,29 @@
+# deploy/helm/aispm/templates/kafka-service.yaml
+# Headless service — gives each pod a stable DNS entry (kafka-0.kafka.aispm...)
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: {{ .Values.global.namespace }}
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+    - name: controller
+      port: 9093
+---
+# Named ClusterIP service — matches KAFKA_BOOTSTRAP_SERVERS in platformEnv
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-broker
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    app: kafka
+  ports:
+    - port: 9092
+      targetPort: 9092

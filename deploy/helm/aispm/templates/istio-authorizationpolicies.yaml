@@ -1,0 +1,87 @@
+# deploy/helm/aispm/templates/istio-authorizationpolicies.yaml
+# L7 AuthorizationPolicies — complement NetworkPolicy (kernel/CNI layer).
+# Applied only when Istio CRDs exist.
+{{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
+---
+# Deny all traffic in aispm-agents by default (Ambient mode)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all-agents
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec: {}   # empty spec = deny all
+---
+# Allow agent Pods → spm-mcp (MCP tool server)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: agent-allow-spm-mcp
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: spm-mcp
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+      to:
+        - operation:
+            ports: ["8500"]
+---
+# Allow agent Pods → spm-llm-proxy (Ollama proxy)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: agent-allow-spm-llm-proxy
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: spm-llm-proxy
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+      to:
+        - operation:
+            ports: ["8500"]
+---
+# Allow agent Pods → spm-api (ready handshake + bootstrap + secrets only)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: agent-allow-spm-api
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: spm-api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+      to:
+        - operation:
+            paths: ["/agents/*/ready", "/agents/*/bootstrap", "/secrets/*"]
+            methods: ["GET", "POST"]
+---
+# Allow all intra-platform traffic within aispm namespace
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-intra-platform
+  namespace: {{ .Values.global.namespace }}
+spec:
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["{{ .Values.global.namespace }}"]
+{{- end }}

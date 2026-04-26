@@ -1,0 +1,70 @@
+# deploy/k8s/network-policies/agent-allow-egress.yaml
+# Whitelist egress from agent-runtime Pods to the four permitted services only.
+# Pods are identified by app=agent-runtime (set by agent_controller.py).
+# All other egress is blocked by default-deny-all.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-allow-egress
+  namespace: aispm-agents
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-runtime
+  policyTypes:
+    - Egress
+  egress:
+    # spm-mcp — MCP tool server (port 8500)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aispm
+          podSelector:
+            matchLabels:
+              app: spm-mcp
+      ports:
+        - protocol: TCP
+          port: 8500
+
+    # spm-llm-proxy — Ollama / LLM proxy (port 8500)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aispm
+          podSelector:
+            matchLabels:
+              app: spm-llm-proxy
+      ports:
+        - protocol: TCP
+          port: 8500
+
+    # Kafka broker — chat topic produce/consume (port 9092)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aispm
+          podSelector:
+            matchLabels:
+              app: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+
+    # spm-api — aispm.ready() handshake + bootstrap endpoint (port 8092)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: aispm
+          podSelector:
+            matchLabels:
+              app: spm-api
+      ports:
+        - protocol: TCP
+          port: 8092
+
+    # DNS — required for cluster DNS resolution (kube-dns / CoreDNS)
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

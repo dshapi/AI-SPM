@@ -1,0 +1,67 @@
+# deploy/helm/aispm/templates/startup-orchestrator-job.yaml
+# Runs once after install/upgrade to provision Kafka topics.
+# JWT keys are pre-created in the jwt-keys Secret (Task 3) — this Job only
+# provisions Kafka topics and any other one-time bootstrap steps.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: startup-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      # Wait for Kafka and Redis before running — without this the hook may fire
+      # while Kafka is still in leader-election and topic creation will fail.
+      initContainers:
+        - name: wait-for-kafka
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Kafka...";
+              until nc -z kafka-broker.{{ .Values.global.namespace }}.svc.cluster.local 9092; do
+                sleep 2;
+              done;
+              echo "Kafka ready."
+        - name: wait-for-redis
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for Redis...";
+              until nc -z redis.{{ .Values.global.namespace }}.svc.cluster.local 6379; do
+                sleep 2;
+              done;
+              echo "Redis ready."
+      containers:
+        - name: startup-orchestrator
+          image: {{ include "aispm.image" .Values.images.startupOrch }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: KEYS_DIR
+              value: /keys-rw
+            - name: JWT_PRIVATE_KEY_PATH
+              value: /keys-rw/private.pem
+            - name: JWT_PUBLIC_KEY_PATH
+              value: /keys-rw/public.pem
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys-rw
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0600

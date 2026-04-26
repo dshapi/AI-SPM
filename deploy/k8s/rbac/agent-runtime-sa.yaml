@@ -1,0 +1,9 @@
+# deploy/k8s/rbac/agent-runtime-sa.yaml
+# ServiceAccount for agent pods — minimal, no cluster permissions.
+# automountServiceAccountToken disabled so agent code cannot call kube-apiserver.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-runtime
+  namespace: aispm-agents
+automountServiceAccountToken: false

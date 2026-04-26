@@ -1,0 +1,41 @@
+# deploy/helm/aispm/templates/garak-runner-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: garak-runner
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: garak-runner }
+  template:
+    metadata:
+      labels: { app: garak-runner }
+    spec:
+      containers:
+        - name: garak-runner
+          image: {{ include "aispm.image" .Values.images.garakRunner }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8099
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: CPM_API_URL
+              value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8099 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444

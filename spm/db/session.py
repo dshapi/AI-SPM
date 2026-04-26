@@ -6,7 +6,13 @@ import os
 from functools import lru_cache
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-SPM_DB_URL = os.getenv("SPM_DB_URL", "postgresql+asyncpg://spm_rw:spmpass@spm-db:5432/spm")
+# Prefer the explicit async URL injected by Helm; fall back to the sync URL
+# (stripping the scheme) or finally the hardcoded default.
+SPM_DB_URL = (
+    os.getenv("SPM_DB_URL_ASYNC")
+    or os.getenv("SPM_DB_URL", "").replace("postgresql://", "postgresql+asyncpg://", 1)
+    or "postgresql+asyncpg://spm_rw:spmpass@spm-db:5432/spm"
+)
 
 
 @lru_cache(maxsize=1)

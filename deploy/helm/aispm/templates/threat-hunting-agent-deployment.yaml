@@ -1,0 +1,36 @@
+# deploy/helm/aispm/templates/threat-hunting-agent-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: threat-hunting-agent
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: threat-hunting-agent }
+  template:
+    metadata:
+      labels: { app: threat-hunting-agent }
+    spec:
+      containers:
+        - name: threat-hunting-agent
+          image: {{ include "aispm.image" .Values.images.threatHunter }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8095
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: ORCHESTRATOR_URL
+              value: "http://agent-orchestrator.{{ .Values.global.namespace }}.svc.cluster.local:8094"
+            - name: PLATFORM_API_URL
+              value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+          readinessProbe:
+            httpGet: { path: /health, port: 8095 }
+            initialDelaySeconds: 20
+            periodSeconds: 15

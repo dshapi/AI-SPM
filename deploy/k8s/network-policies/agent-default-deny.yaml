@@ -1,0 +1,14 @@
+# deploy/k8s/network-policies/agent-default-deny.yaml
+# Default-deny ALL ingress and egress in aispm-agents.
+# Applied once (kubectl apply -f deploy/k8s/network-policies/).
+# Also embedded in the Helm chart (agent-networkpolicy.yaml).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: aispm-agents
+spec:
+  podSelector: {}   # applies to every pod in the namespace
+  policyTypes:
+    - Ingress
+    - Egress

@@ -49,3 +49,7 @@ __pycache__/
 __pycache__/
 *.pyc
 *.pyo
+
+# Istio downloaded distributions
+istio-*/
+DataVolumes/

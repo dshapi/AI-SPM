@@ -1,0 +1,50 @@
+# deploy/helm/aispm/templates/istio-virtualservices.yaml
+{{- if and .Values.ingress.enabled (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") }}
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: aispm-ui
+  namespace: {{ .Values.global.namespace }}
+spec:
+  hosts:
+    - {{ .Values.ingress.host }}
+  gateways:
+    - aispm-gateway
+  http:
+    # /api/spm/* → spm-api (SPM REST API, port 8092)
+    - match:
+        - uri:
+            prefix: /api/spm
+      route:
+        - destination:
+            host: spm-api
+            port:
+              number: 8092
+    # /api/* → CPM api (platform REST API, port 8080)
+    - match:
+        - uri:
+            prefix: /api
+      route:
+        - destination:
+            host: api
+            port:
+              number: 8080
+    # /ws/* → CPM api WebSocket
+    - match:
+        - uri:
+            prefix: /ws
+      route:
+        - destination:
+            host: api
+            port:
+              number: 8080
+    # / → UI (React SPA, port 3001)
+    - match:
+        - uri:
+            prefix: /
+      route:
+        - destination:
+            host: ui
+            port:
+              number: 3001
+{{- end }}

@@ -1,0 +1,33 @@
+# deploy/helm/aispm/templates/spm-aggregator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spm-aggregator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: spm-aggregator }
+  template:
+    metadata:
+      labels: { app: spm-aggregator }
+    spec:
+      containers:
+        - name: spm-aggregator
+          image: {{ include "aispm.image" .Values.images.spmAggregator }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_API_URL
+              value: "http://spm-api.{{ .Values.global.namespace }}.svc.cluster.local:8092"
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 15

@@ -1,0 +1,30 @@
+# deploy/helm/aispm/templates/flink-pyjob-submitter-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: flink-pyjob-submitter
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "0"
+    "helm.sh/hook-delete-policy": hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: submitter
+          image: {{ include "aispm.image" .Values.images.flinkJob }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["/opt/flink-pyjob/submit.sh"]
+          env:
+            - name: FLINK_JM_URL
+              value: "http://flink-jobmanager.{{ .Values.global.namespace }}.svc.cluster.local:8081"
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: CEP_TENANT_IDS
+              value: "t1"

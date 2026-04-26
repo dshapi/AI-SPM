@@ -1,0 +1,44 @@
+# deploy/istio/istio-values.yaml
+# Reference values used when installing Istio via istioctl or Helm.
+# These are NOT applied automatically — see Task 15 install commands.
+#
+# Profile: ambient
+#   - istiod control plane
+#   - istio-cni DaemonSet (traffic redirection at node level)
+#   - ztunnel DaemonSet (L4 mTLS for Ambient-mode namespaces)
+#   - istio-ingressgateway Deployment
+#
+# Namespace modes:
+#   aispm         → sidecar injection (istio-injection: enabled)
+#   aispm-agents  → Ambient (istio.io/dataplane-mode: ambient)
+
+profile: ambient
+
+meshConfig:
+  accessLogFile: /dev/stdout
+  enableTracing: false          # enable in prod with Tempo/Jaeger
+  defaultConfig:
+    holdApplicationUntilProxyStarts: true   # prevent race on startup
+
+pilot:
+  env:
+    PILOT_ENABLE_AMBIENT: "true"
+
+# Resource limits suitable for a dev laptop (Rancher Desktop 16 GB / 8 CPU)
+pilot:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ingressGateways:
+  - name: istio-ingressgateway
+    enabled: true
+    k8s:
+      resources:
+        requests:
+          cpu: 50m
+          memory: 128Mi

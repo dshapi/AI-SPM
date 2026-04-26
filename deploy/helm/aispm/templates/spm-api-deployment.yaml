@@ -1,0 +1,66 @@
+# deploy/helm/aispm/templates/spm-api-deployment.yaml
+# Uses the spm-api ServiceAccount — carries the RBAC token to create/delete
+# agent Pods in aispm-agents namespace. AGENT_CODE_HOST_DIR is not used in
+# k8s — agent code is stored in ConfigMaps (see agent_controller.py Task 11).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spm-api
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: spm-api }
+  template:
+    metadata:
+      labels: { app: spm-api }
+    spec:
+      serviceAccountName: spm-api
+      containers:
+        - name: spm-api
+          image: {{ include "aispm.image" .Values.images.spmApi }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8092
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_DB_URL
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            - name: FREEZE_CONTROLLER_URL
+              value: "http://freeze-controller.{{ .Values.global.namespace }}.svc.cluster.local:8090"
+            - name: CPM_API_URL
+              value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+            - name: POLICY_SIMULATOR_URL
+              value: "http://policy-simulator.{{ .Values.global.namespace }}.svc.cluster.local:8091"
+            - name: MODEL_UPLOAD_DIR
+              value: /app/models
+            - name: AGENT_POD_NAMESPACE
+              value: {{ .Values.agentRuntime.namespace | quote }}
+            - name: AGENT_RUNTIME_IMAGE
+              value: {{ include "aispm.image" .Values.images.agentRuntime | quote }}
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+            - name: models
+              mountPath: /app/models
+          readinessProbe:
+            httpGet: { path: /health, port: 8092 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: 8092 }
+            initialDelaySeconds: 40
+            periodSeconds: 15
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444
+        - name: models
+          persistentVolumeClaim:
+            claimName: spm-api-models

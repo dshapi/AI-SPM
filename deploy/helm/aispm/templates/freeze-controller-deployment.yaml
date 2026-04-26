@@ -1,0 +1,38 @@
+# deploy/helm/aispm/templates/freeze-controller-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: freeze-controller
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: freeze-controller }
+  template:
+    metadata:
+      labels: { app: freeze-controller }
+    spec:
+      containers:
+        - name: freeze-controller
+          image: {{ include "aispm.image" .Values.images.freezeCtrl }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8090
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8090 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444

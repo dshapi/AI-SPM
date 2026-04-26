@@ -1,0 +1,13 @@
+# deploy/helm/aispm/templates/spm-db-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-db
+  namespace: {{ .Values.global.namespace }}
+spec:
+  clusterIP: None   # headless — each pod gets a stable DNS entry
+  selector:
+    app: spm-db
+  ports:
+    - port: 5432
+      targetPort: 5432

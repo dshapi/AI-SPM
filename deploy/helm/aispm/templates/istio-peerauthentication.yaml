@@ -1,0 +1,14 @@
+# deploy/helm/aispm/templates/istio-peerauthentication.yaml
+# STRICT mTLS for all pods in the aispm namespace.
+# Plaintext service-to-service traffic is rejected once Istio sidecars are injected.
+# Applied only when Istio CRDs exist (guarded by lookup).
+{{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: {{ .Values.global.namespace }}
+spec:
+  mtls:
+    mode: STRICT
+{{- end }}

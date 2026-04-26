@@ -1,0 +1,8 @@
+# deploy/k8s/namespaces/aispm.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aispm
+  labels:
+    app.kubernetes.io/managed-by: helm
+    istio-injection: enabled          # sidecar mode — full L7 mTLS for platform services

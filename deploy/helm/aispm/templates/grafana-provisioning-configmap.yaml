@@ -1,0 +1,8 @@
+# deploy/helm/aispm/templates/grafana-provisioning-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-provisioning
+  namespace: {{ .Values.global.namespace }}
+data:
+{{ (.Files.Glob "files/grafana/provisioning/**/*.yaml").AsConfig | indent 2 }}

@@ -1,0 +1,32 @@
+# deploy/helm/aispm/templates/flink-taskmanager-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flink-taskmanager
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: flink-taskmanager }
+  template:
+    metadata:
+      labels: { app: flink-taskmanager }
+    spec:
+      containers:
+        - name: flink-taskmanager
+          image: {{ .Values.flink.image }}:{{ .Values.flink.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["taskmanager"]
+          volumeMounts:
+            - name: flink-conf
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            - name: state
+              mountPath: /flink/checkpoints
+      volumes:
+        - name: flink-conf
+          configMap:
+            name: flink-conf
+        - name: state
+          persistentVolumeClaim:
+            claimName: flink-taskmanager-state

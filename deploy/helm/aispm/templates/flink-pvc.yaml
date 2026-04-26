@@ -1,0 +1,40 @@
+# deploy/helm/aispm/templates/flink-pvc.yaml
+# Dev: two separate RWO PVCs (local-path doesn't support RWX).
+# JM uses flink-checkpoints for savepoints; TM uses flink-taskmanager-state for RocksDB.
+# Prod: switch storageClass to longhorn and accessModes to ReadWriteMany for shared access.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-checkpoints
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-savepoints
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi
+---
+# TaskManager gets its own state volume (RocksDB checkpoint data)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-taskmanager-state
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

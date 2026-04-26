@@ -1,0 +1,39 @@
+# deploy/helm/aispm/templates/output-guard-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: output-guard
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: output-guard }
+  template:
+    metadata:
+      labels: { app: output-guard }
+    spec:
+      containers:
+        - name: output-guard
+          image: {{ include "aispm.image" .Values.images.outputGuard }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "kill -0 1"]
+            initialDelaySeconds: 10
+            periodSeconds: 15
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444

@@ -1,0 +1,51 @@
+# deploy/helm/aispm/templates/flink-jobmanager-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: flink-jobmanager
+  namespace: {{ .Values.global.namespace }}
+spec:
+  serviceName: flink-jobmanager
+  replicas: 1
+  selector:
+    matchLabels: { app: flink-jobmanager }
+  template:
+    metadata:
+      labels: { app: flink-jobmanager }
+    spec:
+      containers:
+        - name: flink-jobmanager
+          image: {{ .Values.flink.image }}:{{ .Values.flink.tag }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          args: ["jobmanager"]
+          ports:
+            - containerPort: 8081  # REST / UI
+            - containerPort: 6123  # RPC
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+          readinessProbe:
+            httpGet: { path: /overview, port: 8081 }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          volumeMounts:
+            - name: flink-conf
+              mountPath: /opt/flink/conf/flink-conf.yaml
+              subPath: flink-conf.yaml
+            - name: checkpoints
+              mountPath: /flink/checkpoints
+            - name: savepoints
+              mountPath: /flink/savepoints
+      volumes:
+        - name: flink-conf
+          configMap:
+            name: flink-conf
+        - name: checkpoints
+          persistentVolumeClaim:
+            claimName: flink-checkpoints
+        - name: savepoints
+          persistentVolumeClaim:
+            claimName: flink-savepoints

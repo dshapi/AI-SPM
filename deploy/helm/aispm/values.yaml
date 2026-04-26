@@ -1,0 +1,122 @@
+# deploy/helm/aispm/values.yaml
+global:
+  imageRegistry: ""          # e.g. ghcr.io/your-org
+  imagePullPolicy: IfNotPresent
+  namespace: aispm
+
+# ── Per-service image tags ───────────────────────────────────────────────────
+images:
+  api:             { repository: aispm-api,              tag: latest }
+  guardModel:      { repository: aispm-guard-model,      tag: latest }
+  garakRunner:     { repository: aispm-garak-runner,     tag: latest }
+  retrievalGw:     { repository: aispm-retrieval-gw,     tag: latest }
+  processor:       { repository: aispm-processor,        tag: latest }
+  policyDecider:   { repository: aispm-policy-decider,   tag: latest }
+  agent:           { repository: aispm-agent,            tag: latest }
+  memoryService:   { repository: aispm-memory,           tag: latest }
+  executor:        { repository: aispm-executor,         tag: latest }
+  toolParser:      { repository: aispm-tool-parser,      tag: latest }
+  outputGuard:     { repository: aispm-output-guard,     tag: latest }
+  freezeCtrl:      { repository: aispm-freeze-ctrl,      tag: latest }
+  policySimulator: { repository: aispm-policy-sim,       tag: latest }
+  spmApi:          { repository: aispm-spm-api,          tag: latest }
+  spmMcp:          { repository: aispm-spm-mcp,          tag: latest }
+  spmLlmProxy:     { repository: aispm-spm-llm-proxy,    tag: latest }
+  spmAggregator:   { repository: aispm-spm-aggregator,   tag: latest }
+  agentOrchestrator: { repository: aispm-agent-orchestrator, tag: latest }
+  threatHunter:    { repository: aispm-threat-hunter,    tag: latest }
+  ui:              { repository: aispm-ui,               tag: latest }
+  startupOrch:     { repository: aispm-startup-orch,     tag: latest }
+  flinkJob:        { repository: aispm-flink-pyjob,      tag: latest }
+  agentRuntime:    { repository: aispm-agent-runtime,    tag: latest }
+
+# ── Infrastructure images (upstream) ────────────────────────────────────────
+flink:
+  image: flink
+  tag: "1.18-scala_2.12"
+
+kafka:
+  image: confluentinc/cp-kafka
+  tag: "7.6.1"
+  replicas: 1
+  clusterId: q1Enf0NkTvaBgXGsKZoeRA
+  storage: 10Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+
+redis:
+  image: redis
+  tag: "7-alpine"
+  storage: 1Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+  maxmemory: 512mb
+
+opa:
+  image: openpolicyagent/opa
+  tag: "0.70.0-static"   # static build avoids automaxprocs SIGSEGV under Lima/k3s
+
+spmDb:
+  image: postgres
+  tag: "16-alpine"
+  storage: 20Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+  database: spm
+  user: spm_rw
+
+# ── Platform env (non-secret) ────────────────────────────────────────────────
+platformEnv:
+  KAFKA_BOOTSTRAP_SERVERS: kafka-broker.aispm.svc.cluster.local:9092
+  OPA_URL: http://opa.aispm.svc.cluster.local:8181
+  JWT_ALGORITHM: RS256
+  JWT_ISSUER: cpm-platform
+  GUARD_MODEL_URL: http://guard-model.aispm.svc.cluster.local:8200
+  GUARD_MODEL_ENABLED: "true"
+  GUARD_MODEL_TIMEOUT: "60.0"
+  WS_WAIT_TIMEOUT_S: "10.0"
+  RATE_LIMIT_RPM: "60"
+  SERVICE_VERSION: "3.0.0"
+  ENVIRONMENT: production
+  REDIS_HOST: redis.aispm.svc.cluster.local
+  REDIS_PORT: "6379"
+  AGENT_MCP_URL: http://spm-mcp.aispm.svc.cluster.local:8500/mcp
+  AGENT_LLM_BASE_URL: http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1
+  AGENT_CONTROLLER_URL: http://spm-api.aispm.svc.cluster.local:8092
+  AGENT_POD_NAMESPACE: aispm-agents
+  AGENT_RUNTIME_IMAGE: aispm-agent-runtime:latest
+  # Threat-hunting-agent LLM backend — points at spm-llm-proxy which fronts Ollama
+  GROQ_BASE_URL: "http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1"
+
+# ── Agent runtime ────────────────────────────────────────────────────────────
+agentRuntime:
+  namespace: aispm-agents
+  # runtimeClassName not set for dev — Chainguard hardened image + securityContext used instead
+  # runtimeClassName: kata   # uncomment on RKE2 prod nodes with Kata installed
+  defaultMemMi: 512
+  defaultCpuMillicores: 500
+
+# ── Secrets (safe defaults — override at deploy time via --set or Rancher UI) ─
+secrets:
+  spmDbPassword: "spmpass"     # matches hardcoded source defaults; override in prod
+  groqApiKey: "local"          # placeholder; set to real Groq key in prod
+  anthropicApiKey: ""
+  tavilyApiKey: ""
+  garakInternalSecret: ""
+  spmInternalBootstrapSecret: ""
+  grafanaAdminPassword: "admin"
+
+# ── Ingress ──────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx
+  host: aispm.example.com
+  tlsSecretName: aispm-tls
+  letsencryptEmail: ops@example.com
+
+# ── Observability ────────────────────────────────────────────────────────────
+prometheus:
+  storage: 10Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+
+grafana:
+  adminPasswordSecret: grafana-secret
+  storage: 2Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn

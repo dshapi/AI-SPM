@@ -1,0 +1,29 @@
+# deploy/helm/aispm/templates/istio-gateway.yaml
+{{- if and .Values.ingress.enabled (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") }}
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: aispm-gateway
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 443
+        name: https
+        protocol: HTTPS
+      tls:
+        mode: SIMPLE
+        credentialName: {{ .Values.ingress.tlsSecretName }}
+      hosts:
+        - {{ .Values.ingress.host }}
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        - {{ .Values.ingress.host }}
+      tls:
+        httpsRedirect: true
+{{- end }}

@@ -1,0 +1,14 @@
+# deploy/helm/aispm/templates/agent-orchestrator-pvc.yaml
+# agent-orchestrator still uses SQLite (DB_PATH env var) — needs a persistent
+# volume so the database survives pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: agent-orchestrator-data
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi

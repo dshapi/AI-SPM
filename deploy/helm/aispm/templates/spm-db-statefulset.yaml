@@ -1,0 +1,61 @@
+# deploy/helm/aispm/templates/spm-db-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: spm-db
+  namespace: {{ .Values.global.namespace }}
+spec:
+  serviceName: spm-db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spm-db
+  template:
+    metadata:
+      labels:
+        app: spm-db
+    spec:
+      containers:
+        - name: postgres
+          image: {{ .Values.spmDb.image }}:{{ .Values.spmDb.tag }}
+          ports:
+            - containerPort: 5432
+          env:
+            - name: POSTGRES_DB
+              value: {{ .Values.spmDb.database }}
+            - name: POSTGRES_USER
+              value: {{ .Values.spmDb.user }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: SPM_DB_PASSWORD
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d/001_initial.sql
+              subPath: 001_initial.sql
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.spmDb.user }}", "-d", "{{ .Values.spmDb.database }}"]
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "{{ .Values.spmDb.user }}", "-d", "{{ .Values.spmDb.database }}"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: init-sql
+          configMap:
+            name: spm-db-init-sql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: {{ .Values.spmDb.storageClass }}
+        resources:
+          requests:
+            storage: {{ .Values.spmDb.storage }}

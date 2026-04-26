@@ -1,0 +1,11 @@
+# deploy/helm/aispm/Chart.yaml
+apiVersion: v2
+name: aispm
+description: AI Security Posture Management platform
+type: application
+version: 1.0.0
+appVersion: "3.0.0"
+keywords:
+  - ai-security
+  - llm
+  - agent-runtime

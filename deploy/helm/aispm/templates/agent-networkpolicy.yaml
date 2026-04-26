@@ -1,0 +1,73 @@
+# deploy/helm/aispm/templates/agent-networkpolicy.yaml
+# NetworkPolicies for the aispm-agents namespace.
+# Mirrors deploy/k8s/network-policies/ but parameterised via Helm values.
+# Applied as part of the main chart so they stay in sync with the platform.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-allow-egress
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: agent-runtime
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+          podSelector:
+            matchLabels:
+              app: spm-mcp
+      ports:
+        - protocol: TCP
+          port: 8500
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+          podSelector:
+            matchLabels:
+              app: spm-llm-proxy
+      ports:
+        - protocol: TCP
+          port: 8500
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+          podSelector:
+            matchLabels:
+              app: kafka
+      ports:
+        - protocol: TCP
+          port: 9092
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.global.namespace }}
+          podSelector:
+            matchLabels:
+              app: spm-api
+      ports:
+        - protocol: TCP
+          port: 8092
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

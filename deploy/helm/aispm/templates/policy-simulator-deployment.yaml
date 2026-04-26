@@ -1,0 +1,38 @@
+# deploy/helm/aispm/templates/policy-simulator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: policy-simulator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: policy-simulator }
+  template:
+    metadata:
+      labels: { app: policy-simulator }
+    spec:
+      containers:
+        - name: policy-simulator
+          image: {{ include "aispm.image" .Values.images.policySimulator }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8091
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          volumeMounts:
+            - name: jwt-keys
+              mountPath: /keys
+              readOnly: true
+          readinessProbe:
+            httpGet: { path: /health, port: 8091 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: jwt-keys
+          secret:
+            secretName: jwt-keys
+            defaultMode: 0444

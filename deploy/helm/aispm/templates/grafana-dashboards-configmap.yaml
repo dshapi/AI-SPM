@@ -1,0 +1,10 @@
+# deploy/helm/aispm/templates/grafana-dashboards-configmap.yaml
+# Loaded from files/grafana/dashboards/ using Helm Files API.
+# JSON files are not parsed as templates - they are embedded verbatim.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+  namespace: {{ .Values.global.namespace }}
+data:
+{{ (.Files.Glob "files/grafana/dashboards/*.json").AsConfig | indent 2 }}

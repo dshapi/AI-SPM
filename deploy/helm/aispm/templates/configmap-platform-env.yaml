@@ -1,0 +1,13 @@
+# deploy/helm/aispm/templates/configmap-platform-env.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: platform-env
+  namespace: {{ .Values.global.namespace }}
+data:
+  {{- range $k, $v := .Values.platformEnv }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  JWT_PRIVATE_KEY_PATH: /keys/private.pem
+  JWT_PUBLIC_KEY_PATH: /keys/public.pem
+  KEYS_DIR: /keys

@@ -1,0 +1,32 @@
+# deploy/helm/aispm/templates/spm-mcp-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spm-mcp
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: spm-mcp }
+  template:
+    metadata:
+      labels: { app: spm-mcp }
+    spec:
+      containers:
+        - name: spm-mcp
+          image: {{ include "aispm.image" .Values.images.spmMcp }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8500
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_DB_URL
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+          readinessProbe:
+            httpGet: { path: /health, port: 8500 }
+            initialDelaySeconds: 10
+            periodSeconds: 10

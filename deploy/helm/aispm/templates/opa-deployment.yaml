@@ -1,0 +1,37 @@
+# deploy/helm/aispm/templates/opa-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opa
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: opa }
+  template:
+    metadata:
+      labels: { app: opa }
+    spec:
+      containers:
+        - name: opa
+          image: {{ .Values.opa.image }}:{{ .Values.opa.tag }}
+          args: ["run", "--server", "--addr=0.0.0.0:8181", "--log-level=info", "--ignore=.*", "/policies"]
+          # --ignore=.* skips the hidden ..timestamp dirs Kubernetes creates during
+          # atomic ConfigMap updates, which would otherwise cause OPA to load each
+          # .rego file twice and trigger "multiple default rules" errors.
+          ports:
+            - containerPort: 8181
+          volumeMounts:
+            - name: policies
+              mountPath: /policies
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8181
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes:
+        - name: policies
+          configMap:
+            name: opa-policies

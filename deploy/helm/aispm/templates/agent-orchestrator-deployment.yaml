@@ -1,0 +1,46 @@
+# deploy/helm/aispm/templates/agent-orchestrator-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: agent-orchestrator }
+  template:
+    metadata:
+      labels: { app: agent-orchestrator }
+    spec:
+      containers:
+        - name: agent-orchestrator
+          image: {{ include "aispm.image" .Values.images.agentOrchestrator }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - containerPort: 8094
+          envFrom:
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: LOG_LEVEL
+              value: INFO
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            - name: DB_PATH
+              value: /data/agent_orchestrator.db
+            - name: POLICY_DB_URL
+              value: "postgresql+psycopg2://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet: { path: /health, port: 8094 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agent-orchestrator-data

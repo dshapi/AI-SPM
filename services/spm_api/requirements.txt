@@ -12,8 +12,10 @@ prometheus-fastapi-instrumentator==7.0.0
 kafka-python-ng==2.2.3
 cryptography==43.0.3
 redis==5.2.0
-# Phase 1 — agent runtime control plane. spm-api spawns customer agent
-# containers via the docker SDK when a registered agent is deployed.
+# K8s migration — agent runtime control plane now uses the kubernetes
+# Python client to spawn agent Pods instead of Docker containers.
+kubernetes==31.*
+# docker kept for back-compat import alias; not actively used in k8s mode.
 docker==7.1.0
 
 # Phase 4 — agent chat pipeline. POST /agents/{id}/chat produces to
