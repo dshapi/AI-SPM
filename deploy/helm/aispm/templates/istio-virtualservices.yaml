@@ -12,24 +12,30 @@ spec:
     - aispm-gateway
   http:
     # /api/spm/* → spm-api (SPM REST API, port 8092)
+    # Strips /api/spm prefix: /api/spm/agents → /agents
     - match:
         - uri:
             prefix: /api/spm
+      rewrite:
+        uri: /
       route:
         - destination:
             host: spm-api
             port:
               number: 8092
     # /api/* → CPM api (platform REST API, port 8080)
+    # Strips /api prefix: /api/dev-token → /dev-token, /api/v1/findings → /v1/findings
     - match:
         - uri:
             prefix: /api
+      rewrite:
+        uri: /
       route:
         - destination:
             host: api
             port:
               number: 8080
-    # /ws/* → CPM api WebSocket
+    # /ws/* → CPM api WebSocket (no rewrite — app expects /ws/... path)
     - match:
         - uri:
             prefix: /ws
