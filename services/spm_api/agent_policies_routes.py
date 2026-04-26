@@ -44,9 +44,19 @@ router = APIRouter(prefix="/agents", tags=["agents"])
 # ─── Helpers ───────────────────────────────────────────────────────────────
 
 async def _get_agent_or_404(db, agent_id: str) -> Agent:
-    res = db.get(Agent, agent_id)
-    if hasattr(res, "__await__"):
-        res = await res
+    import uuid as _uuid
+    # Agent.id is UUID(as_uuid=True) — db.get() needs a uuid.UUID, not a str.
+    try:
+        pk = _uuid.UUID(agent_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=404, detail="agent not found")
+    if hasattr(db, "execute"):
+        result = await db.execute(select(Agent).where(Agent.id == pk))
+        res = result.scalar_one_or_none()
+    else:
+        res = db.get(Agent, pk)
+        if hasattr(res, "__await__"):
+            res = await res
     if res is None:
         raise HTTPException(status_code=404, detail="agent not found")
     return res
