@@ -100,4 +100,20 @@ spec:
         - source:
             namespaces: ["istio-system"]
             principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+---
+# Allow agent-orchestrator → api (internal service calls with full /api/v1/... paths)
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-orchestrator-to-api
+  namespace: {{ .Values.global.namespace }}
+spec:
+  selector:
+    matchLabels:
+      app: api
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: ["{{ .Values.global.namespace }}"]
 {{- end }}

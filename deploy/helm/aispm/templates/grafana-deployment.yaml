@@ -18,6 +18,8 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels: { app: grafana }
   template:

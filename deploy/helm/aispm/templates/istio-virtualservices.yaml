@@ -1,4 +1,10 @@
 # deploy/helm/aispm/templates/istio-virtualservices.yaml
+# Routing mirrors the Vite dev proxy (vite.config.js) exactly:
+#   /api/spm/*  → spm-api:8092          strip /api/spm
+#   /api/v1/*   → agent-orchestrator:8094  NO rewrite (orchestrator mounts at /api/v1/...)
+#   /api/*      → api:8080              strip /api
+#   /ws/*       → api:8080              no rewrite (WebSocket)
+#   /*          → ui:3001
 {{- if and .Values.ingress.enabled (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") }}
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
@@ -12,10 +18,10 @@ spec:
     - aispm-gateway
   http:
     # /api/spm/* → spm-api (SPM REST API, port 8092)
-    # Strips /api/spm prefix: /api/spm/agents → /agents
+    # Match /api/spm/ (trailing slash) so rewrite to / produces /path not //path
     - match:
         - uri:
-            prefix: /api/spm
+            prefix: /api/spm/
       rewrite:
         uri: /
       route:
@@ -23,11 +29,23 @@ spec:
             host: spm-api
             port:
               number: 8092
-    # /api/* → CPM api (platform REST API, port 8080)
-    # Strips /api prefix: /api/dev-token → /dev-token, /api/v1/findings → /v1/findings
+
+    # /api/v1/* → agent-orchestrator (port 8094) — NO rewrite, orchestrator owns /api/v1/...
     - match:
         - uri:
-            prefix: /api
+            prefix: /api/v1/
+      route:
+        - destination:
+            host: agent-orchestrator
+            port:
+              number: 8094
+
+    # /api/* → CPM api (platform REST API, port 8080)
+    # Match /api/ (trailing slash) so rewrite to / produces /path not //path
+    # e.g. /api/dev-token → /dev-token, /api/chat → /chat
+    - match:
+        - uri:
+            prefix: /api/
       rewrite:
         uri: /
       route:
@@ -35,7 +53,8 @@ spec:
             host: api
             port:
               number: 8080
-    # /ws/* → CPM api WebSocket (no rewrite — app expects /ws/... path)
+
+    # /ws/* → CPM api WebSocket — no rewrite, app expects /ws/... path
     - match:
         - uri:
             prefix: /ws
@@ -44,7 +63,8 @@ spec:
             host: api
             port:
               number: 8080
-    # / → UI (React SPA, port 3001)
+
+    # /* → UI (React SPA, port 3001)
     - match:
         - uri:
             prefix: /
