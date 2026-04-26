@@ -1,0 +1,26 @@
+# deploy/tetragon/tetragon-values.yaml
+# Tetragon inline eBPF enforcement — agent pods only.
+# Install: helm install tetragon cilium/tetragon -n kube-system -f deploy/tetragon/tetragon-values.yaml
+#
+# ⚠ DEV ENVIRONMENT NOTE (Rancher Desktop / Lima VM):
+# Tetragon requires /sys/fs/bpf to be a shared mount. Rancher Desktop's Lima VM
+# uses private mounts, causing: "path /sys/fs/bpf is not a shared mount".
+# This is the same constraint that blocks Istio Ambient ztunnel.
+# Install works as-is on production RKE2 nodes (shared mounts enabled by default).
+
+tetragon:
+  # Enable policy filtering so TracingPolicies can be scoped to a namespace.
+  # Without this, a Sigkill policy would affect ALL pods cluster-wide.
+  enablePolicyFilter: true
+
+  # Export events to stdout (picked up by node log collectors)
+  exportFilename: /var/run/cilium/tetragon/tetragon.log
+
+  # Resource limits — DaemonSet runs on every node, keep it lean
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

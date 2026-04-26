@@ -1,0 +1,91 @@
+# deploy/helm/aispm/templates/falco-rules-configmap.yaml
+# Agent-specific Falco rules — mounted into the Falco DaemonSet via falco-values.yaml.
+# Namespace: falco (where Falco is installed), not aispm.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: falco-agent-rules
+  namespace: falco
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aispm
+data:
+  agent_rules.yaml: |
+    # ── Macros ────────────────────────────────────────────────────────────────
+    - macro: agent_pod
+      condition: >
+        k8s.ns.name = "aispm-agents" and
+        k8s.pod.label.role = "agent-runtime"
+
+    # ── Rules ─────────────────────────────────────────────────────────────────
+
+    - rule: Agent Spawned Shell
+      desc: An agent pod spawned a shell — likely an injection or escape attempt
+      condition: >
+        agent_pod and
+        spawned_process and
+        proc.name in (sh, bash, zsh, dash, ash)
+      output: >
+        CRITICAL: Agent spawned shell
+        (pod=%k8s.pod.name agent=%k8s.pod.label.agent-id
+         cmd=%proc.cmdline user=%user.name)
+      priority: CRITICAL
+      tags: [agent, shell, escape]
+
+    - rule: Agent Write Outside Allowed Path
+      desc: Agent wrote a file outside /agent/ or /tmp/
+      condition: >
+        agent_pod and
+        open_write and
+        not fd.name startswith "/agent/" and
+        not fd.name startswith "/tmp/"
+      output: >
+        WARNING: Agent wrote outside allowed path
+        (pod=%k8s.pod.name path=%fd.name agent=%k8s.pod.label.agent-id)
+      priority: WARNING
+      tags: [agent, filesystem]
+
+    - rule: Agent Unexpected Network Destination
+      desc: Agent connected to something other than spm-mcp, spm-llm-proxy, kafka, spm-api
+      condition: >
+        agent_pod and
+        outbound and
+        not fd.sip.name in (
+          "spm-mcp.aispm.svc.cluster.local",
+          "spm-llm-proxy.aispm.svc.cluster.local",
+          "kafka.aispm.svc.cluster.local",
+          "spm-api.aispm.svc.cluster.local"
+        )
+      output: >
+        CRITICAL: Agent connected to unexpected destination
+        (pod=%k8s.pod.name dest=%fd.sip.name:%fd.sport
+         agent=%k8s.pod.label.agent-id)
+      priority: CRITICAL
+      tags: [agent, network, exfil]
+
+    - rule: Agent Read Sensitive File
+      desc: Agent read /etc/passwd, /etc/shadow, or service account token
+      condition: >
+        agent_pod and
+        open_read and
+        fd.name in (
+          /etc/passwd, /etc/shadow, /etc/sudoers,
+          /var/run/secrets/kubernetes.io/serviceaccount/token
+        )
+      output: >
+        CRITICAL: Agent read sensitive file
+        (pod=%k8s.pod.name file=%fd.name agent=%k8s.pod.label.agent-id)
+      priority: CRITICAL
+      tags: [agent, credential-access]
+
+    - rule: Agent High Outbound Connection Rate
+      desc: Agent making unusually high number of outbound connections (C2 beacon pattern)
+      condition: >
+        agent_pod and
+        outbound and
+        evt.count > 50 within 10s
+      output: >
+        WARNING: Agent high connection rate — possible C2 beacon
+        (pod=%k8s.pod.name count=%evt.count agent=%k8s.pod.label.agent-id)
+      priority: WARNING
+      tags: [agent, network, c2]

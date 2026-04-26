@@ -1,0 +1,82 @@
+# deploy/helm/aispm/templates/tetragon-tracingpolicies.yaml
+# Tetragon TracingPolicies — inline eBPF enforcement for agent pods only.
+# Applied only when Tetragon CRDs are present.
+{{- if .Capabilities.APIVersions.Has "cilium.io/v1alpha1" }}
+---
+# Policy 1 — kill any exec inside an agent pod.
+# Agents run loader.py, which exec()s the customer's agent.py.
+# Any FURTHER exec (spawning a shell, running a binary) is an attack.
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: agent-no-exec
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      role: agent-runtime
+  kprobes:
+    - call: "sys_execve"
+      syscall: true
+      args:
+        - index: 0
+          type: "string"
+      selectors:
+        - matchNamespaces:
+            - operator: In
+              values: ["{{ .Values.agentRuntime.namespace }}"]
+          matchActions:
+            - action: Sigkill   # kill the process before exec completes
+---
+# Policy 2 — kill on raw socket creation (exfil/C2 channel attempt)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: agent-no-raw-socket
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      role: agent-runtime
+  kprobes:
+    - call: "sys_socket"
+      syscall: true
+      args:
+        - index: 0
+          type: "int"
+      selectors:
+        - matchArgs:
+            - index: 0
+              operator: Equal
+              values: ["17"]   # AF_PACKET (raw socket family)
+          matchActions:
+            - action: Sigkill
+---
+# Policy 3 — kill on writes to /proc or /sys (container escape pattern)
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: agent-no-proc-write
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      role: agent-runtime
+  kprobes:
+    - call: "sys_openat"
+      syscall: true
+      args:
+        - index: 1
+          type: "string"
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: Prefix
+              values: ["/proc/", "/sys/"]
+          matchCapabilities:
+            - type: Effective
+              operator: NotIn
+              values: []
+          matchActions:
+            - action: Sigkill
+{{- end }}

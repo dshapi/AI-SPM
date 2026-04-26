@@ -1,0 +1,60 @@
+# deploy/falco/falco-values.yaml
+# Falco behavioral alerting — scoped to aispm-agents namespace only.
+#
+# Install (production RKE2):
+#   helm install falco falcosecurity/falco \
+#     --namespace falco --create-namespace \
+#     -f deploy/falco/falco-values.yaml \
+#     --set driver.kind=modern_ebpf
+#
+# Note: modern_ebpf uses CO-RE — no kernel headers needed, works on kernels >= 5.8.
+#
+# ⚠ DEV ENVIRONMENT NOTE (Rancher Desktop / Lima VM):
+# All Falco eBPF drivers (ebpf, modern_ebpf) require /sys/fs/bpf to be a shared
+# mount. Rancher Desktop's Lima VM uses private mounts — same constraint that blocks
+# Istio Ambient and Tetragon. Falco cannot be installed on this dev cluster.
+# The rules and values files are correct; install on production RKE2 nodes.
+
+driver:
+  kind: modern_ebpf   # CO-RE eBPF — no kernel module, no header download needed
+
+falco:
+  rules_file:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/agent_rules.yaml
+
+  # Watch only agent namespace pods — no noise from platform services
+  # (Falco 0.37+ supports namespace filtering via syscall source)
+  json_output: true
+  log_level: info
+
+  grpc:
+    enabled: true
+    bind_address: "unix:///run/falco/falco.sock"
+
+  grpc_output:
+    enabled: true
+
+falcosidekick:
+  enabled: true
+  config:
+    kafka:
+      # Points at the existing Kafka broker in the aispm namespace
+      hostport: kafka.aispm.svc.cluster.local:9092
+      topic: cpm.t1.security.falco
+    slack:
+      webhookurl: ""        # set via --set falcosidekick.config.slack.webhookurl=
+    pagerduty:
+      routingKey: ""        # set via --set falcosidekick.config.pagerduty.routingKey=
+    kubernetesPodName: true
+    minimumpriority: warning
+
+# Mount the agent-specific rules ConfigMap (created by Helm chart)
+extraVolumes:
+  - name: agent-rules
+    configMap:
+      name: falco-agent-rules
+extraVolumeMounts:
+  - name: agent-rules
+    mountPath: /etc/falco/agent_rules.yaml
+    subPath: agent_rules.yaml
