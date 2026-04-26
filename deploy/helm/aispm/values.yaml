@@ -113,9 +113,13 @@ ingress:
 
 # ── Runtime Security ─────────────────────────────────────────────────────────
 # Set falco.enabled=true only when Falco is installed (namespace falco must exist).
-# Blocked on Rancher Desktop / Lima VM — requires shared /sys/fs/bpf mount.
+# Set tetragon.enabled=true only when Tetragon DaemonSet is healthy.
+# Both blocked on Rancher Desktop / Lima VM — require shared /sys/fs/bpf mount.
 falco:
   enabled: false   # prod: true (after: helm install falco falcosecurity/falco -n falco)
+
+tetragon:
+  enabled: false   # prod: true (after: helm install tetragon cilium/tetragon -n kube-system)
 
 # ── Observability ────────────────────────────────────────────────────────────
 prometheus:

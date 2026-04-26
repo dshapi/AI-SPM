@@ -1,7 +1,7 @@
 # deploy/helm/aispm/templates/tetragon-tracingpolicies.yaml
 # Tetragon TracingPolicies — inline eBPF enforcement for agent pods only.
 # Applied only when Tetragon CRDs are present.
-{{- if .Capabilities.APIVersions.Has "cilium.io/v1alpha1" }}
+{{- if .Values.tetragon.enabled }}
 ---
 # Policy 1 — kill any exec inside an agent pod.
 # Agents run loader.py, which exec()s the customer's agent.py.
