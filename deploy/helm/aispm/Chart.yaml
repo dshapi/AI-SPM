@@ -5,6 +5,7 @@ description: AI Security Posture Management platform
 type: application
 version: 1.0.0
 appVersion: "3.0.0"
+icon: https://raw.githubusercontent.com/YOUR_ORG/aispm/main/docs/logo.png
 keywords:
   - ai-security
   - llm
