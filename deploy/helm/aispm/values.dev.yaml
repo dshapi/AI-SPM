@@ -15,7 +15,11 @@
 
 ingress:
   host: aispm.local
-  className: traefik
+  # OrbStack ships ingress-nginx (which the bootstrap script installs);
+  # Rancher Desktop shipped traefik. We pick nginx for the dev default
+  # so the same chart renders work on either provider — install
+  # whichever IngressClass you prefer and update this if needed.
+  className: nginx
   tls: false
   certManager: false
   httpsRedirect: false
@@ -27,11 +31,12 @@ grafana:
   storageClass: local-path
 
 agentRuntime:
-  # gVisor (runsc) on dev — no nested virt available on Mac/Lima, but
-  # gVisor's user-space sentry gives a real kernel boundary. Install
-  # via deploy/scripts/install-gvisor.sh first; otherwise the next
-  # Pod admission errors with "RuntimeClass gvisor not found".
-  runtimeClassName: gvisor
+  # gVisor (runsc). Requires a containerd-based cluster (Rancher
+  # Desktop in containerd mode, Lima, kubeadm, GKE, EKS). Does NOT
+  # work on OrbStack — that uses Docker (cri-dockerd) as its CRI
+  # and runsc registration there requires editing dockerd config
+  # which OrbStack doesn't expose. Set to "" to disable on dev.
+  runtimeClassName: ""
 
   # Per-container max — must allow the istio-proxy sidecar's 2 vCPU
   # default. Agent container itself uses 500m / 512Mi.
@@ -47,8 +52,11 @@ agentRuntime:
   mtlsMode: PERMISSIVE
 
 # Tetragon enabled in dev — TracingPolicies enforce inline kills for
-# forbidden syscalls in agent pods. Note: gVisor agent pods don't hit
-# the host kernel directly, so Tetragon's eBPF probe won't see their
-# syscalls. Enforcement still applies to non-gVisor pods.
+# forbidden syscalls in agent pods.
 tetragon:
+  enabled: true
+
+# Falco enabled on dev. Bootstrap pins to falco helm chart 4.20.5
+# (falco 0.42.x) to avoid the 0.43.x duplicate-container-plugin bug.
+falco:
   enabled: true

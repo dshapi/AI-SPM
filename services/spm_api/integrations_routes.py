@@ -1478,6 +1478,7 @@ async def _upsert_integration(db: AsyncSession, seed: Dict[str, Any]) -> Integra
             description=seed["description"], vendor=seed["vendor"],
             tags=list(seed.get("tags") or []),
             config=dict(seed.get("config") or {}),
+            connector_type=seed.get("connector_type"),
         )
         db.add(row)
         await db.flush()
@@ -1496,6 +1497,8 @@ async def _upsert_integration(db: AsyncSession, seed: Dict[str, Any]) -> Integra
         row.description   = seed["description"]
         row.vendor        = seed["vendor"]
         row.tags          = list(seed.get("tags") or [])
+        if seed.get("connector_type"):
+            row.connector_type = seed["connector_type"]
         # Merge config so operator edits survive re-bootstraps; fall back to
         # seed values only for keys not yet set.
         merged_config = {**(seed.get("config") or {}), **dict(row.config or {})}
