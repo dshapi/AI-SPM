@@ -1,9 +1,21 @@
 {{- if .Values.ingress.enabled }}
 # deploy/helm/aispm/templates/ui-ingress.yaml
+#
+# Three Ingress resources because ingress-nginx applies the
+# rewrite-target annotation to EVERY path in an Ingress object.
+#
+#   aispm-orchestrator → /api/v1/*    (no rewrite — orchestrator owns prefix)
+#   aispm-api          → /api/spm/* + /api/*  (regex + rewrite)
+#   aispm-ui           → /ws + /      (no rewrite, prefix match)
+#
+# /api/v1 MUST be a separate Ingress so it is NOT subject to the
+# rewrite-target: /$2 annotation used by aispm-api. Without this,
+# /api/v1/findings gets rewritten to /v1/findings on api:8080 → 404.
+---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: aispm
+  name: aispm-orchestrator
   namespace: {{ .Values.global.namespace }}
   annotations:
     {{- if .Values.ingress.certManager }}
@@ -13,9 +25,6 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
-    nginx.ingress.kubernetes.io/configuration-snippet: |
-      proxy_set_header Upgrade $http_upgrade;
-      proxy_set_header Connection "upgrade";
     {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.className }}
@@ -29,20 +38,85 @@ spec:
     - host: {{ .Values.ingress.host }}
       http:
         paths:
-          - path: /api/spm
+          - path: /api/v1
             pathType: Prefix
+            backend:
+              service:
+                name: agent-orchestrator
+                port:
+                  number: 8094
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aispm-api
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    {{- if .Values.ingress.certManager }}
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    {{- end }}
+    {{- if eq .Values.ingress.className "nginx" }}
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    # /api/spm/foo → spm-api:8092/foo
+    # /api/foo     → api:8080/foo
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
+          - path: /api/spm(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: spm-api
                 port:
                   number: 8092
-          - path: /api
-            pathType: Prefix
+          - path: /api(/|$)(.*)
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: api
                 port:
                   number: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aispm-ui
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    {{- if .Values.ingress.certManager }}
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    {{- end }}
+    {{- if eq .Values.ingress.className "nginx" }}
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- if .Values.ingress.tls }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host }}
+      secretName: {{ .Values.ingress.tlsSecretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host }}
+      http:
+        paths:
           - path: /ws
             pathType: Prefix
             backend:

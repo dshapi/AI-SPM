@@ -1,0 +1,123 @@
+# deploy/k8s/kyverno/cluster-policies.yaml
+#
+# Kyverno cluster-wide admission policies. Applied by
+# `bash deploy/scripts/bootstrap-cluster.sh policies`.
+#
+# Policies in this file:
+#   1. disallow-privileged          — block any container with privileged:true
+#   2. disallow-host-namespaces     — block hostNetwork/hostPID/hostIPC
+#   3. agent-image-origin-allowlist — restrict aispm-agents to the agent
+#                                     runtime image only
+#
+# The verifyImages signature-check policy is shipped as a Helm template
+# (deploy/helm/aispm/templates/kyverno-verify-images.yaml) because it
+# needs the public key from values.yaml. It only renders when
+# kyverno.verifyImages.enabled=true (defaults to false on dev).
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-privileged
+  annotations:
+    policies.kyverno.io/title: Disallow Privileged Containers
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Privileged containers can access all host devices and capabilities.
+      The platform doesn't need this anywhere; if you find a workload
+      that does, isolate it via a labelled namespace and add a
+      Kyverno PolicyException.
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: privileged-containers
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          # Runtime-security DaemonSets legitimately need privileged: true
+          # to inspect kernel events. Confining them by namespace is the
+          # standard pattern (CIS, GKE security guides).
+          - resources:
+              namespaces: ["falco", "kube-system", "tetragon", "longhorn-system"]
+      validate:
+        message: "Privileged containers are not allowed."
+        pattern:
+          spec:
+            =(initContainers):
+              - =(securityContext):
+                  =(privileged): "false"
+            containers:
+              - =(securityContext):
+                  =(privileged): "false"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-host-namespaces
+  annotations:
+    policies.kyverno.io/title: Disallow Host Namespaces
+    policies.kyverno.io/category: Pod Security
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      hostNetwork/hostPID/hostIPC give pods visibility into the host's
+      namespaces. The platform never needs this. CNI/runtime DaemonSets
+      that legitimately do (istio-cni, falco, tetragon) live in
+      kube-system / istio-system and are excluded by the AND rule on
+      `match`.
+      NOTE: validationFailureAction is Audit on dev because the
+      gvisor-installer Job + occasional debug pods need hostNetwork.
+      Prod values bundle (values.prod.yaml) flips this to Enforce via
+      a chart override.
+spec:
+  validationFailureAction: Audit
+  background: true
+  rules:
+    - name: host-namespaces
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces: ["kube-system", "istio-system", "falco", "longhorn-system"]
+      validate:
+        message: "hostNetwork, hostIPC, and hostPID are not allowed."
+        pattern:
+          spec:
+            =(hostNetwork): "false"
+            =(hostIPC): "false"
+            =(hostPID): "false"
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: agent-image-origin-allowlist
+  annotations:
+    policies.kyverno.io/title: Agent Image Registry Allowlist
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Only aispm-agent-runtime images may run in the aispm-agents
+      namespace. Excludes the istio sidecar (istio-proxy) and any
+      ConfigMap-mounted scratch container.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  rules:
+    - name: only-known-images-in-aispm-agents
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["aispm-agents"]
+      validate:
+        message: "Only aispm-agent-runtime images may run in aispm-agents namespace."
+        pattern:
+          spec:
+            containers:
+              - image: "*aispm-agent-runtime*"

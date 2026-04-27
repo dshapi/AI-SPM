@@ -1,0 +1,98 @@
+# deploy/k8s/runtime/gvisor-docker-installer-job.yaml
+#
+# Adds runsc as a Docker runtime via /etc/docker/daemon.json on
+# OrbStack's k8s VM, then SIGHUPs dockerd. Required because
+# OrbStack uses Docker (cri-dockerd) as the CRI — k8s
+# RuntimeClass=gvisor is dispatched by cri-dockerd to Docker,
+# which only knows about runtimes registered in daemon.json.
+#
+# Prerequisite: runsc + containerd-shim-runsc-v1 must already be
+# installed on the node at /usr/local/bin/. The earlier
+# gvisor-installer-job.yaml does this; if you haven't run it,
+# run it first.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gvisor-docker-installer
+  namespace: kube-system
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: install
+          image: alpine:3.19
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host
+              mountPath: /host
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== runsc binaries ==="
+              ls -la /host/usr/local/bin/runsc /host/usr/local/bin/containerd-shim-runsc-v1 2>&1 || true
+
+              echo
+              echo "=== current /etc/docker/daemon.json ==="
+              CFG=/host/etc/docker/daemon.json
+              if [ -f "$CFG" ]; then
+                cat "$CFG"
+              else
+                echo "(missing — creating empty)"
+                mkdir -p /host/etc/docker
+                echo "{}" > "$CFG"
+              fi
+              cp "$CFG" "${CFG}.bak.$(date +%s)" 2>/dev/null || true
+
+              echo
+              echo "=== merging runsc runtime ==="
+              apk add --no-cache python3 >/dev/null
+              python3 - "$CFG" <<'PY'
+              import json, sys
+              p = sys.argv[1]
+              try:
+                  cfg = json.load(open(p))
+              except Exception:
+                  cfg = {}
+              cfg.setdefault("runtimes", {})["runsc"] = {
+                  "path": "/usr/local/bin/runsc",
+                  "runtimeArgs": []
+              }
+              json.dump(cfg, open(p, "w"), indent=2)
+              print(json.dumps(cfg, indent=2))
+              PY
+
+              echo
+              echo "=== reloading dockerd ==="
+              chroot /host /bin/sh -c '
+                if pgrep -f "^dockerd" >/dev/null; then
+                  pkill -HUP dockerd && echo "SIGHUP sent"
+                  sleep 4
+                  docker info --format "{{json .Runtimes}}" 2>/dev/null || true
+                else
+                  echo "no dockerd process found"
+                fi
+              '
+
+              echo
+              echo "=== test docker run --runtime=runsc ==="
+              chroot /host /bin/sh -c '
+                docker run --rm --runtime=runsc alpine:3.19 sh -c "uname -a; cat /proc/version" 2>&1 | head -5
+              '
+              echo
+              echo "DONE"
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory

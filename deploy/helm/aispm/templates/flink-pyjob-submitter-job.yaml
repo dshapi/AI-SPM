@@ -11,6 +11,11 @@ metadata:
 spec:
   backoffLimit: 3
   template:
+    metadata:
+      annotations:
+        # Don't inject the istio sidecar into one-shot Jobs — see
+        # startup-orchestrator-job.yaml for the init-order rationale.
+        sidecar.istio.io/inject: "false"
     spec:
       restartPolicy: OnFailure
       containers:

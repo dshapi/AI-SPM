@@ -15,7 +15,12 @@
 #   4. aispm package — changes per Phase 2 release
 #   5. loader.py + entrypoint — last, fast to rebuild
 #
-# Customer's agent.py is bind-mounted at runtime; not COPYed here.
+# Customer's agent.py is mounted at runtime from a per-agent ConfigMap
+# (``agent-code-{id}``) at ``/agent/agent.py`` — see
+# ``services/spm_api/agent_controller.py::spawn_agent_pod``. Not COPYed
+# here. (Phase-1 docker-compose used a host bind-mount; the K8s rewrite
+# replaced it with a ConfigMap so the platform owns the source of truth
+# without requiring a host-path volume on every node.)
 
 FROM python:3.12-slim
 
@@ -78,4 +83,6 @@ RUN chown -R agent:agent /agent
 
 USER 10001:10001
 
+# spawn_agent_pod mounts the customer's agent.py from a per-agent
+# ConfigMap to /agent/agent.py; the loader imports + exec()s it.
 CMD ["python", "/agent/loader.py"]

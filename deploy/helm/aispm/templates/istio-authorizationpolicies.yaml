@@ -1,149 +1,294 @@
-# deploy/helm/aispm/templates/istio-authorizationpolicies.yaml
-# L7 AuthorizationPolicies — complement NetworkPolicy (kernel/CNI layer).
-# Applied only when Istio CRDs exist.
+{{- /*
+deploy/helm/aispm/templates/istio-authorizationpolicies.yaml
+
+L7 AuthorizationPolicies — complement NetworkPolicy (kernel/CNI layer).
+
+Design rules
+────────────
+1. Every AP has an explicit ``selector.matchLabels.app: <name>``. NO
+   no-selector APs — they apply globally to every Pod in the namespace
+   and turn the rest of the chart into a strict allowlist (we lived
+   that bug; never again).
+
+2. Every ``rules[].from`` clause has TWO source variants OR'd together:
+
+     - source.principals + source.namespaces → matches sidecar peers
+       that carried mTLS identity (sidecar↔sidecar in prod, or ambient
+       peers reaching us through a waypoint).
+     - source.namespaces only → matches ambient peers reaching the
+       destination sidecar without an mTLS principal (gVisor + ztunnel
+       on Rancher Desktop / OrbStack dev clusters).
+
+   In either mode, NetworkPolicy at L3/L4 already restricts which Pods
+   can even initiate the connection. The principal/namespace check is
+   the L7 belt on top of the L3/L4 suspenders.
+
+3. Operation blocks restrict to the minimum necessary path/method/port.
+
+Applied only when Istio CRDs exist (so the chart still renders cleanly
+on a cluster without Istio installed).
+*/ -}}
 {{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
+{{- $platformNs := .Values.global.namespace }}
+{{- $agentNs    := .Values.agentRuntime.namespace }}
+{{- $agentSa    := printf "cluster.local/ns/%s/sa/agent-runtime" $agentNs }}
+{{- $platformSa := printf "cluster.local/ns/%s/sa/default"        $platformNs }}
+{{- $ingressSa  := "cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account" }}
 ---
-# Deny all traffic in aispm-agents by default (Ambient mode)
+# ── aispm-agents: deny-by-default for everything in the agent ns ─────────
+# Only the agent-allow-* policies in the aispm namespace ever let agents
+# OUT of this namespace. Inside aispm-agents, no pod-to-pod talk is
+# permitted; agents are isolated from each other at L7 even before
+# NetworkPolicy is consulted.
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
   name: deny-all-agents
-  namespace: {{ .Values.agentRuntime.namespace }}
-spec: {}   # empty spec = deny all
+  namespace: {{ $agentNs }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aispm
+spec: {}   # empty spec = default-deny on every workload in the namespace
 ---
-# Allow agent Pods → spm-mcp (MCP tool server)
+# ── spm-mcp: agent pods → MCP tool server (port 8500) ────────────────────
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: agent-allow-spm-mcp
-  namespace: {{ .Values.global.namespace }}
+  name: spm-mcp-allow-agents
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
   selector:
-    matchLabels:
-      app: spm-mcp
+    matchLabels: { app: spm-mcp }
   action: ALLOW
   rules:
-    # Two source clauses — Istio OR-s them. The first matches when
-    # the peer presented an mTLS principal (sidecar-to-sidecar inside
-    # the mesh, or ambient-to-sidecar through a waypoint). The second
-    # matches ambient peers reaching us via ztunnel without mTLS
-    # principal propagation — they still arrive labelled with their
-    # source namespace, so we accept by namespace as a fallback. With
-    # NetworkPolicy already restricting which pods can even initiate
-    # the connection, this is a meaningful filter.
     - from:
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
-            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+            namespaces: [{{ $agentNs | quote }}]
+            principals: [{{ $agentSa | quote }}]
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            namespaces: [{{ $agentNs | quote }}]
       to:
         - operation:
             ports: ["8500"]
 ---
-# Allow agent Pods → spm-llm-proxy (Ollama proxy)
+# ── spm-llm-proxy: agent pods → Ollama / OpenAI / Anthropic proxy ────────
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: agent-allow-spm-llm-proxy
-  namespace: {{ .Values.global.namespace }}
+  name: spm-llm-proxy-allow-agents
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
   selector:
-    matchLabels:
-      app: spm-llm-proxy
+    matchLabels: { app: spm-llm-proxy }
   action: ALLOW
   rules:
-    # Two source clauses — Istio OR-s them. The first matches when
-    # the peer presented an mTLS principal (sidecar-to-sidecar inside
-    # the mesh, or ambient-to-sidecar through a waypoint). The second
-    # matches ambient peers reaching us via ztunnel without mTLS
-    # principal propagation — they still arrive labelled with their
-    # source namespace, so we accept by namespace as a fallback. With
-    # NetworkPolicy already restricting which pods can even initiate
-    # the connection, this is a meaningful filter.
     - from:
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
-            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+            namespaces: [{{ $agentNs | quote }}]
+            principals: [{{ $agentSa | quote }}]
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            namespaces: [{{ $agentNs | quote }}]
       to:
         - operation:
             ports: ["8500"]
 ---
-# Allow agent Pods → spm-api (ready handshake + bootstrap + secrets only)
+# ── spm-api: agent pods (narrow paths) + ingress + intra-platform ────────
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: agent-allow-spm-api
-  namespace: {{ .Values.global.namespace }}
+  name: spm-api-allow
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
   selector:
-    matchLabels:
-      app: spm-api
+    matchLabels: { app: spm-api }
   action: ALLOW
   rules:
-    # Two source clauses — Istio OR-s them. The first matches when
-    # the peer presented an mTLS principal (sidecar-to-sidecar inside
-    # the mesh, or ambient-to-sidecar through a waypoint). The second
-    # matches ambient peers reaching us via ztunnel without mTLS
-    # principal propagation — they still arrive labelled with their
-    # source namespace, so we accept by namespace as a fallback. With
-    # NetworkPolicy already restricting which pods can even initiate
-    # the connection, this is a meaningful filter.
+    # Agent-runtime path — only ready/bootstrap/secrets endpoints.
     - from:
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
-            principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+            namespaces: [{{ $agentNs | quote }}]
+            principals: [{{ $agentSa | quote }}]
         - source:
-            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+            namespaces: [{{ $agentNs | quote }}]
       to:
         - operation:
             paths: ["/agents/*/ready", "/agents/*/bootstrap", "/secrets/*"]
             methods: ["GET", "POST"]
+    # Intra-platform — other aispm services (aggregator, agent-orch,
+    # threat-hunter) talk to spm-api freely on its ClusterIP service.
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+    # Ingress — admin UI + Swagger + agent UI all hit spm-api via
+    # /api/spm/... after the cluster's ingress controller forwards.
+    # We accept either istio's own gateway (istio-ingressgateway in
+    # istio-system) OR an external ingress controller (ingress-nginx,
+    # traefik) which lives in its own namespace.
+    - from:
+        - source:
+            namespaces: ["istio-system"]
+            principals: [{{ $ingressSa | quote }}]
+        - source:
+            namespaces: ["istio-system", "ingress-nginx", "traefik", "kube-system"]
+    # PERMISSIVE-mode ingress fallback. ingress-nginx isn't in the
+    # mesh and forwards plaintext (no peer cert), so the
+    # source.namespaces clause above can't match it. Allow the
+    # public API surface on a path-only rule. Keep the surface
+    # narrow — internal-only paths are already covered by the
+    # intra-platform clause above so they don't need to be here.
+    - to:
+        - operation:
+            paths:
+              - "/healthz"
+              - "/docs"
+              - "/openapi.json"
+              - "/integrations*"
+              - "/policies*"
+              - "/agents*"
+              - "/findings*"
+              - "/dashboard*"
+              - "/auth*"
+              - "/llm*"
 ---
-# Allow all intra-platform traffic within aispm namespace
+# ── api: ingress + intra-platform (orchestrator → api full /api/v1/...) ──
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: allow-intra-platform
-  namespace: {{ .Values.global.namespace }}
+  name: api-allow
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
+  selector:
+    matchLabels: { app: api }
   action: ALLOW
   rules:
     - from:
         - source:
-            namespaces: ["{{ .Values.global.namespace }}"]
+            namespaces: [{{ $platformNs | quote }}]
+    - from:
+        - source:
+            namespaces: ["istio-system"]
+            principals: [{{ $ingressSa | quote }}]
+        - source:
+            namespaces: ["istio-system"]
+    # PERMISSIVE-mode ingress fallback. ingress-nginx strips the
+    # /api prefix via rewrite-target, so the istio-proxy sees the
+    # post-rewrite paths (e.g. /v1/chat instead of /api/v1/chat).
+    - to:
+        - operation:
+            paths:
+              - "/healthz"
+              - "/health"
+              - "/docs"
+              - "/openapi.json"
+              - "/v1*"
+              - "/api/v1*"
+              - "/chat*"
+              - "/agents*"
+              - "/sessions*"
+              - "/dev-token"
+              - "/auth*"
+              - "/ws"
+              - "/ws/*"
 ---
-# Allow Istio ingress gateway → frontend services (ui, api, spm-api)
-# The ingress gateway runs in istio-system and is not in the aispm namespace,
-# so it would be blocked by the intra-platform policy without this rule.
+# ── ui: ingress only (UI is the public entry point for all browsers) ─────
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: allow-ingress-gateway
-  namespace: {{ .Values.global.namespace }}
+  name: ui-allow-ingress
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
+  selector:
+    matchLabels: { app: ui }
   action: ALLOW
   rules:
     - from:
         - source:
             namespaces: ["istio-system"]
-            principals: ["cluster.local/ns/istio-system/sa/istio-ingressgateway-service-account"]
+            principals: [{{ $ingressSa | quote }}]
+        - source:
+            namespaces: ["istio-system"]
+    # PERMISSIVE-mode ingress fallback. UI is public — allow all
+    # browser GETs.
+    - to:
+        - operation:
+            methods: ["GET", "HEAD"]
 ---
-# Allow agent-orchestrator → api (internal service calls with full /api/v1/... paths)
+# ── kafka: agent pods (chat.in/chat.out) + intra-platform (aggregator,
+#    flink, processor produce/consume on the platform topics) ────────────
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
-  name: allow-orchestrator-to-api
-  namespace: {{ .Values.global.namespace }}
+  name: kafka-allow-mesh
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
 spec:
   selector:
-    matchLabels:
-      app: api
+    matchLabels: { app: kafka }
   action: ALLOW
   rules:
     - from:
         - source:
-            namespaces: ["{{ .Values.global.namespace }}"]
+            namespaces: [{{ $platformNs | quote }}]
+    - from:
+        - source:
+            namespaces: [{{ $agentNs | quote }}]
+            principals: [{{ $agentSa | quote }}]
+        - source:
+            namespaces: [{{ $agentNs | quote }}]
+      to:
+        - operation:
+            ports: ["9092"]
+---
+# ── spm-db: intra-platform only (no external/agent ingress to Postgres) ──
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: spm-db-allow-platform
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+spec:
+  selector:
+    matchLabels: { app: spm-db }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+---
+# ── redis: intra-platform only ───────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: redis-allow-platform
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+spec:
+  selector:
+    matchLabels: { app: redis }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+---
+# ── opa: intra-platform only ─────────────────────────────────────────────
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: opa-allow-platform
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+spec:
+  selector:
+    matchLabels: { app: opa }
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
 {{- end }}

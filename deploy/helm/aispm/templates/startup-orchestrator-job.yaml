@@ -14,6 +14,17 @@ metadata:
 spec:
   backoffLimit: 3
   template:
+    metadata:
+      annotations:
+        # Don't inject the istio sidecar into this one-shot Job. The
+        # init containers (wait-for-kafka, wait-for-redis) run BEFORE
+        # any main container starts; if iptables-validation has
+        # already rewritten the network namespace, their nc traffic
+        # is redirected to a port that nothing's listening on (the
+        # istio-proxy container hasn't started yet) and they hang.
+        # Sidecar injection is unnecessary for a topic-creation job
+        # that doesn't need mTLS.
+        sidecar.istio.io/inject: "false"
     spec:
       restartPolicy: OnFailure
       # Wait for Kafka and Redis before running — without this the hook may fire

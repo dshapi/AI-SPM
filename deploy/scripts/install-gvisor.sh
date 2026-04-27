@@ -1,35 +1,62 @@
 #!/usr/bin/env bash
 # deploy/scripts/install-gvisor.sh
 #
-# Install gVisor (runsc) into the Rancher Desktop / Lima VM that
-# hosts your k3s cluster, register it with containerd, restart k3s,
-# and apply the RuntimeClass.
+# Install gVisor (runsc) into the local Linux VM that hosts your k8s
+# cluster, register it with containerd, restart the k8s service, and
+# apply the RuntimeClass.
+#
+# Auto-detects the VM provider:
+#   - Rancher Desktop (rdctl shell)  — k3s, containerd config rendered
+#                                       from /var/lib/rancher/k3s/...
+#   - OrbStack          (orb run)    — k8s ships with its own
+#                                       containerd; config under /etc/containerd
+#   - Manual fallback                — prints the install steps so you can
+#                                       run them inside whatever VM you have
 #
 # Idempotent — safe to re-run.
 #
 # Usage:
 #   bash deploy/scripts/install-gvisor.sh
 #
-# After it finishes, set agentRuntime.runtimeClassName: gvisor in
-# values.dev.yaml (already the default) and `helm upgrade` to roll
-# spm-api with AGENT_RUNTIME_CLASS=gvisor.
+# After it finishes, ``agentRuntime.runtimeClassName: gvisor`` in
+# values.dev.yaml (already the default) takes effect on the next
+# helm upgrade.
 
 set -euo pipefail
 log() { echo "$(date +%H:%M:%S) [gvisor] $*"; }
 err() { echo "$(date +%H:%M:%S) [gvisor] ERROR: $*" >&2; }
 
-if ! command -v rdctl >/dev/null 2>&1; then
-  err "rdctl not found — Rancher Desktop CLI required to enter the Lima VM."
-  err "Install Rancher Desktop, or run the steps below manually inside the VM:"
+# ── Detect VM provider ────────────────────────────────────────────────────
+# Walk the candidates in priority order and pick the first one with both
+# (a) a CLI on $PATH and (b) a Linux VM responding to a trivial command.
+PROVIDER=""
+SHELL_CMD=""
+if command -v rdctl  >/dev/null 2>&1 && rdctl  shell -- true >/dev/null 2>&1; then
+  PROVIDER="rancher-desktop"
+  SHELL_CMD="rdctl shell --"
+elif command -v orb   >/dev/null 2>&1 && orb run -- true     >/dev/null 2>&1; then
+  PROVIDER="orbstack"
+  SHELL_CMD="orb run --"
+elif command -v limactl >/dev/null 2>&1 && limactl shell default true >/dev/null 2>&1; then
+  PROVIDER="lima"
+  SHELL_CMD="limactl shell default --"
+else
+  err "No supported VM provider detected (Rancher Desktop / OrbStack / Lima)."
+  err "Manual steps for any Linux host running containerd:"
   err "  1) Drop runsc + containerd-shim-runsc-v1 into /usr/local/bin"
-  err "  2) sudo runsc install"
-  err "  3) sudo systemctl restart k3s    (or whichever supervises containerd)"
+  err "  2) Append the runsc handler to the live containerd config"
+  err "  3) Restart whichever process supervises containerd"
   exit 1
 fi
+log "VM provider: $PROVIDER (shell: $SHELL_CMD)"
 
-# ── 1. Install runsc binaries + register with k3s's containerd ────────────
-log "Installing runsc + containerd shim inside the Lima VM..."
-rdctl shell -- bash -se <<'EOS'
+# Helper — run a shell snippet inside the detected VM.
+in_vm() { eval "$SHELL_CMD bash -se" <<<"$1"; }
+in_vm_sudo() { eval "$SHELL_CMD sudo bash -se" <<<"$1"; }
+
+# ── 1. Install runsc binaries inside the VM ──────────────────────────────
+log "Installing runsc + containerd shim inside the $PROVIDER VM..."
+$SHELL_CMD bash -se <<'EOS'
 set -euo pipefail
 
 ARCH=$(uname -m)
@@ -41,7 +68,6 @@ esac
 
 URL="https://storage.googleapis.com/gvisor/releases/release/latest/${RARCH}"
 
-# Binaries land in /usr/local/bin so containerd can exec them.
 NEED_REINSTALL=0
 for f in /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1; do
   if [[ ! -x "$f" ]]; then NEED_REINSTALL=1; break; fi
@@ -57,34 +83,22 @@ else
   echo "  runsc already present — skipping download"
 fi
 
-# ── k3s containerd config ────────────────────────────────────────────────
-# k3s does NOT honor /etc/containerd/config.toml. It regenerates its own
-# config from /var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
-# on every k3s restart. To register the runsc handler we must extend
-# the template — appending a runtimes.runsc block — then restart k3s
-# so the new config gets rendered + loaded.
-TPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
-RENDERED=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
-TPL_DIR=$(dirname "$TPL")
+# Provide a runsc.toml that points the shim at the binary explicitly
+# (some distros default to /usr/bin/runsc).
+sudo mkdir -p /etc/containerd
+sudo tee /etc/containerd/runsc.toml >/dev/null <<'TOML'
+[runsc_config]
+  binary_name = "/usr/local/bin/runsc"
+TOML
+EOS
 
-sudo mkdir -p "$TPL_DIR"
-
-# Seed the template from the rendered config the first time.
-if [[ ! -f "$TPL" ]]; then
-  if [[ -f "$RENDERED" ]]; then
-    echo "  seeding $TPL from current rendered config"
-    sudo cp "$RENDERED" "$TPL"
-  else
-    echo "  no existing containerd config found — k3s will regenerate one"
-    sudo touch "$TPL"
-  fi
-fi
-
-if sudo grep -q 'plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc' "$TPL"; then
-  echo "  runsc handler already in $TPL — skipping append"
-else
-  echo "  appending runsc handler to $TPL"
-  sudo tee -a "$TPL" >/dev/null <<'TOML'
+# ── 2. Register runsc with the right containerd config ───────────────────
+# Different k8s providers store containerd config in different places:
+#   - Rancher Desktop: k3s renders from a *.tmpl that we have to extend.
+#   - OrbStack:        k8s uses the system containerd at /etc/containerd/config.toml
+#                      directly — patch that file and bounce containerd.
+#   - Lima:            same as OrbStack — system containerd at /etc/containerd/.
+RUNSC_BLOCK=$(cat <<'TOML'
 
 # ── gVisor (runsc) — added by install-gvisor.sh ───────────────────────
 [plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]
@@ -93,19 +107,65 @@ else
   TypeUrl = "io.containerd.runsc.v1.options"
   ConfigPath = "/etc/containerd/runsc.toml"
 TOML
+)
+
+if [[ "$PROVIDER" = "rancher-desktop" ]]; then
+  log "Registering runsc with k3s containerd template..."
+  $SHELL_CMD sudo bash -se <<EOS
+set -euo pipefail
+TPL=/var/lib/rancher/k3s/agent/etc/containerd/config.toml.tmpl
+RENDERED=/var/lib/rancher/k3s/agent/etc/containerd/config.toml
+mkdir -p "\$(dirname "\$TPL")"
+if [[ ! -f "\$TPL" ]]; then
+  if [[ -f "\$RENDERED" ]]; then
+    cp "\$RENDERED" "\$TPL"
+  else
+    touch "\$TPL"
+  fi
+fi
+if grep -q 'runtimes.runsc' "\$TPL"; then
+  echo "  runsc handler already in \$TPL"
+else
+  cat >>"\$TPL" <<'TOML'
+$RUNSC_BLOCK
+TOML
+  echo "  appended runsc handler to \$TPL"
+fi
+EOS
+else
+  # OrbStack / Lima — patch the live system containerd config.
+  log "Registering runsc with system containerd..."
+  $SHELL_CMD sudo bash -se <<EOS
+set -euo pipefail
+CFG=/etc/containerd/config.toml
+[ -f "\$CFG" ] || { echo "MISSING \$CFG"; exit 1; }
+if grep -q 'runtimes.runsc' "\$CFG"; then
+  echo "  runsc handler already in \$CFG"
+else
+  cp "\$CFG" "\${CFG}.bak.\$(date +%s)"
+  cat >>"\$CFG" <<'TOML'
+$RUNSC_BLOCK
+TOML
+  echo "  appended runsc handler to \$CFG"
+fi
+EOS
 fi
 
-# Provide a runsc.toml that points the shim at the binary explicitly
-# (some distros default to /usr/bin/runsc).
-sudo tee /etc/containerd/runsc.toml >/dev/null <<'TOML'
-[runsc_config]
-  binary_name = "/usr/local/bin/runsc"
-TOML
-EOS
-
-# ── 3. Restart k3s so containerd picks up the new shim ────────────────────
-log "Restarting k3s so containerd reloads its runtime registry..."
-rdctl shell -- bash -c "sudo systemctl restart k3s 2>/dev/null || sudo /etc/init.d/k3s restart"
+# ── 3. Restart whichever process supervises containerd ───────────────────
+log "Restarting containerd / k8s service so the new handler is loaded..."
+$SHELL_CMD sudo bash -c '
+  if systemctl list-unit-files 2>/dev/null | grep -q "^k3s.service"; then
+    systemctl restart k3s && echo "  restarted k3s via systemd"
+  elif [ -x /etc/init.d/k3s ]; then
+    /etc/init.d/k3s restart && echo "  restarted k3s via init.d"
+  elif systemctl list-unit-files 2>/dev/null | grep -q "^containerd.service"; then
+    systemctl restart containerd && echo "  restarted containerd via systemd"
+  elif command -v rc-service >/dev/null 2>&1 && rc-service -e containerd 2>/dev/null; then
+    rc-service containerd restart && echo "  restarted containerd via openrc"
+  else
+    echo "  WARNING: no known supervisor for containerd; restart Rancher Desktop / OrbStack manually"
+  fi
+'
 
 # Give the API server a moment to come back
 log "Waiting for kube-apiserver to be reachable..."

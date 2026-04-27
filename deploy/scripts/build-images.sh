@@ -9,7 +9,21 @@
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-NERDCTL="nerdctl --namespace k8s.io"
+
+# Auto-detect builder. nerdctl works on Rancher Desktop; docker works
+# on OrbStack / Docker Desktop / colima. Override with BUILDER env var.
+if [ -n "${BUILDER:-}" ]; then
+  :  # use whatever the operator set
+elif command -v nerdctl >/dev/null 2>&1 && nerdctl info >/dev/null 2>&1; then
+  BUILDER="nerdctl --namespace k8s.io"
+elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  BUILDER="docker"
+else
+  echo "ERROR: no working builder found (tried nerdctl, docker)" >&2
+  exit 1
+fi
+echo "$(date +%H:%M:%S) [INFO]  using builder: $BUILDER"
+NERDCTL="$BUILDER"
 TARGET="${1:-}"   # optional: only build this image name
 FAILED=()
 BUILT=()

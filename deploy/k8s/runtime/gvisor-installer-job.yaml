@@ -1,0 +1,84 @@
+# deploy/k8s/runtime/gvisor-installer-job.yaml
+#
+# One-shot Job that installs gVisor (runsc) onto each k8s node by
+# mounting the host filesystem from inside a privileged pod and
+# patching containerd's config. Works on any k8s cluster the operator
+# can reach with kubectl — no need to SSH into the VM.
+#
+# Pre-templated for ARM64 (Apple Silicon Mac → OrbStack).  For x86,
+# change the URL line to use ``x86_64`` instead of ``aarch64``.
+#
+# Usage:
+#   kubectl apply -f deploy/k8s/runtime/gvisor-installer-job.yaml
+#   kubectl -n kube-system wait --for=condition=Complete --timeout=180s job/gvisor-installer
+#   kubectl -n kube-system logs job/gvisor-installer
+#   kubectl apply -f deploy/k8s/runtime/gvisor-runtimeclass.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gvisor-installer
+  namespace: kube-system
+spec:
+  backoffLimit: 1
+  template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: Never
+      hostPID: true
+      hostNetwork: true
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: install
+          image: alpine:3.19
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: host
+              mountPath: /host
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -e
+              ARCH=$(uname -m)
+              case "$ARCH" in
+                aarch64|arm64) RARCH=aarch64 ;;
+                x86_64)        RARCH=x86_64  ;;
+                *) echo "unsupported arch: $ARCH"; exit 1 ;;
+              esac
+              URL="https://storage.googleapis.com/gvisor/releases/release/latest/$RARCH"
+              echo "downloading runsc + shim from $URL"
+              for f in runsc containerd-shim-runsc-v1; do
+                wget -q -O "/host/usr/local/bin/$f" "$URL/$f"
+                chmod 755 "/host/usr/local/bin/$f"
+              done
+              echo "runsc version:"
+              chroot /host /usr/local/bin/runsc --version | head -1 || true
+
+              CFG=/host/etc/containerd/config.toml
+              if grep -q runtimes.runsc "$CFG" 2>/dev/null; then
+                echo "$CFG already has runsc handler"
+              else
+                cp "$CFG" "${CFG}.bak.$(date +%s)" 2>/dev/null || true
+                printf '\n# gVisor (runsc) — appended by gvisor-installer\n[plugins."io.containerd.grpc.v1.cri".containerd.runtimes.runsc]\n  runtime_type = "io.containerd.runsc.v1"\n' >>"$CFG"
+                echo "patched $CFG"
+              fi
+
+              echo "restarting containerd..."
+              chroot /host /bin/sh -c '
+                if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q "^containerd"; then
+                  systemctl restart containerd && echo "restarted via systemd"
+                elif [ -x /etc/init.d/containerd ]; then
+                  /etc/init.d/containerd restart && echo "restarted via init.d"
+                else
+                  pkill -HUP containerd 2>/dev/null && echo "sent SIGHUP to containerd"
+                fi
+              '
+              echo "DONE"
+      volumes:
+        - name: host
+          hostPath:
+            path: /
+            type: Directory
