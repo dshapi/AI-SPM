@@ -11,7 +11,7 @@ weasyprint==62.3
 prometheus-fastapi-instrumentator==7.0.0
 kafka-python-ng==2.2.3
 cryptography==43.0.3
-redis==5.2.0
+redis==5.2.1
 # K8s migration — agent runtime control plane now uses the kubernetes
 # Python client to spawn agent Pods instead of Docker containers.
 kubernetes==31.*

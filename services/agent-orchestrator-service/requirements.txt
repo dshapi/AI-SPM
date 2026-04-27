@@ -1,5 +1,5 @@
 # ─── Web framework ───────────────────────────────────────────────────────────
-fastapi==0.115.5
+fastapi==0.115.6
 uvicorn[standard]==0.32.1        # ASGI server with websockets + uvloop
 
 # ─── Data validation ─────────────────────────────────────────────────────────
@@ -7,7 +7,7 @@ pydantic==2.9.2
 pydantic-settings==2.6.1        # Settings management from env / .env
 
 # ─── Database ────────────────────────────────────────────────────────────────
-sqlalchemy[asyncio]>=2.0.36     # Async ORM — replaces raw aiosqlite calls
+sqlalchemy[asyncio]==2.0.36     # Async ORM — replaces raw aiosqlite calls
 aiosqlite>=0.20.0               # Async SQLite driver for SQLAlchemy
 alembic>=1.13.3                 # Schema migration tool
 psycopg2-binary>=2.9.9          # Sync PostgreSQL driver for policies store
