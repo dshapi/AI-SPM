@@ -1,0 +1,129 @@
+# deploy/helm/aispm/values.prod.yaml
+#
+# Production overrides for the AISPM Helm chart. Apply with:
+#
+#   helm upgrade aispm deploy/helm/aispm/ -n aispm \
+#     -f deploy/helm/aispm/values.yaml \
+#     -f deploy/helm/aispm/values.prod.yaml
+#
+# Prerequisites the cluster must already have (run install-prod-addons.sh):
+#   - cert-manager + Let's Encrypt ClusterIssuer
+#   - ingress-nginx
+#   - Longhorn (≥3 worker nodes recommended)
+#   - Istio with CNI plugin enabled (lets Restricted PodSecurity stay
+#     in aispm-agents without the istio-init NET_ADMIN issue)
+#   - Istio waypoint proxies for the aispm namespace (lets us keep
+#     STRICT mTLS while the agent ns runs Ambient)
+#   - Kata Containers installed on every worker node + RuntimeClass
+#     `kata` registered (deploy/k8s/runtime/kata-runtimeclass.yaml)
+#   - Falco + Tetragon (deploy/scripts/install-prod-addons.sh)
+#   - Kyverno + the policy bundle in deploy/k8s/kyverno/
+
+# ── Image registry ──────────────────────────────────────────────────────────
+# Push images to the registry (deploy/scripts/push-images.sh — to be added)
+# and override the per-image repository to use the registry-prefixed name.
+global:
+  imageRegistry: registry.example.com/aispm
+  imagePullPolicy: IfNotPresent
+
+# ── Storage — Longhorn for replicated, snapshottable PVCs ──────────────────
+spmDb:
+  storageClass: longhorn
+  storage: 100Gi
+
+kafka:
+  storageClass: longhorn
+  storage: 50Gi
+  replicas: 3
+  # Three brokers with three RuntimeClass kata pods means real fault
+  # tolerance + microVM isolation per broker.
+
+redis:
+  storageClass: longhorn
+  storage: 5Gi
+
+prometheus:
+  storageClass: longhorn
+  storage: 50Gi
+
+grafana:
+  storageClass: longhorn
+
+# ── Ingress ─────────────────────────────────────────────────────────────────
+ingress:
+  enabled: true
+  className: nginx          # ingress-nginx, not traefik
+  host: aispm.example.com   # override per environment
+  tls: true
+  certManager: true
+  httpsRedirect: true
+  letsencryptEmail: ops@example.com
+  tlsSecretName: aispm-tls
+
+# ── Agent runtime — Kata microVM + tight quotas + STRICT mTLS ──────────────
+agentRuntime:
+  # Real microVM kernel boundary. Each agent runs in its own VM with
+  # a dedicated kernel; a guest-kernel CVE doesn't reach the host.
+  # Worker nodes must have Kata installed (see Task 1 step 2 in the
+  # migration plan).
+  runtimeClassName: kata
+
+  # Tight aggregate cap. Resize per tenant headroom expectations —
+  # values below assume a small/medium prod fleet; bump for scale.
+  quota:
+    enabled: true
+    maxPods:                     "500"
+    cpuRequests:                 "100"
+    memoryRequests:              "200Gi"
+    cpuLimits:                   "200"
+    memoryLimits:                "200Gi"
+    ephemeralStorageRequests:    "20Gi"
+    ephemeralStorageLimits:      "40Gi"
+    maxConfigMaps:               "1000"
+
+  limits:
+    enabled: true
+    defaultCpu:                "500m"
+    defaultMemory:             "512Mi"
+    defaultEphemeralStorage:   "256Mi"
+    defaultRequestCpu:         "100m"
+    defaultRequestMemory:      "256Mi"
+    maxCpu:                    "2"
+    maxMemory:                 "2Gi"
+
+  # STRICT mTLS — paired with Istio waypoint proxies for the aispm
+  # namespace. The ambient → sidecar bridge is L7-mTLS-aware via the
+  # waypoint, so we can demand mTLS at the destination sidecar
+  # without breaking ambient peers.
+  mtlsMode: STRICT
+
+# ── Observability + runtime security ────────────────────────────────────────
+falco:
+  enabled: true             # behavioural alerts → Kafka via falcosidekick
+
+tetragon:
+  enabled: true             # eBPF inline syscall enforcement
+
+# ── Image signing — Cosign verifyImages enforced ────────────────────────────
+# Build pipeline must sign agent runtime images with the matching private
+# key (see deploy/cosign/aispm-images.key, kept out of git):
+#   cosign sign --key deploy/cosign/aispm-images.key "$IMAGE:$TAG"
+kyverno:
+  verifyImages:
+    enabled: true
+    mode: Enforce
+
+# ── Secrets — DO NOT COMMIT real values ─────────────────────────────────────
+# Production should source these from an external secret manager
+# (Vault, AWS Secrets Manager, GCP Secret Manager) via External Secrets
+# operator or Sealed Secrets. The placeholders below exist only so
+# helm template doesn't error; override with --set or a sealed values
+# file at deploy time.
+secrets:
+  spmDbPassword: ""           # MUST be set at deploy
+  groqApiKey: ""
+  anthropicApiKey: ""
+  tavilyApiKey: ""
+  garakInternalSecret: ""
+  spmInternalBootstrapSecret: ""
+  grafanaAdminPassword: ""    # MUST be set at deploy

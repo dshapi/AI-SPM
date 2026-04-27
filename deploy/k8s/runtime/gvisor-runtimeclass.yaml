@@ -1,0 +1,47 @@
+# deploy/k8s/runtime/gvisor-runtimeclass.yaml
+#
+# gVisor (runsc) — user-space syscall-emulating kernel. Drop-in
+# replacement for the plan's Kata RuntimeClass on dev clusters where
+# nested virt isn't available (Rancher Desktop / Lima / macOS).
+#
+# Strict-isolation properties:
+#   - Container syscalls are intercepted by the sentry process and
+#     re-implemented in user space; the host kernel never executes
+#     them. A host-kernel CVE is not exploitable from inside.
+#   - sentry runs as a separate process per container, with its own
+#     reduced capability set and seccomp filter — defense in depth.
+#   - File I/O is mediated by the gofer process, which sandboxes
+#     access to the container's rootfs.
+#
+# Trade-offs vs Kata:
+#   - Smaller attack surface for the host kernel; larger surface
+#     inside sentry itself (Go-implemented Linux ABI).
+#   - ~5–15% CPU overhead, ~10–50 MiB extra memory per pod.
+#   - ~95% Linux ABI coverage. Misses tend to be ENOSYS rather than
+#     silent breakage.
+#
+# Install (run inside the Rancher Desktop Lima VM, then restart k3s):
+#   ARCH=$(uname -m)
+#   URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+#   sudo curl -fsSL "$URL/runsc" -o /usr/local/bin/runsc
+#   sudo curl -fsSL "$URL/containerd-shim-runsc-v1" -o /usr/local/bin/containerd-shim-runsc-v1
+#   sudo chmod +x /usr/local/bin/runsc /usr/local/bin/containerd-shim-runsc-v1
+#   sudo runsc install
+#   sudo systemctl restart k3s
+#
+# Apply this manifest from your Mac shell:
+#   kubectl apply -f deploy/k8s/runtime/gvisor-runtimeclass.yaml
+#
+# Then set AGENT_RUNTIME_CLASS=gvisor on spm-api (or values.dev.yaml's
+# agentRuntime.runtimeClassName: gvisor) and restart spm-api.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+handler: runsc
+# overhead: gVisor's sentry + gofer add some baseline cost; advertise it
+# so the scheduler reserves capacity correctly.
+overhead:
+  podFixed:
+    memory: "32Mi"
+    cpu:    "50m"

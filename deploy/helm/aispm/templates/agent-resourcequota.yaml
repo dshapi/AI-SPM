@@ -1,0 +1,59 @@
+# deploy/helm/aispm/templates/agent-resourcequota.yaml
+#
+# Aggregate resource cap on agent pods + per-pod default limits.
+#
+# Why both:
+#   - ResourceQuota stops a runaway tenant (or attacker who pwns one
+#     agent and tries to fork-bomb new ones via the orchestrator)
+#     from exhausting the cluster. The cap is namespace-wide.
+#   - LimitRange ensures every agent Pod has explicit cpu/memory
+#     requests + limits even if the orchestrator forgot to set them.
+#     Pods without limits get evicted first under pressure, so this
+#     is a backstop, not a substitute for spawn_agent_pod's explicit
+#     resources block.
+#
+# Tunable in values.yaml under agentRuntime.quota / agentRuntime.limits.
+{{- if .Values.agentRuntime.quota.enabled }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: agent-runtime-quota
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  hard:
+    pods:                          {{ .Values.agentRuntime.quota.maxPods | quote }}
+    requests.cpu:                  {{ .Values.agentRuntime.quota.cpuRequests | quote }}
+    requests.memory:               {{ .Values.agentRuntime.quota.memoryRequests | quote }}
+    limits.cpu:                    {{ .Values.agentRuntime.quota.cpuLimits | quote }}
+    limits.memory:                 {{ .Values.agentRuntime.quota.memoryLimits | quote }}
+    requests.ephemeral-storage:    {{ .Values.agentRuntime.quota.ephemeralStorageRequests | quote }}
+    limits.ephemeral-storage:      {{ .Values.agentRuntime.quota.ephemeralStorageLimits | quote }}
+    count/configmaps:              {{ .Values.agentRuntime.quota.maxConfigMaps | quote }}
+    count/services:                "0"
+    count/secrets:                 "0"
+    count/persistentvolumeclaims:  "0"
+{{- end }}
+---
+{{- if .Values.agentRuntime.limits.enabled }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: agent-runtime-limits
+  namespace: {{ .Values.agentRuntime.namespace }}
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu:               {{ .Values.agentRuntime.limits.defaultCpu | quote }}
+        memory:            {{ .Values.agentRuntime.limits.defaultMemory | quote }}
+        ephemeral-storage: {{ .Values.agentRuntime.limits.defaultEphemeralStorage | quote }}
+      defaultRequest:
+        cpu:               {{ .Values.agentRuntime.limits.defaultRequestCpu | quote }}
+        memory:            {{ .Values.agentRuntime.limits.defaultRequestMemory | quote }}
+      max:
+        cpu:               {{ .Values.agentRuntime.limits.maxCpu | quote }}
+        memory:            {{ .Values.agentRuntime.limits.maxMemory | quote }}
+      min:
+        cpu:               "10m"
+        memory:            "16Mi"
+{{- end }}
