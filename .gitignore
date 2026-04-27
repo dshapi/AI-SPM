@@ -54,3 +54,7 @@ __pycache__/
 istio-*/
 DataVolumes/
 deploy/cosign/*.key
+
+# Dev-artifact SQLite databases (created when running services outside Docker)
+/agent_orchestrator.db
+/services/agent-orchestrator-service/agent_orchestrator.db
