@@ -807,7 +807,7 @@ def build_seed() -> List[Dict[str, Any]]:
             "vendor": "NVIDIA (open source)",
             "tags": ["garak", "red-team", "adversarial", "llm-security"],
             "config": {
-                "cpm_api_url": "http://api:8000",
+                "cpm_api_url": "http://api:8080",
                 "internal_endpoint": "/internal/garak/results",
                 "probe_suites": ["dan", "promptinject", "leak_replay", "lmrc"],
             },
