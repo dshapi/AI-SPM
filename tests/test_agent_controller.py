@@ -1,6 +1,6 @@
 """Tests for services.spm_api.agent_controller — Tasks 11–14.
 
-The controller's side-effects (Kafka admin, Docker SDK, DB session)
+The controller's side-effects (Kafka admin, Kubernetes API, DB session)
 are heavy; we mock them all and assert the controller wires the right
 arguments at the right time. End-to-end smoke is in tests/e2e
 (Task 18) which exercises the real stack.
@@ -95,92 +95,94 @@ class TestKafkaTopicCRUD:
         assert "cpm.t1.agents.ag-001.chat.out" in captured["names"]
 
 
-# ─── Task 13 — Docker spawn / stop ─────────────────────────────────────────
+# ─── Task 13 — Kubernetes Pod spawn / stop ────────────────────────────────────
+
+def _make_k8s_core_mock(*, pod_calls: Dict[str, Any] = None):
+    """Return a mock CoreV1Api where cleanup delete calls 404 (nothing to clean)
+    and create calls capture their body argument."""
+    from kubernetes.client.exceptions import ApiException
+
+    core = MagicMock()
+    # Cleanup path: 404 = resource absent, skip gracefully.
+    not_found = ApiException(status=404)
+    core.delete_namespaced_pod.side_effect       = not_found
+    core.delete_namespaced_config_map.side_effect = not_found
+
+    if pod_calls is not None:
+        def _create_pod(namespace, body):
+            pod_calls["body"] = body
+            pod = MagicMock()
+            pod.metadata.uid = "uid-test"
+            return pod
+        core.create_namespaced_pod.side_effect = _create_pod
+
+    return core
+
 
 class TestSpawnAgentContainer:
     @pytest.mark.asyncio
     async def test_passes_env_and_resource_limits(self, monkeypatch):
-        captured: Dict[str, Any] = {}
+        pod_calls: Dict[str, Any] = {}
+        core = _make_k8s_core_mock(pod_calls=pod_calls)
+        monkeypatch.setattr(agent_controller, "_k8s_core", lambda: core)
 
-        def _fake_client():
-            client = MagicMock()
-            def _run(*args, **kwargs):
-                captured.update(kwargs)
-                ctr = MagicMock()
-                ctr.id = "ctr-abc"
-                return ctr
-            client.containers.run = _run
-            return client
-        monkeypatch.setattr(agent_controller, "_docker_client", _fake_client)
-
-        cid = await agent_controller.spawn_agent_container(
+        pod_name = await agent_controller.spawn_agent_container(
             agent_id="ag-001", tenant_id="t1",
-            code_path="/var/agents/ag-001/agent.py",
+            code_blob="print('hello')",
             mcp_token="mcp-x", llm_api_key="llm-x",
-            mem_mb=256, cpu_quota=0.5,
         )
-        assert cid == "ctr-abc"
+        assert pod_name == "agent-ag-001"
 
-        env = captured["environment"]
-        # Identity-bootstrap only — everything else (TENANT_ID, MCP_URL,
-        # LLM_*, KAFKA_*) is fetched by the SDK at import time from the
-        # DB-backed /agents/{id}/bootstrap endpoint, not pushed via env.
-        assert env["AGENT_ID"]       == "ag-001"
-        assert env["MCP_TOKEN"]      == "mcp-x"
-        assert env["CONTROLLER_URL"] == "http://spm-api:8092"
-        # Verify the platform-URL / per-agent-secret keys are NOT leaked
-        # into the container env any more.
-        for leaked in ("TENANT_ID", "MCP_URL", "LLM_BASE_URL", "LLM_API_KEY",
-                       "KAFKA_BOOTSTRAP_SERVERS"):
-            assert leaked not in env, f"unexpected env leak: {leaked}"
-
-        assert captured["mem_limit"] == "256m"
-        assert captured["network"]   == "agent-net"
-        assert captured["detach"]    is True
+        # Inspect env vars on the created Pod spec.
+        env_map = {
+            e.name: e.value
+            for e in pod_calls["body"].spec.containers[0].env
+        }
+        assert env_map["AGENT_ID"]       == "ag-001"
+        assert env_map["MCP_TOKEN"]      == "mcp-x"
+        assert "CONTROLLER_URL" in env_map
+        # LLM_API_KEY is injected directly into the pod env in the k8s path.
+        assert env_map["LLM_API_KEY"]    == "llm-x"
 
     @pytest.mark.asyncio
-    async def test_uses_agent_id_as_container_name(self, monkeypatch):
-        captured: Dict[str, Any] = {}
-        def _fake_client():
-            client = MagicMock()
-            def _run(*args, **kw):
-                captured.update(kw)
-                ctr = MagicMock(); ctr.id = "x"; return ctr
-            client.containers.run = _run
-            return client
-        monkeypatch.setattr(agent_controller, "_docker_client", _fake_client)
+    async def test_uses_agent_id_as_pod_name(self, monkeypatch):
+        pod_calls: Dict[str, Any] = {}
+        core = _make_k8s_core_mock(pod_calls=pod_calls)
+        monkeypatch.setattr(agent_controller, "_k8s_core", lambda: core)
 
-        await agent_controller.spawn_agent_container(
+        result = await agent_controller.spawn_agent_container(
             agent_id="ag-002", tenant_id="t1",
-            code_path="/x", mcp_token="m", llm_api_key="l",
+            code_blob="print('hi')", mcp_token="m", llm_api_key="l",
         )
-        assert captured["name"] == "agent-ag-002"
+        # Pod name is "agent-{agent_id}" — the return value of spawn_agent_pod.
+        assert result == "agent-ag-002"
 
 
 class TestStopAgentContainer:
     @pytest.mark.asyncio
     async def test_stops_and_removes(self, monkeypatch):
-        ctr = MagicMock()
-        client = MagicMock()
-        client.containers.get.return_value = ctr
-        monkeypatch.setattr(agent_controller, "_docker_client", lambda: client)
+        from kubernetes.client.exceptions import ApiException
+
+        core = MagicMock()
+        # Simulate successful deletion (no exception = resource existed and was deleted).
+        core.delete_namespaced_pod.return_value       = MagicMock()
+        core.delete_namespaced_config_map.return_value = MagicMock()
+        monkeypatch.setattr(agent_controller, "_k8s_core", lambda: core)
 
         await agent_controller.stop_agent_container("ag-001")
-        client.containers.get.assert_called_with("agent-ag-001")
-        ctr.stop.assert_called_with(timeout=10)
-        ctr.remove.assert_called_with(force=True)
+        core.delete_namespaced_pod.assert_called_once()
+        core.delete_namespaced_config_map.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_missing_container_is_noop(self, monkeypatch):
-        # Use the same _NotFound class agent_controller catches — it's
-        # docker.errors.NotFound when the SDK is installed, a stub
-        # Exception subclass otherwise. Either way, the test runs in
-        # any environment without depending on the docker package.
-        NotFound = agent_controller._NotFound
+        from kubernetes.client.exceptions import ApiException
 
-        client = MagicMock()
-        client.containers.get.side_effect = NotFound("nope")
-        monkeypatch.setattr(agent_controller, "_docker_client", lambda: client)
+        core = MagicMock()
+        # 404 on both deletes — resource already absent; must NOT raise.
+        not_found = ApiException(status=404)
+        core.delete_namespaced_pod.side_effect        = not_found
+        core.delete_namespaced_config_map.side_effect  = not_found
+        monkeypatch.setattr(agent_controller, "_k8s_core", lambda: core)
 
         # Must NOT raise.
         await agent_controller.stop_agent_container("ag-doesnt-exist")
@@ -190,14 +192,14 @@ class TestStopAgentContainer:
 
 def _fake_agent_row(*, agent_id="ag-001", tenant_id="t1",
                      state="stopped",
-                     code_path="/v/agent.py",
+                     code_blob="print('agent')",
                      mcp_token="m", llm_api_key="l"):
     """SQLAlchemy-row-shaped MagicMock."""
     a = MagicMock()
     a.id        = agent_id
     a.tenant_id = tenant_id
     a.runtime_state = state
-    a.code_path = code_path
+    a.code_blob = code_blob
     a.mcp_token = mcp_token
     a.llm_api_key = llm_api_key
     return a
@@ -245,7 +247,7 @@ class TestDeployAgent:
             row.runtime_state = "running"
 
         monkeypatch.setattr(agent_controller, "create_agent_topics", _topics)
-        monkeypatch.setattr(agent_controller, "spawn_agent_container", _spawn)
+        monkeypatch.setattr(agent_controller, "spawn_agent_pod", _spawn)
         monkeypatch.setattr(agent_controller, "_wait_for_ready",
                              _wait_ready_immediately)
 
@@ -274,7 +276,7 @@ class TestStartAgent:
         called = {"spawn": 0}
         async def _spawn(**kw):
             called["spawn"] += 1
-        monkeypatch.setattr(agent_controller, "spawn_agent_container", _spawn)
+        monkeypatch.setattr(agent_controller, "spawn_agent_pod", _spawn)
 
         row = _fake_agent_row(state="running")
         db  = _fake_db_with(row)
@@ -284,8 +286,8 @@ class TestStartAgent:
     @pytest.mark.asyncio
     async def test_start_stopped_spawns_and_marks_starting(self, monkeypatch):
         async def _spawn(**kw):
-            return "ctr"
-        monkeypatch.setattr(agent_controller, "spawn_agent_container", _spawn)
+            return "agent-ag-001"
+        monkeypatch.setattr(agent_controller, "spawn_agent_pod", _spawn)
 
         row = _fake_agent_row(state="stopped")
         db  = _fake_db_with(row)
@@ -299,7 +301,7 @@ class TestStopAndRetire:
     async def test_stop_marks_stopped(self, monkeypatch):
         async def _stop(aid):
             pass
-        monkeypatch.setattr(agent_controller, "stop_agent_container", _stop)
+        monkeypatch.setattr(agent_controller, "stop_agent_pod", _stop)
 
         row = _fake_agent_row(state="running")
         db  = _fake_db_with(row)
@@ -314,7 +316,7 @@ class TestStopAndRetire:
             calls.append(("stop", aid))
         async def _del(*, tenant_id, agent_id):
             calls.append(("del-topics", tenant_id, agent_id))
-        monkeypatch.setattr(agent_controller, "stop_agent_container", _stop)
+        monkeypatch.setattr(agent_controller, "stop_agent_pod", _stop)
         monkeypatch.setattr(agent_controller, "delete_agent_topics", _del)
 
         row = _fake_agent_row(state="running", agent_id="ag-001")

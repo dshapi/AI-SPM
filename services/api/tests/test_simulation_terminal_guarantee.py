@@ -57,6 +57,10 @@ def _install_fake_sim_events_module() -> None:
     ):
         setattr(fake, name, lambda *a, **kw: None)
     sys.modules[mod_name] = fake
+    # Bind on the parent package so getattr(platform_shared, 'simulation_events')
+    # works — mock.patch relies on this and sys.modules injection alone won't set it.
+    import platform_shared as _ps
+    _ps.simulation_events = fake
 
 
 _install_fake_sim_events_module()

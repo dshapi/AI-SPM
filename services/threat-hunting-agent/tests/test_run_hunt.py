@@ -16,12 +16,17 @@ from agent.agent import run_hunt
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_agent(llm_text: str) -> Any:
-    """Fake LangChain agent that returns a fixed final message."""
-    msg = MagicMock()
-    msg.content = llm_text
+    """Fake LangChain ChatModel that returns a fixed AIMessage-shaped response.
+
+    run_hunt() now calls agent.invoke([SystemMessage, HumanMessage]) and reads
+    response.content directly — so the mock must return an object with .content,
+    not the old {"messages": [...]} dict used when agent was a ReAct agent.
+    """
+    response = MagicMock()
+    response.content = llm_text
 
     agent = MagicMock()
-    agent.invoke.return_value = {"messages": [msg]}
+    agent.invoke.return_value = response
     return agent
 
 
@@ -141,4 +146,4 @@ class TestRunHuntFallback:
     def test_no_json_in_llm_output_uses_defaults(self):
         result = run_hunt(_make_agent("No threats found."), "t1", _EVENTS)
         assert isinstance(result, dict)
-        assert result["severity"] == "medium"  # LLMFragment default
+        assert result["severity"] == "medium"  # LLMFragment default when no JSON found
