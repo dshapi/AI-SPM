@@ -613,7 +613,7 @@ A passing run ends with:
 ```bash
 ./stop.sh
 # or
-docker-compose -f docker-compose.yml -f docker-compose.auth.yml down
+docker-compose -f compose.yml -f compose.auth.yml down
 ```
 
 **Start everything back up:**
@@ -695,7 +695,7 @@ Panels populate after the first real request is processed. Run `make smoke-test`
 
 ### Port conflict
 
-If any port (3000, 3001, 8080, etc.) is already in use, edit `docker-compose.yml` and change the host-side port mapping:
+If any port (3000, 3001, 8080, etc.) is already in use, edit `compose.yml` and change the host-side port mapping:
 
 ```yaml
 ports:
@@ -974,7 +974,7 @@ A passing run ends with:
 ```bash
 ./stop.sh
 # or
-docker-compose -f docker-compose.yml -f docker-compose.auth.yml down
+docker-compose -f compose.yml -f compose.auth.yml down
 ```
 
 **Start everything back up:**
@@ -1056,7 +1056,7 @@ Panels populate after the first real request is processed. Run `make smoke-test`
 
 ### Port conflict
 
-If any port (3000, 3001, 8080, etc.) is already in use, edit `docker-compose.yml` and change the host-side port mapping:
+If any port (3000, 3001, 8080, etc.) is already in use, edit `compose.yml` and change the host-side port mapping:
 
 ```yaml
 ports:
@@ -1686,7 +1686,7 @@ Only required once — Keycloak persists the realm to `./DataVolumes/keycloak/h2
 7. **Users** → **Create user** → set username and email → **Create**
 8. **Credentials** tab → set password → turn OFF **Temporary** → **Save password**
 9. **Role mapping** tab → **Assign role** → tick `spm:admin` → **Assign**
-10. Restart forward-auth: `docker compose -f docker-compose.auth.yml up -d --force-recreate traefik-forward-auth`
+10. Restart forward-auth: `docker compose -f compose.auth.yml up -d --force-recreate traefik-forward-auth`
 
 #### Scriptable equivalent (kcadm)
 
@@ -1727,7 +1727,7 @@ docker compose exec keycloak $KC add-roles -r aispm \
 
 | File | Purpose |
 |---|---|
-| `docker-compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth. Keycloak data is bind-mounted from `./DataVolumes/keycloak/`. |
+| `compose.auth.yml` | Compose overlay — adds Traefik, Keycloak, and traefik-forward-auth. Keycloak data is bind-mounted from `./DataVolumes/keycloak/`. |
 | `auth/traefik.yml` | Traefik static config (file provider, entrypoints, dashboard on `:9091`) |
 | `auth/traefik-dynamic.yml` | Route + middleware definitions. **Important:** there is a single `aispm` router covering every path — including `/_oauth`. The SSO middleware itself recognizes the OIDC callback via `X-Forwarded-Uri` and short-circuits it. Do **not** add a separate router that routes `/_oauth` directly to the forward-auth backend service (e.g. `aispm-oauth: service: auth-svc`) — that strips the `X-Forwarded-*` headers and forward-auth then can't tell it's a callback, falling into an infinite redirect loop. |
 | `.env.auth` | OIDC client ID, client secret, and cookie signing secret |
@@ -1740,7 +1740,7 @@ docker compose exec keycloak $KC add-roles -r aispm \
 | Keycloak page: "We are sorry… HTTPS required" | Realm `sslRequired` is `external` (default). | `kcadm update realms/<realm> -s sslRequired=NONE` for both `master` and `aispm`, OR access the admin console via `http://localhost:8180/` (localhost bypasses the gate). |
 | Login succeeds but `/_oauth` returns "Cookie not found" | Stale `_forward_auth_csrf` cookies from a previous failed run. | Close all incognito windows (don't just open a new tab) and start a fresh session. |
 | spm-api returns 403 "spm:admin role required" after login | The JWT user has no `spm:admin` realm role. | In Keycloak: realm `aispm` → Users → user → **Role mapping** → assign `spm:admin`. |
-| `LOG_LEVEL=debug` doesn't take effect | Compose only reloads env on recreate. | `docker compose -f docker-compose.auth.yml up -d --force-recreate traefik-forward-auth` |
+| `LOG_LEVEL=debug` doesn't take effect | Compose only reloads env on recreate. | `docker compose -f compose.auth.yml up -d --force-recreate traefik-forward-auth` |
 
 ### Persistent data — bind-mounted volumes
 

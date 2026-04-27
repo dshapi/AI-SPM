@@ -58,7 +58,7 @@ services/spm_api/connector_probes.py                   # add probe_agent_runtime
 services/spm_api/integrations_routes.py                # add ?category= query param to GET /integrations
 platform_shared/topics.py                              # add agent_topics_for(tenant_id, agent_id)
 platform_shared/lineage_events.py                      # add AgentDeployed, AgentStarted, AgentStopped event types
-docker-compose.yml                                     # add spm-mcp, spm-llm-proxy services
+compose.yml                                     # add spm-mcp, spm-llm-proxy services
 ```
 
 ---
@@ -1994,7 +1994,7 @@ git commit -m "feat(agent-runtime): Phase 1 stub Dockerfile + entrypoint"
 ## Task 17: docker-compose — wire spm-mcp + spm-llm-proxy
 
 **Files:**
-- Modify: `docker-compose.yml`
+- Modify: `compose.yml`
 
 - [ ] **Step 1: Add service entries (after the `spm-api:` block)**
 
@@ -2064,7 +2064,7 @@ networks:
 
 ```
 cd /Users/danyshapiro/PycharmProjects/AISPM
-docker compose -f docker-compose.yml config > /dev/null
+docker compose -f compose.yml config > /dev/null
 ```
 
 Expected: no errors, no output. If it errors, fix syntax.
@@ -2099,7 +2099,7 @@ Expected: both return `{"ok":true}`.
 - [ ] **Step 6: Commit**
 
 ```
-git add docker-compose.yml
+git add compose.yml
 git commit -m "feat(compose): add spm-mcp + spm-llm-proxy services with internal agent-net"
 ```
 

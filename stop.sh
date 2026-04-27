@@ -17,4 +17,4 @@ if [ -n "$agent_ctrs" ]; then
   docker rm -f      $agent_ctrs >/dev/null
 fi
 
-docker compose -f docker-compose.yml -f docker-compose.auth.yml down "$@"
+docker compose -f compose.yml -f compose.auth.yml down "$@"

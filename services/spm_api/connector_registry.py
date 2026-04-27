@@ -533,7 +533,7 @@ CONNECTOR_TYPES: Dict[str, ConnectorType] = {
         "description": "Stream processing. Probes GET /overview on the JobManager REST port.",
         "fields": [
             # The dev stack ships a real Flink JobManager at
-            # http://flink-jobmanager:8081 (see docker-compose.yml). The
+            # http://flink-jobmanager:8081 (see compose.yml). The
             # default below probes that. Override jobmanager_url to point
             # at a remote/production cluster.
             {"key": "jobmanager_url", "label": "JobManager URL", "type": "url",

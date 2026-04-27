@@ -11,7 +11,7 @@ BUILD=${BUILD:-}   # set BUILD=1 to force-rebuild every image before starting
 # stack. Build the image up-front if it's missing; cached builds are ~1s.
 if ! docker image inspect aispm-flink-pyjob:latest >/dev/null 2>&1; then
   echo "Building aispm-flink-pyjob image (one-time)..."
-  docker compose -f docker-compose.yml -f docker-compose.auth.yml build flink-jobmanager
+  docker compose -f compose.yml -f compose.auth.yml build flink-jobmanager
 fi
 
 # Same problem for the agent runtime image: it lives behind the
@@ -21,17 +21,17 @@ fi
 # fail with "pull access denied" without this pre-build.
 if ! docker image inspect aispm-agent-runtime:latest >/dev/null 2>&1; then
   echo "Building aispm-agent-runtime image (one-time)..."
-  docker compose -f docker-compose.yml -f docker-compose.auth.yml \
+  docker compose -f compose.yml -f compose.auth.yml \
       --profile build-only build agent-runtime-build
 fi
 
 if [ -n "$BUILD" ]; then
-  docker compose -f docker-compose.yml -f docker-compose.auth.yml build
-  docker compose -f docker-compose.yml -f docker-compose.auth.yml \
+  docker compose -f compose.yml -f compose.auth.yml build
+  docker compose -f compose.yml -f compose.auth.yml \
       --profile build-only build agent-runtime-build
 fi
 
-docker compose -f docker-compose.yml -f docker-compose.auth.yml up -d --remove-orphans
+docker compose -f compose.yml -f compose.auth.yml up -d --remove-orphans
 
 echo ""
 echo "Stack is up."

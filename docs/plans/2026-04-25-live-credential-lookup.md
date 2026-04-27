@@ -235,7 +235,7 @@ call.
 ### Belt-and-braces on Redis persistence
 
 Same worktree: baked `--save ""` and `--stop-writes-on-bgsave-error no`
-into the redis service command (see `docker-compose.yml`). Our use of
+into the redis service command (see `compose.yml`). Our use of
 Redis is purely ephemeral (rate-limit counters + 30s credential
 cache); there is nothing worth persisting through a restart, so RDB
 is off and AOF is belt-and-braces for in-flight burst loss. This

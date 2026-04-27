@@ -1,7 +1,7 @@
 # ── Auth overlay ──────────────────────────────────────────────────────────────
 #
 # Run alongside the main stack:
-#   docker-compose -f docker-compose.yml -f docker-compose.auth.yml up --build
+#   docker-compose -f compose.yml -f compose.auth.yml up --build
 #
 # Before running, add these lines to /etc/hosts on your Mac:
 #   127.0.0.1  keycloak.local
@@ -92,4 +92,4 @@ networks:
     name: traefik
   aispm-default:
     name: aispm_default   # The project's existing default network
-    external: true        # Already created by docker-compose.yml — don't recreate it
+    external: true        # Already created by compose.yml — don't recreate it

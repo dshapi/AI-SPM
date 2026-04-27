@@ -667,7 +667,7 @@ def build_seed() -> List[Dict[str, Any]]:
             "tags": ["kafka", "streaming", "events"],
             "config": {
                 # Points at the real broker hostname inside the
-                # aispm_default docker network (see docker-compose.yml
+                # aispm_default docker network (see compose.yml
                 # service `kafka-broker`).  The Test button does a TCP
                 # dial against this — a placeholder hostname would just
                 # surface DNS / timeout noise instead of a useful signal.

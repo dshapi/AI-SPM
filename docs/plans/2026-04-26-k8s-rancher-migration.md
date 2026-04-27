@@ -120,7 +120,7 @@ tests/spm_api/test_agent_controller_k8s.py  # NEW — tests for k8s backend
 ```
 services/spm_api/agent_controller.py      # core rewrite
 services/spm_api/requirements.txt         # +kubernetes==29.*
-docker-compose.yml                        # kept for local dev; no changes required
+compose.yml                        # kept for local dev; no changes required
 ```
 
 ---
