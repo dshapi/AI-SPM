@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from db.models import AgentSessionORM, CaseORM, SessionEventORM
+from db.models import AgentSessionORM, CaseORM, SessionEventORM, ThreatFindingORM
 
 logger = logging.getLogger(__name__)
 
@@ -478,6 +478,117 @@ DEMO_CASES = [
 ]
 
 
+# ── Demo threat findings ───────────────────────────────────────────────────────
+
+DEMO_FINDINGS = [
+    {
+        "id": "find-001",
+        "batch_hash": "demo-batch-001",
+        "title": "Prompt Injection Attempt Detected",
+        "severity": "critical",
+        "description": "Agent received a prompt containing instruction-override patterns designed to bypass safety guardrails and exfiltrate system instructions.",
+        "evidence": '["Payload contained `Ignore previous instructions` prefix", "Tool call to external endpoint not in allowlist", "Session risk score: 0.97"]',
+        "ttps": '["T1059 - Command and Scripting Interpreter", "T1190 - Exploit Public-Facing Application"]',
+        "tenant_id": "demo-tenant",
+        "status": "open",
+        "source": "threat_hunt",
+        "asset": "CustomerSupport-GPT",
+        "environment": "production",
+        "confidence": 0.95,
+        "risk_score": 0.97,
+        "hypothesis": "Adversarial user attempted to override agent system prompt via injected instructions to leak configuration data.",
+        "recommended_actions": '["Block session immediately", "Review agent system prompt for hardening", "Audit recent sessions from same user"]',
+        "should_open_case": True,
+        "suppressed": False,
+        "created_at_offset": 45,
+    },
+    {
+        "id": "find-002",
+        "batch_hash": "demo-batch-002",
+        "title": "Anomalous Data Exfiltration Pattern",
+        "severity": "high",
+        "description": "Agent retrieved an unusually large number of customer records in a single session — 847 records versus a baseline of 12. Pattern matches bulk-exfiltration profile.",
+        "evidence": '["847 records retrieved vs 12 baseline", "All records matched PII schema", "No business justification in session context"]',
+        "ttps": '["T1530 - Data from Cloud Storage Object", "T1213 - Data from Information Repositories"]',
+        "tenant_id": "demo-tenant",
+        "status": "investigating",
+        "source": "threat_hunt",
+        "asset": "DataPipeline-Orchestrator",
+        "environment": "production",
+        "confidence": 0.88,
+        "risk_score": 0.82,
+        "hypothesis": "Compromised or misconfigured agent executed bulk retrieval of customer PII without scoped authorization.",
+        "recommended_actions": '["Freeze agent pending review", "Audit all records accessed", "Enable retrieval rate limiting"]',
+        "should_open_case": True,
+        "suppressed": False,
+        "created_at_offset": 120,
+    },
+    {
+        "id": "find-003",
+        "batch_hash": "demo-batch-003",
+        "title": "Privilege Escalation via Tool Chaining",
+        "severity": "high",
+        "description": "Agent chained three tool calls in sequence to achieve an action that each individual tool would have denied — a classic privilege escalation pattern.",
+        "evidence": '["Tool A granted read on /config", "Tool B used config value to construct admin query", "Tool C executed admin query"]',
+        "ttps": '["T1548 - Abuse Elevation Control Mechanism", "T1078 - Valid Accounts"]',
+        "tenant_id": "demo-tenant",
+        "status": "open",
+        "source": "threat_hunt",
+        "asset": "FinanceAssistant-v2",
+        "environment": "production",
+        "confidence": 0.79,
+        "risk_score": 0.74,
+        "hypothesis": "Agent exploited lack of inter-tool authorization checks to construct an elevated operation from individually permitted primitives.",
+        "recommended_actions": '["Add cross-tool call graph policy", "Review tool permission boundaries", "Enable chain-of-thought logging"]',
+        "should_open_case": False,
+        "suppressed": False,
+        "created_at_offset": 300,
+    },
+    {
+        "id": "find-004",
+        "batch_hash": "demo-batch-004",
+        "title": "Sensitive Credential Exposure in Output",
+        "severity": "medium",
+        "description": "Agent output contained what appears to be an API key pattern in the response body. The output guard blocked delivery but the generation itself is a policy violation.",
+        "evidence": '["Regex match: sk-[A-Za-z0-9]{48} in output", "Output guard blocked response", "Key pattern matches Anthropic API key format"]',
+        "ttps": '["T1552 - Unsecured Credentials"]',
+        "tenant_id": "demo-tenant",
+        "status": "resolved",
+        "source": "output_guard",
+        "asset": "HR-Assistant-Pro",
+        "environment": "staging",
+        "confidence": 0.99,
+        "risk_score": 0.61,
+        "hypothesis": "Agent retrieved credentials from a connected data source and included them verbatim in its response.",
+        "recommended_actions": '["Rotate any exposed credentials immediately", "Add credential-pattern blocklist to retrieval pipeline", "Review data source access controls"]',
+        "should_open_case": False,
+        "suppressed": False,
+        "created_at_offset": 720,
+    },
+    {
+        "id": "find-005",
+        "batch_hash": "demo-batch-005",
+        "title": "Repeated Policy Bypass Attempts",
+        "severity": "medium",
+        "description": "Same user submitted 14 variations of a refused request within 30 minutes — consistent with adversarial probing to find a prompt that bypasses policy.",
+        "evidence": '["14 policy-blocked requests in 30 min window", "Semantic similarity > 0.91 across all attempts", "Progressive rewording pattern detected"]',
+        "ttps": '["T1110 - Brute Force", "T1589 - Gather Victim Identity Information"]',
+        "tenant_id": "demo-tenant",
+        "status": "open",
+        "source": "threat_hunt",
+        "asset": "ThreatHunter-AI",
+        "environment": "production",
+        "confidence": 0.85,
+        "risk_score": 0.58,
+        "hypothesis": "User is systematically probing policy boundaries to identify a prompt variant that will be allowed.",
+        "recommended_actions": '["Rate-limit user account", "Flag for manual review", "Consider temporary session suspension"]',
+        "should_open_case": False,
+        "suppressed": False,
+        "created_at_offset": 1440,
+    },
+]
+
+
 async def seed_demo_data(session_factory: async_sessionmaker) -> None:
     """Insert demo sessions + cases if the DB is empty. Idempotent."""
     async with session_factory() as db:
@@ -527,3 +638,27 @@ async def seed_demo_data(session_factory: async_sessionmaker) -> None:
                 ))
             await db.commit()
             logger.info("seed_demo: committed %d demo cases", len(missing))
+
+        # ── Threat findings ───────────────────────────────────────────────
+        existing_finding_ids_result = await db.execute(
+            select(ThreatFindingORM.id).where(
+                ThreatFindingORM.id.in_([f["id"] for f in DEMO_FINDINGS])
+            )
+        )
+        existing_finding_ids = {row[0] for row in existing_finding_ids_result.fetchall()}
+        missing_findings = [f for f in DEMO_FINDINGS if f["id"] not in existing_finding_ids]
+
+        if not missing_findings:
+            logger.info("seed_demo: all %d demo findings already present — skipping", len(DEMO_FINDINGS))
+        else:
+            logger.info("seed_demo: inserting %d missing demo findings", len(missing_findings))
+            for f in missing_findings:
+                offset = f.pop("created_at_offset")
+                ts = _ts(offset).isoformat()
+                db.add(ThreatFindingORM(
+                    **f,
+                    created_at=ts,
+                    updated_at=ts,
+                ))
+            await db.commit()
+            logger.info("seed_demo: committed %d demo findings", len(missing_findings))

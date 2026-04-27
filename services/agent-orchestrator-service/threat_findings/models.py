@@ -192,6 +192,12 @@ class ThreatFindingRepository:
         stmt = self._apply_filters(
             select(func.count()).select_from(ThreatFindingORM), filters
         )
+        # Mirror the suppressed filter from list_findings so the count
+        # matches the number of items the list would return.
+        if not filters.include_suppressed:
+            stmt = stmt.where(
+                (ThreatFindingORM.suppressed == False) | (ThreatFindingORM.suppressed.is_(None))  # noqa: E712
+            )
         result = await self._session.execute(stmt)
         return result.scalar_one()
 
