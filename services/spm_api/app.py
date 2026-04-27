@@ -230,9 +230,36 @@ async def _auto_bootstrap_integrations() -> None:
         from spm.db.session import get_session_factory  # noqa: PLC0415
 
         seed_data = build_seed()
+        external_to_uuid: dict = {}
         async with get_session_factory()() as db:
             for entry in seed_data:
-                await _upsert_integration(db, entry)
+                row = await _upsert_integration(db, entry)
+                external_to_uuid[entry["external_id"]] = str(row.id)
+            # Post-pass: resolve external_id cross-references (e.g.
+            # int-022's default_llm_integration_id_external → int-017 UUID)
+            from spm.db.models import Integration as _Integration  # noqa: PLC0415
+            from sqlalchemy import select as _select               # noqa: PLC0415
+            for entry in seed_data:
+                ext_ref = (entry.get("config") or {}).get(
+                    "default_llm_integration_id_external"
+                )
+                if not ext_ref:
+                    continue
+                target_uuid = external_to_uuid.get(ext_ref)
+                if target_uuid is None:
+                    continue
+                result = await db.execute(
+                    _select(_Integration).where(
+                        _Integration.external_id == entry["external_id"]
+                    )
+                )
+                row = result.scalar_one_or_none()
+                if row is None:
+                    continue
+                cfg = dict(row.config or {})
+                if not cfg.get("default_llm_integration_id"):
+                    cfg["default_llm_integration_id"] = target_uuid
+                    row.config = cfg
             await db.commit()
         log.info("integrations bootstrap complete — %d rows upserted", len(seed_data))
     except Exception as exc:  # never crash startup over seed failure

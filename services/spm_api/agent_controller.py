@@ -324,12 +324,8 @@ def _wait_until_absent(get_fn, name: str, *,
 async def spawn_agent_pod(*, agent_id: str,
                            mcp_token: str,
                            code_blob: Optional[str] = None,
-                           # kept for API compatibility — no longer used in k8s
                            tenant_id: str = "",
-                           code_path: str = "",
-                           llm_api_key: str = "",
-                           mem_mb: int = 512,
-                           cpu_quota: float = 0.5) -> str:
+                           llm_api_key: str = "") -> str:
     """Create (or replace) the agent Pod + ConfigMap in ``aispm-agents``.
 
     Returns the Pod name.
@@ -487,8 +483,6 @@ async def deploy_agent(db, agent_id) -> None:
         code_blob=code_blob,
         mcp_token=a.mcp_token,
         llm_api_key=a.llm_api_key,
-        mem_mb=512,
-        cpu_quota=0.5,
     )
 
     if _READY_SLEEP_S > 0:

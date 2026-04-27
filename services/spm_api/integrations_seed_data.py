@@ -80,6 +80,12 @@ _NAME_TO_CONNECTOR_TYPE: Dict[str, str] = {
     "postgresql":         "postgres",
     "postgres":           "postgres",
     "redis":              "redis",
+    # int-022 — meta integration that tells spm-llm-proxy which
+    # upstream LLM to route agent runtime calls through. Keyed by the
+    # full display name (lower-cased); kept here so the seed normalize
+    # pass populates connector_type even if a future seed forgets the
+    # explicit field.
+    "ai-spm agent runtime control plane (mcp)": "agent-runtime",
 }
 
 
