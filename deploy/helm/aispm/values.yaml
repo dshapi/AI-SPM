@@ -88,10 +88,76 @@ platformEnv:
 # ── Agent runtime ────────────────────────────────────────────────────────────
 agentRuntime:
   namespace: aispm-agents
-  # runtimeClassName not set for dev — Chainguard hardened image + securityContext used instead
-  # runtimeClassName: kata   # uncomment on RKE2 prod nodes with Kata installed
+  # RuntimeClass for kernel-boundary isolation. Empty default means
+  # "use the cluster's default OCI runtime" — cheap, but agents share
+  # the host kernel. Set this to a registered RuntimeClass:
+  #   - kata    (RKE2 prod with Kata Containers installed)
+  #   - gvisor  (anywhere — Mac/Lima/Linux; user-space sentry instead
+  #             of microVM, ~95% Linux ABI, real kernel boundary)
+  # Override per-environment:
+  #   values.dev.yaml  → "gvisor"
+  #   values.prod.yaml → "kata"
+  runtimeClassName: ""
   defaultMemMi: 512
   defaultCpuMillicores: 500
+
+  # Aggregate cap on the agent namespace. Hardcoded ceilings prevent
+  # a runaway tenant from exhausting the cluster.
+  quota:
+    enabled: true
+    maxPods:                     "100"
+    cpuRequests:                 "25"      # 25 vCPU total
+    memoryRequests:              "50Gi"
+    cpuLimits:                   "50"
+    memoryLimits:                "50Gi"
+    ephemeralStorageRequests:    "5Gi"
+    ephemeralStorageLimits:      "10Gi"
+    maxConfigMaps:               "200"     # one per agent + slack
+
+  # Per-container default limits (LimitRange backstop in case
+  # spawn_agent_pod ever forgets to set explicit limits).
+  # Note: maxCpu/maxMemory must accommodate the istio-proxy sidecar
+  # when sidecar injection is active — Istio defaults its sidecar to
+  # 2 vCPU / 1 GiB. The agent container itself uses 500m / 512Mi, so
+  # 2 / 1Gi is a real ceiling for it but a snug fit for the sidecar.
+  limits:
+    enabled: true
+    defaultCpu:                "500m"
+    defaultMemory:             "512Mi"
+    defaultEphemeralStorage:   "256Mi"
+    defaultRequestCpu:         "100m"
+    defaultRequestMemory:      "256Mi"
+    maxCpu:                    "2"
+    maxMemory:                 "1Gi"
+
+  # mTLS mode for the aispm namespace. PERMISSIVE works with Ambient
+  # peers from aispm-agents without waypoints; STRICT requires
+  # waypoint proxies for the cross-mode bridge.
+  mtlsMode: PERMISSIVE
+
+# ── Kyverno admission policies ─────────────────────────────────────────────
+# Cluster-wide policies (disallow-privileged, disallow-host-namespaces,
+# image-origin-allowlist) are applied directly via kubectl, not via this
+# chart, so they remain active even when the chart is helm-deleted. Only
+# the verifyImages policy is templated here because it depends on the
+# Cosign keypair which lives alongside the rest of the deployment values.
+kyverno:
+  verifyImages:
+    # Off by default. Local dev images aren't pushed to a registry and
+    # have no Cosign signature, so enabling on dev would block every
+    # agent pod. Turn on in values.prod.yaml.
+    enabled: false
+    # "Audit" emits PolicyReport entries without blocking. "Enforce"
+    # rejects unsigned images at admission.
+    mode: Audit
+    # Cosign public key (PEM). Generated with:
+    #   cosign generate-key-pair --output-key-prefix deploy/cosign/aispm-images
+    # Private key is in deploy/cosign/aispm-images.key (gitignored).
+    publicKey: |
+      -----BEGIN PUBLIC KEY-----
+      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEC/IrHdw9JZDJvCuC90CXeE7ZEsgE
+      SUkFuN8J7uoylaxTLuiZYTf2SuixBO39s1R1a806LzDU5RBJMEORIvl3gA==
+      -----END PUBLIC KEY-----
 
 # ── Secrets (safe defaults — override at deploy time via --set or Rancher UI) ─
 secrets:

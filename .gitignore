@@ -53,3 +53,4 @@ __pycache__/
 # Istio downloaded distributions
 istio-*/
 DataVolumes/
+deploy/cosign/*.key

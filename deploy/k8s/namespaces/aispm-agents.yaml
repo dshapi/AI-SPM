@@ -6,4 +6,21 @@ metadata:
   labels:
     purpose: agent-runtime
     pod-security.kubernetes.io/enforce: restricted
-    istio.io/dataplane-mode: ambient  # ztunnel handles mTLS; no sidecar injected
+    # Ambient dataplane (ztunnel-style; Istio sidecars NOT injected).
+    #
+    # On dev with gVisor (runsc) RuntimeClass, sidecar mode is
+    # impossible — gVisor's user-space netstack doesn't honor iptables,
+    # so Istio's REDIRECT-based traffic interception (port 15001/15006)
+    # silently breaks at the istio-validation init container. Ambient
+    # avoids the iptables hop entirely — traffic leaves the pod as
+    # plain TCP and ztunnel handles the mesh layer at the node.
+    #
+    # In prod with Kata (microVM), sidecar mode IS possible because
+    # Kata's guest kernel supports iptables, so when you migrate to
+    # Kata you can flip to:
+    #   istio-injection: enabled
+    #   (no dataplane-mode label)
+    # …with `pilot.cni.enabled=true` set on istiod (already done in
+    # this cluster) so istio-init isn't injected and Restricted PSS
+    # passes admission.
+    istio.io/dataplane-mode: ambient

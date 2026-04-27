@@ -22,10 +22,11 @@ spec:
         - index: 0
           type: "string"
       selectors:
-        - matchNamespaces:
-            - operator: In
-              values: ["{{ .Values.agentRuntime.namespace }}"]
-          matchActions:
+        # podSelector above already scopes this policy to agents in
+        # this namespace; no additional matchNamespaces needed.
+        # (matchNamespaces is for Linux NS types — Pid/Mnt/Net —
+        # not for Kubernetes namespace names.)
+        - matchActions:
             - action: Sigkill   # kill the process before exec completes
 ---
 # Policy 2 — kill on raw socket creation (exfil/C2 channel attempt)

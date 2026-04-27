@@ -317,6 +317,31 @@ async def _list_linked_policies(db, agent_id: str) -> List[str]:
     return [r.policy_id for r in rows]
 
 
+# Stable namespace for hashing opaque UI session slugs into UUIDs. Hard-coded
+# (not derived from agent_id / tenant) so the same slug from the same UI
+# context always maps to the same DB row across requests.
+_SESSION_ID_NS = uuid.UUID("00000000-0000-0000-0000-000000005e55")  # fixed-namespace
+
+
+def _coerce_session_id(raw):
+    """Accept either a UUID string or an opaque slug from the UI.
+
+    The DB ``agent_chat_sessions.id`` column is UUID-typed, but the UI
+    generates slugs like ``"sess-14gu5d99x"`` that aren't UUIDs. We coerce
+    deterministically so the same slug round-trips to the same row:
+
+    * empty / None     → fresh uuid4 (anonymous session)
+    * valid UUID str   → unchanged
+    * non-UUID slug    → uuid5(NS, slug) — same slug always maps to same UUID
+    """
+    if not raw:
+        return uuid.uuid4()
+    try:
+        return uuid.UUID(str(raw))
+    except (ValueError, TypeError):
+        return uuid.uuid5(_SESSION_ID_NS, str(raw))
+
+
 async def _ensure_session(db, *, agent_id, session_id, user_id) -> None:
     if hasattr(db, "execute"):
         existing = (await db.execute(
@@ -363,7 +388,9 @@ async def chat_endpoint(
 ) -> StreamingResponse:
     """One-message round-trip with the full security pipeline."""
     text       = (body or {}).get("message")
-    session_id = (body or {}).get("session_id") or str(uuid.uuid4())
+    # The UI sometimes sends opaque slugs (e.g. "sess-14gu5d99x"); coerce
+    # to a UUID so the asyncpg UUID-cast doesn't reject the WHERE.
+    session_id = _coerce_session_id((body or {}).get("session_id"))
     if not text or not isinstance(text, str):
         raise HTTPException(
             status_code=400, detail="`message` (string) is required",
@@ -422,6 +449,9 @@ async def _round_trip(
 ):
     tenant_id = agent.tenant_id
     agent_id  = str(agent.id)
+    # session_id is a UUID for the DB but everything Kafka/lineage/JSON
+    # related needs the str form.
+    session_id_str = str(session_id)
 
     # 1. prompt-guard
     g_verdict, g_score, g_cats = await _call_guard(text)
@@ -447,7 +477,7 @@ async def _round_trip(
     await _save_message(db, session_id=session_id, role="user",
                         text=text, trace_id=trace_id)
     _emit_chat_event(
-        agent_id=agent_id, tenant_id=tenant_id, session_id=session_id,
+        agent_id=agent_id, tenant_id=tenant_id, session_id=session_id_str,
         user_id=user_id, role="user", text=text, trace_id=trace_id,
     )
 
@@ -479,13 +509,13 @@ async def _round_trip(
             topics.chat_in,
             value={
                 "id":         msg_id,
-                "session_id": session_id,
+                "session_id": session_id_str,
                 "user_id":    user_id,
                 "text":       text,
                 "ts":         datetime.now(timezone.utc).isoformat(),
                 "trace_id":   trace_id,
             },
-            key=session_id.encode(),
+            key=session_id_str.encode(),
         )
 
         deadline = asyncio.get_event_loop().time() + CHAT_REPLY_TIMEOUT_S
@@ -498,7 +528,7 @@ async def _round_trip(
                 yield ": ping\n\n"
                 continue
             v = m.value or {}
-            if v.get("session_id") == session_id and v.get("text"):
+            if v.get("session_id") == session_id_str and v.get("text"):
                 reply_text = str(v["text"])
                 break
     finally:
@@ -533,8 +563,44 @@ async def _round_trip(
     except Exception as e:                            # noqa: BLE001
         log.warning("persist agent reply failed: %s", e)
     _emit_chat_event(
-        agent_id=agent_id, tenant_id=tenant_id, session_id=session_id,
+        agent_id=agent_id, tenant_id=tenant_id, session_id=session_id_str,
         user_id=user_id, role="agent", text=reply_text, trace_id=trace_id,
     )
 
+    # ── Pseudo-streaming reveal ───────────────────────────────────────────
+    # The agent + LLM finished generating the whole reply already. To give
+    # the UI a streaming feel without rebuilding the LLM call path for true
+    # token-streaming, chunk the final text and emit per-chunk deltas with
+    # a small inter-chunk delay. UI renders progressively; total wall-time
+    # is unchanged, but time-to-first-paint goes from ~LLM_seconds to ~0ms.
+    #
+    # Tunables — small word-aware chunks feel natural at typical reading
+    # speed. CHAT_STREAM_DELAY_MS=0 disables the reveal entirely.
+    chunk_size  = max(1, int(os.environ.get("CHAT_STREAM_CHUNK_CHARS", "12")))
+    delay_s     = max(0.0, float(os.environ.get("CHAT_STREAM_DELAY_MS", "30")) / 1000.0)
+    if delay_s == 0 or len(reply_text) <= chunk_size:
+        yield _sse({"type": "done", "text": reply_text})
+        return
+
+    # Word-aware split — never break a word mid-character. Walk the text,
+    # emit when we cross chunk_size at the next whitespace boundary.
+    cursor = 0
+    while cursor < len(reply_text):
+        end = min(cursor + chunk_size, len(reply_text))
+        # Extend forward to the next word boundary so deltas land at
+        # natural breaks rather than mid-token.
+        if end < len(reply_text) and not reply_text[end].isspace():
+            ws = reply_text.find(" ", end)
+            if ws != -1 and ws - cursor < chunk_size * 2:
+                end = ws + 1
+        chunk = reply_text[cursor:end]
+        cursor = end
+        # UI's useAgentChat hook listens for type:"token"; keep the
+        # name consistent with that contract.
+        yield _sse({"type": "token", "text": chunk})
+        if cursor < len(reply_text):
+            await asyncio.sleep(delay_s)
+
+    # Final done event — include the full text so clients that ignored
+    # deltas (or want to verify) get the canonical reply.
     yield _sse({"type": "done", "text": reply_text})

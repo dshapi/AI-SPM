@@ -985,6 +985,57 @@ def build_seed() -> List[Dict[str, Any]]:
             # Unauthenticated Redis in dev compose — no credential row needed.
             "credentials": [],
         },
+        # ── int-022 — meta-integration that tells spm-llm-proxy which
+        # upstream LLM to route agent runtime calls through. The
+        # ``default_llm_integration_id`` config key holds the UUID of
+        # whichever AI Provider row (OpenAI, Anthropic, Ollama, …) the
+        # operator picks. Bootstrap leaves the value alone if already
+        # populated; resets to int-017 (Ollama) if missing.
+        {
+            "external_id": "int-022",
+            "name": "AI-SPM Agent Runtime Control Plane (MCP)",
+            "abbrev": "AR",
+            "category": "AI Providers",
+            "status": "Healthy",
+            "auth_method": "Service Account",
+            "owner": "platform-ops", "owner_display": "Platform Ops",
+            "environment": "Production",
+            "enabled": True,
+            "description": (
+                "Routes agent-runtime LLM calls through the configured "
+                "upstream provider. Pick which provider in Configure → "
+                "default_llm_integration_id."
+            ),
+            "vendor": "AISPM",
+            "tags": ["agent-runtime", "mcp", "internal"],
+            # The proxy looks up an integration with
+            # connector_type='agent-runtime' and reads
+            # config.default_llm_integration_id from it.
+            "connector_type": "agent-runtime",
+            "config": {
+                # Default points at Ollama (int-017). The bootstrap
+                # _envget helper will preserve any value already set
+                # in the DB — so changing the provider via UI sticks
+                # across spm-api restarts.
+                "default_llm_integration_id_external": "int-017",
+            },
+            "connection": {
+                "last_sync": "just now", "last_sync_full": None,
+                "last_failed_sync": None, "avg_latency": "—", "uptime": "100%",
+                "health_history": ["ok"] * 14,
+            },
+            "auth": {
+                "token_expiry": "n/a (in-cluster service account)",
+                "scopes": [], "missing_scopes": [], "setup_progress": None,
+            },
+            "coverage": [
+                ("Agent → spm-llm-proxy",  True),
+                ("Provider resolution",    True),
+            ],
+            "activity": [],
+            "workflows": {"playbooks": [], "alerts": [], "policies": [], "cases": []},
+            "credentials": [],
+        },
     ]
 
     # Normalize pass — inject connector_type based on name, unless the seed

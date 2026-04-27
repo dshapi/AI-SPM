@@ -20,7 +20,7 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 
 // ── Phase 3 — agent runtime control plane wiring ──────────────────────────
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
-import { deleteAgent } from '../api/agents.js'
+import { deleteAgent, startAgent, stopAgent } from '../api/agents.js'
 import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
 import AgentDetailDrawer    from '../agents/AgentDetailDrawer.jsx'
 import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
@@ -592,6 +592,26 @@ function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) 
   const [deleteErr, setDeleteErr] = useState(null)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
+  // Apply-Policy = restart the agent so the orchestrator picks up the
+  // latest policy assignments from the DB.
+  const [applying, setApplying] = useState(false)
+  const [applyErr, setApplyErr] = useState(null)
+
+  async function _applyPolicies() {
+    if (!isLiveAgent || applying) return
+    setApplying(true); setApplyErr(null)
+    try {
+      await stopAgent(asset._backendId)
+      // Brief pause so the backend has time to mark state "stopped"
+      await new Promise(r => setTimeout(r, 800))
+      await startAgent(asset._backendId)
+    } catch (e) {
+      setApplyErr(e.message || 'Apply failed')
+    } finally {
+      setApplying(false)
+    }
+  }
+
   async function _runDelete() {
     setDeleting(true); setDeleteErr(null)
     try {
@@ -746,10 +766,19 @@ function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) 
           <ExternalLink size={12} />
           View Detail
         </Button>
-        <Button size="sm" className="w-full h-8 gap-1.5 text-[12px] justify-center">
-          <Shield size={12} />
-          Apply Policy
+        <Button
+          size="sm"
+          className="w-full h-8 gap-1.5 text-[12px] justify-center"
+          onClick={isLiveAgent ? _applyPolicies : () => onOpenDetails && onOpenDetails(asset)}
+          disabled={applying}
+          title={isLiveAgent ? 'Restart agent to enforce current policy assignments' : 'View policy details'}
+        >
+          {applying ? <Loader2 size={12} className="animate-spin" /> : <Shield size={12} />}
+          {applying ? 'Applying…' : 'Apply Policy'}
         </Button>
+        {applyErr && (
+          <p className="text-[11px] text-red-600 text-center" role="alert">⚠ {applyErr}</p>
+        )}
       </div>
 
     </div>

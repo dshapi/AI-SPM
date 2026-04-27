@@ -44,6 +44,8 @@ spec:
               value: {{ .Values.agentRuntime.namespace | quote }}
             - name: AGENT_RUNTIME_IMAGE
               value: {{ include "aispm.image" .Values.images.agentRuntime | quote }}
+            - name: AGENT_RUNTIME_CLASS
+              value: {{ .Values.agentRuntime.runtimeClassName | default "" | quote }}
           volumeMounts:
             - name: jwt-keys
               mountPath: /keys

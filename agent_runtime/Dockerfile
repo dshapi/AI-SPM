@@ -18,6 +18,21 @@
 # Customer's agent.py is bind-mounted at runtime; not COPYed here.
 
 FROM python:3.12-slim
+
+# Non-root user. The aispm-agents namespace enforces the Restricted
+# PodSecurity profile, and the Pod spec sets runAsNonRoot=true; without
+# a non-root USER here, kubelet refuses container start with
+# CreateContainerConfigError ("container has runAsNonRoot and image
+# will run as root, cannot validate user/uid").
+#
+# uid/gid 10001 — well above any system reserved range in python:3.12-slim.
+# Match the runAsUser/runAsGroup numerics in agent_controller._build_pod
+# so admission-time and runtime checks agree without consulting the image
+# manifest.
+RUN groupadd --system --gid 10001 agent \
+ && useradd  --system --uid 10001 --gid agent \
+             --home-dir /agent --shell /usr/sbin/nologin agent
+
 WORKDIR /agent
 
 # 2. SDK transport deps. Pinned major versions; concrete patch resolved
@@ -56,6 +71,11 @@ COPY agent_runtime/loader.py /agent/loader.py
 
 ENV PYTHONPATH=/agent
 
-# spawn_agent_container bind-mounts the customer's agent.py to
-# /agent/agent.py at runtime; the loader imports + exec()s it.
+# Make /agent owned by the agent user. The customer's agent.py is
+# mounted read-only from a per-agent ConfigMap (see agent_controller
+# spawn_agent_pod); the loader imports + exec()s it.
+RUN chown -R agent:agent /agent
+
+USER 10001:10001
+
 CMD ["python", "/agent/loader.py"]

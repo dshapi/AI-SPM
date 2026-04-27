@@ -23,10 +23,20 @@ spec:
       app: spm-mcp
   action: ALLOW
   rules:
+    # Two source clauses — Istio OR-s them. The first matches when
+    # the peer presented an mTLS principal (sidecar-to-sidecar inside
+    # the mesh, or ambient-to-sidecar through a waypoint). The second
+    # matches ambient peers reaching us via ztunnel without mTLS
+    # principal propagation — they still arrive labelled with their
+    # source namespace, so we accept by namespace as a fallback. With
+    # NetworkPolicy already restricting which pods can even initiate
+    # the connection, this is a meaningful filter.
     - from:
         - source:
             namespaces: ["{{ .Values.agentRuntime.namespace }}"]
             principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
       to:
         - operation:
             ports: ["8500"]
@@ -43,10 +53,20 @@ spec:
       app: spm-llm-proxy
   action: ALLOW
   rules:
+    # Two source clauses — Istio OR-s them. The first matches when
+    # the peer presented an mTLS principal (sidecar-to-sidecar inside
+    # the mesh, or ambient-to-sidecar through a waypoint). The second
+    # matches ambient peers reaching us via ztunnel without mTLS
+    # principal propagation — they still arrive labelled with their
+    # source namespace, so we accept by namespace as a fallback. With
+    # NetworkPolicy already restricting which pods can even initiate
+    # the connection, this is a meaningful filter.
     - from:
         - source:
             namespaces: ["{{ .Values.agentRuntime.namespace }}"]
             principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
       to:
         - operation:
             ports: ["8500"]
@@ -63,10 +83,20 @@ spec:
       app: spm-api
   action: ALLOW
   rules:
+    # Two source clauses — Istio OR-s them. The first matches when
+    # the peer presented an mTLS principal (sidecar-to-sidecar inside
+    # the mesh, or ambient-to-sidecar through a waypoint). The second
+    # matches ambient peers reaching us via ztunnel without mTLS
+    # principal propagation — they still arrive labelled with their
+    # source namespace, so we accept by namespace as a fallback. With
+    # NetworkPolicy already restricting which pods can even initiate
+    # the connection, this is a meaningful filter.
     - from:
         - source:
             namespaces: ["{{ .Values.agentRuntime.namespace }}"]
             principals: ["cluster.local/ns/{{ .Values.agentRuntime.namespace }}/sa/agent-runtime"]
+        - source:
+            namespaces: ["{{ .Values.agentRuntime.namespace }}"]
       to:
         - operation:
             paths: ["/agents/*/ready", "/agents/*/bootstrap", "/secrets/*"]

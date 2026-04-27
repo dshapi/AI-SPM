@@ -1,5 +1,6 @@
 # deploy/helm/aispm/values.dev.yaml
 # Rancher Desktop / local k3s overrides.
+#
 # Usage: helm upgrade aispm deploy/helm/aispm/ -n aispm \
 #          -f deploy/helm/aispm/values.yaml \
 #          -f deploy/helm/aispm/values.dev.yaml
@@ -24,3 +25,30 @@ prometheus:
 
 grafana:
   storageClass: local-path
+
+agentRuntime:
+  # gVisor (runsc) on dev — no nested virt available on Mac/Lima, but
+  # gVisor's user-space sentry gives a real kernel boundary. Install
+  # via deploy/scripts/install-gvisor.sh first; otherwise the next
+  # Pod admission errors with "RuntimeClass gvisor not found".
+  runtimeClassName: gvisor
+
+  # Per-container max — must allow the istio-proxy sidecar's 2 vCPU
+  # default. Agent container itself uses 500m / 512Mi.
+  limits:
+    maxCpu: "2"
+    maxMemory: "1Gi"
+
+  # PERMISSIVE — required when aispm-agents is in ambient mode and
+  # gVisor blocks iptables-based sidecar interception. Ambient peers
+  # don't carry mTLS principals to the destination sidecar's L7
+  # filter, so STRICT would block them. NetworkPolicy + Restricted
+  # PSS + gVisor sentry + non-root + caps drop still defend.
+  mtlsMode: PERMISSIVE
+
+# Tetragon enabled in dev — TracingPolicies enforce inline kills for
+# forbidden syscalls in agent pods. Note: gVisor agent pods don't hit
+# the host kernel directly, so Tetragon's eBPF probe won't see their
+# syscalls. Enforcement still applies to non-gVisor pods.
+tetragon:
+  enabled: true

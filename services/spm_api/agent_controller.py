@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 
 _AGENT_NAMESPACE  = os.environ.get("AGENT_POD_NAMESPACE", "aispm-agents")
 _AGENT_IMAGE      = os.environ.get("AGENT_RUNTIME_IMAGE", "aispm-agent-runtime:latest")
+# Empty default: dev clusters without Kata schedule on the default
+# runtime; prod sets AGENT_RUNTIME_CLASS=kata via the spm-api Pod env
+# (see deploy/helm/aispm/templates/spm-api-deployment.yaml).
+_AGENT_RUNTIME_CLASS = os.environ.get("AGENT_RUNTIME_CLASS", "")
 _KAFKA_BOOTSTRAP  = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka-broker:9092")
 _AGENT_MCP_URL    = os.environ.get("AGENT_MCP_URL",      "http://spm-mcp.aispm.svc.cluster.local:8500/mcp")
 _AGENT_LLM_BASE_URL = os.environ.get("AGENT_LLM_BASE_URL", "http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1")
@@ -150,8 +154,25 @@ def _build_configmap(agent_id: str, code_blob: str):
     )
 
 
-def _build_pod(agent_id: str, mcp_token: str):
-    """Build the V1Pod spec for an agent runtime instance."""
+def _build_pod(agent_id: str, mcp_token: str, tenant_id: str = "",
+               llm_api_key: str = ""):
+    """Build the V1Pod spec for an agent runtime instance.
+
+    Config-via-env vs config-via-/bootstrap
+    ───────────────────────────────────────
+    The plan's design has the agent fetch its config (Kafka brokers,
+    tenant id, …) from ``GET /agents/{id}/bootstrap`` after start.
+    That round-trip can fail in non-trivial ways (Istio Ambient↔sidecar
+    mTLS interop, NetworkPolicy timing, sidecar not yet ready, …) and
+    every one of them turns into a CrashLoopBackOff before the agent
+    can do useful work.
+
+    spm-api already knows all of those values — they're in its own
+    environment from the platform-env ConfigMap and on the Agent row
+    in the DB. So we propagate them on the Pod env directly. The
+    /bootstrap endpoint can stay as a refresh / dynamic-config path
+    later, but the cold-start contract no longer depends on it.
+    """
     import kubernetes.client as k8s  # type: ignore
 
     cm_name  = _configmap_name(agent_id)
@@ -166,11 +187,18 @@ def _build_pod(agent_id: str, mcp_token: str):
             labels={"app": "agent-runtime", "agent-id": agent_id},
         ),
         spec=k8s.V1PodSpec(
+            # Kata microVM isolation per the plan when AGENT_RUNTIME_CLASS
+            # is set (typically "kata" in prod). Empty/None falls through
+            # to the cluster's default runtime — the dev path.
+            runtime_class_name=(_AGENT_RUNTIME_CLASS or None),
             service_account_name="agent-runtime",
             automount_service_account_token=False,
             restart_policy="OnFailure",
             security_context=k8s.V1PodSecurityContext(
                 run_as_non_root=True,
+                run_as_user=10001,
+                run_as_group=10001,
+                fs_group=10001,
                 seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
             ),
             containers=[
@@ -181,19 +209,47 @@ def _build_pod(agent_id: str, mcp_token: str):
                     security_context=k8s.V1SecurityContext(
                         allow_privilege_escalation=False,
                         run_as_non_root=True,
+                        run_as_user=10001,
+                        run_as_group=10001,
+                        # Read-only root FS — the only writable paths
+                        # are the explicit emptyDir mounts below
+                        # (/tmp). Any attacker that pwns agent.py can't
+                        # drop binaries into /usr/local/bin or rewrite
+                        # /agent/loader.py. Bytecode writes are
+                        # disabled via PYTHONDONTWRITEBYTECODE so the
+                        # standard library import path is fine.
+                        read_only_root_filesystem=True,
                         capabilities=k8s.V1Capabilities(drop=["ALL"]),
                         seccomp_profile=k8s.V1SeccompProfile(type="RuntimeDefault"),
                     ),
                     env=[
                         k8s.V1EnvVar(name="AGENT_ID",       value=agent_id),
+                        k8s.V1EnvVar(name="TENANT_ID",      value=tenant_id),
                         k8s.V1EnvVar(name="MCP_TOKEN",      value=mcp_token),
+                        # Per-agent token for spm-llm-proxy auth
+                        # (matched against agents.llm_api_key in the DB).
+                        k8s.V1EnvVar(name="LLM_API_KEY",    value=llm_api_key),
                         k8s.V1EnvVar(name="CONTROLLER_URL", value=_AGENT_CONTROLLER_URL),
                         k8s.V1EnvVar(name="MCP_URL",        value=_AGENT_MCP_URL),
                         k8s.V1EnvVar(name="LLM_BASE_URL",   value=_AGENT_LLM_BASE_URL),
+                        k8s.V1EnvVar(name="KAFKA_BOOTSTRAP_SERVERS",
+                                     value=_KAFKA_BOOTSTRAP),
+                        # Read-only root FS support — Python won't try
+                        # to drop .pyc files alongside the source.
+                        k8s.V1EnvVar(name="PYTHONDONTWRITEBYTECODE",
+                                     value="1"),
+                        k8s.V1EnvVar(name="TMPDIR", value="/tmp"),
+                        # langchain / huggingface / httpx default cache
+                        # locations all land under HOME — point them
+                        # at a writable emptyDir so they don't ENOSPC
+                        # against the read-only root.
+                        k8s.V1EnvVar(name="HOME", value="/tmp"),
+                        k8s.V1EnvVar(name="XDG_CACHE_HOME", value="/tmp/.cache"),
                     ],
                     resources=k8s.V1ResourceRequirements(
                         requests={"memory": "512Mi", "cpu": "250m"},
-                        limits={"memory": "512Mi",  "cpu": "500m"},
+                        limits={"memory": "512Mi",  "cpu": "500m",
+                                "ephemeral-storage": "256Mi"},
                     ),
                     volume_mounts=[
                         k8s.V1VolumeMount(
@@ -201,6 +257,15 @@ def _build_pod(agent_id: str, mcp_token: str):
                             mount_path="/agent/agent.py",
                             sub_path="agent.py",
                             read_only=True,
+                        ),
+                        # Writable scratch — paired with TMPDIR=/tmp
+                        # and HOME=/tmp env vars above so any library
+                        # that wants to write a temp file or cache has
+                        # somewhere to land. Capped to 64 MiB so a
+                        # rogue agent can't fill node-local storage.
+                        k8s.V1VolumeMount(
+                            name="tmp",
+                            mount_path="/tmp",
                         ),
                     ],
                 )
@@ -210,8 +275,49 @@ def _build_pod(agent_id: str, mcp_token: str):
                     name="agent-code",
                     config_map=k8s.V1ConfigMapVolumeSource(name=cm_name),
                 ),
+                k8s.V1Volume(
+                    name="tmp",
+                    empty_dir=k8s.V1EmptyDirVolumeSource(
+                        medium="Memory",       # tmpfs — never spills to disk
+                        size_limit="64Mi",
+                    ),
+                ),
             ],
         ),
+    )
+
+
+_DELETE_WAIT_TIMEOUT_S = float(os.environ.get("AGENT_DELETE_WAIT_TIMEOUT_S", "30"))
+_DELETE_WAIT_INTERVAL_S = float(os.environ.get("AGENT_DELETE_WAIT_INTERVAL_S", "0.25"))
+
+
+def _wait_until_absent(get_fn, name: str, *,
+                       timeout_s: float = _DELETE_WAIT_TIMEOUT_S,
+                       interval_s: float = _DELETE_WAIT_INTERVAL_S) -> None:
+    """Poll ``get_fn(name, namespace)`` until it returns 404.
+
+    Kubernetes ``delete_*`` calls are *non-blocking*: they return
+    success the moment the API server records the deletion, even
+    though the object stays in ``Terminating`` until graceful shutdown
+    completes. A subsequent ``create_*`` with the same name during
+    that window returns 409 AlreadyExists — which is exactly the bug
+    this helper exists to prevent.
+    """
+    import time as _time
+    from kubernetes.client.exceptions import ApiException  # type: ignore
+
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        try:
+            get_fn(name, _AGENT_NAMESPACE)
+        except ApiException as e:
+            if e.status == 404:
+                return
+            raise
+        _time.sleep(interval_s)
+    raise TimeoutError(
+        f"resource {name!r} still present in namespace "
+        f"{_AGENT_NAMESPACE!r} after {timeout_s:.0f}s — stuck Terminating?"
     )
 
 
@@ -229,8 +335,11 @@ async def spawn_agent_pod(*, agent_id: str,
     Returns the Pod name.
 
     Idempotent: if a Pod/ConfigMap with the same name already exists
-    (previous failed deploy, crash loop), they are deleted first so
-    the new Pod starts clean with fresh env/code.
+    (previous failed deploy, crash loop, or a Pod still in
+    ``Terminating`` from the last stop), they are force-deleted and
+    we wait for the API server to actually remove them before issuing
+    the new create. Without that wait, ``create_namespaced_pod``
+    returns 409 ``object is being deleted`` mid-shutdown.
 
     ``code_blob`` must be non-empty in k8s mode — there is no host
     bind-mount path to fall back on.  ``deploy_agent`` asserts this
@@ -250,16 +359,34 @@ async def spawn_agent_pod(*, agent_id: str,
     cm_name  = _configmap_name(agent_id)
 
     # ── idempotent cleanup ────────────────────────────────────────────
-    for resource, delete_fn, name in [
-        ("Pod",       core.delete_namespaced_pod,        pod_name),
-        ("ConfigMap", core.delete_namespaced_config_map, cm_name),
+    # Force-delete (grace_period_seconds=0) so we don't wait the full
+    # terminationGracePeriodSeconds on a stale Pod we're about to
+    # replace. Then poll get_* until 404 — see _wait_until_absent for
+    # why this can't be skipped.
+    for resource, delete_fn, get_fn, name in [
+        ("Pod",       core.delete_namespaced_pod,
+                      core.read_namespaced_pod,        pod_name),
+        ("ConfigMap", core.delete_namespaced_config_map,
+                      core.read_namespaced_config_map, cm_name),
     ]:
         try:
-            delete_fn(name, _AGENT_NAMESPACE)
-            log.info("spawn_agent_pod: removed stale %s %s", resource, name)
+            delete_fn(name, _AGENT_NAMESPACE, grace_period_seconds=0)
+            log.info("spawn_agent_pod: deleting stale %s %s", resource, name)
         except ApiException as e:
-            if e.status != 404:
-                log.warning("spawn_agent_pod: cleanup %s %s: %s", resource, name, e)
+            if e.status == 404:
+                continue
+            log.warning("spawn_agent_pod: cleanup %s %s: %s", resource, name, e)
+            # Even on a non-404 error, fall through to the wait — the
+            # delete may have been accepted before the response failed.
+        try:
+            _wait_until_absent(get_fn, name)
+            log.info("spawn_agent_pod: stale %s %s gone", resource, name)
+        except TimeoutError as e:
+            # Surface as ApiException so callers handle uniformly.
+            raise RuntimeError(
+                f"spawn_agent_pod: could not clean up stale {resource} "
+                f"{name!r}: {e}"
+            ) from e
 
     # ── create ConfigMap ──────────────────────────────────────────────
     core.create_namespaced_config_map(
@@ -271,7 +398,9 @@ async def spawn_agent_pod(*, agent_id: str,
     # ── create Pod ────────────────────────────────────────────────────
     pod = core.create_namespaced_pod(
         namespace=_AGENT_NAMESPACE,
-        body=_build_pod(agent_id, mcp_token),
+        body=_build_pod(agent_id, mcp_token,
+                        tenant_id=tenant_id,
+                        llm_api_key=llm_api_key),
     )
     log.info("spawn_agent_pod: Pod %s created (uid=%s)", pod_name, pod.metadata.uid)
     return pod_name

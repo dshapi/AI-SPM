@@ -1621,9 +1621,14 @@ async def bootstrap_integrations(
     seed_data = build_seed()
     ids: List[str] = []
     actor = _actor(claims)
+    # Track external_id → row.id so the post-pass can resolve cross-row
+    # references (e.g. int-022's default_llm_integration_id_external →
+    # int-017's actual UUID) without a second SELECT.
+    external_to_uuid: Dict[str, str] = {}
     for entry in seed_data:
         row = await _upsert_integration(db, entry)
         ids.append(entry["external_id"])
+        external_to_uuid[entry["external_id"]] = str(row.id)
         # Per-integration log entry so each bootstrap is auditable against
         # the integration it touched (IntegrationLog.integration_id is NOT NULL).
         await _write_log(
@@ -1632,6 +1637,44 @@ async def bootstrap_integrations(
             message=f"Bootstrapped via /integrations/bootstrap",
             detail={"external_id": entry["external_id"]},
         )
+
+    # ── Post-pass: resolve external_id cross-references in config ─────────
+    # int-022 (agent-runtime meta) seeds with
+    # ``config.default_llm_integration_id_external = "int-017"`` because
+    # the seed file can't know int-017's UUID until insert time. Walk the
+    # rendered seed once more, swap the `_external` hint for the real
+    # UUID under ``default_llm_integration_id``, and only touch rows that
+    # don't already have a UUID set (operator-edited values stick).
+    from sqlalchemy import select          # type: ignore
+    from spm.db.models import Integration  # type: ignore
+
+    for entry in seed_data:
+        cfg = entry.get("config") or {}
+        ext_ref = cfg.get("default_llm_integration_id_external")
+        if not ext_ref:
+            continue
+        target_uuid = external_to_uuid.get(ext_ref)
+        if target_uuid is None:
+            continue
+        # Reload the freshly-upserted row so we see operator-edited
+        # config (the upsert merges, doesn't overwrite arbitrary keys).
+        result = await db.execute(
+            select(Integration).where(Integration.external_id == entry["external_id"])
+        )
+        live = result.scalar_one_or_none()
+        if live is None:
+            continue
+        live_cfg = dict(live.config or {})
+        # Only set default_llm_integration_id if it isn't already a UUID
+        # the operator chose. The _external key stays as a hint of what
+        # the bootstrap default was.
+        if not live_cfg.get("default_llm_integration_id"):
+            live_cfg["default_llm_integration_id"] = target_uuid
+            live.config = live_cfg
+            await db.flush()
+            log.info("bootstrap: resolved %s.default_llm_integration_id → %s",
+                     entry["external_id"], target_uuid)
+
     await db.commit()
     log.info("bootstrap complete — upserted %d integrations by %s", len(ids), actor)
     return BootstrapResult(upserted=len(ids), external_ids=ids)

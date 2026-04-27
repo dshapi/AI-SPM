@@ -13,6 +13,21 @@ NERDCTL="nerdctl --namespace k8s.io"
 TARGET="${1:-}"   # optional: only build this image name
 FAILED=()
 BUILT=()
+SIGNED=()
+SIGN_FAILED=()
+
+# Optional registry push + Cosign signing.
+# Set both to enable the prod path:
+#   IMAGE_REGISTRY=registry.example.com/aispm
+#   COSIGN_KEY=$REPO_ROOT/deploy/cosign/aispm-images.key
+#   COSIGN_PASSWORD=...   (export inline if the key has a password)
+#
+# Behavior:
+#   - if IMAGE_REGISTRY unset → local-only build, no push, no sign (dev)
+#   - if IMAGE_REGISTRY set + COSIGN_KEY unset → push, no sign (staging)
+#   - if both set → push + sign (prod path required for verifyImages enforce)
+IMAGE_REGISTRY="${IMAGE_REGISTRY:-}"
+COSIGN_KEY="${COSIGN_KEY:-}"
 
 log()  { echo "$(date +%H:%M:%S) [INFO]  $*"; }
 err()  { echo "$(date +%H:%M:%S) [ERROR] $*" >&2; }
@@ -41,6 +56,29 @@ build() {
   else
     err "  ✗ $IMAGE FAILED"
     FAILED+=("$IMAGE")
+    return 0
+  fi
+
+  # ── push + sign (prod path) ─────────────────────────────────────────────
+  if [[ -n "$IMAGE_REGISTRY" ]]; then
+    local REMOTE="$IMAGE_REGISTRY/$IMAGE"
+    log "  pushing $IMAGE → $REMOTE"
+    $NERDCTL tag "$IMAGE" "$REMOTE" || { err "tag failed for $REMOTE"; return 0; }
+    if ! $NERDCTL push "$REMOTE"; then
+      err "push failed for $REMOTE"
+      return 0
+    fi
+
+    if [[ -n "$COSIGN_KEY" && -f "$COSIGN_KEY" ]]; then
+      log "  signing $REMOTE with $COSIGN_KEY"
+      if cosign sign --key "$COSIGN_KEY" --yes "$REMOTE"; then
+        SIGNED+=("$REMOTE")
+        log "  ✓ signed $REMOTE"
+      else
+        err "  ✗ sign failed for $REMOTE"
+        SIGN_FAILED+=("$REMOTE")
+      fi
+    fi
   fi
 }
 
@@ -78,6 +116,20 @@ build aispm-ui:latest                  ui/Dockerfile                    ui
 echo ""
 log "=== Build summary ==="
 log "Built  (${#BUILT[@]}): ${BUILT[*]:-none}"
+if [[ -n "$IMAGE_REGISTRY" ]]; then
+  log "Registry: $IMAGE_REGISTRY"
+  if [[ -n "$COSIGN_KEY" ]]; then
+    log "Signed (${#SIGNED[@]}): ${SIGNED[*]:-none}"
+    if [[ ${#SIGN_FAILED[@]} -gt 0 ]]; then
+      err "Sign failed (${#SIGN_FAILED[@]}):"
+      for f in "${SIGN_FAILED[@]}"; do err "  - $f"; done
+    fi
+  else
+    log "Signing: skipped (set COSIGN_KEY to enable)"
+  fi
+else
+  log "Push/sign: skipped (set IMAGE_REGISTRY to enable)"
+fi
 if [[ ${#FAILED[@]} -gt 0 ]]; then
   err "Failed (${#FAILED[@]}):"
   for f in "${FAILED[@]}"; do err "  - $f"; done

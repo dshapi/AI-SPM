@@ -1,7 +1,20 @@
 # deploy/helm/aispm/templates/istio-peerauthentication.yaml
-# STRICT mTLS for all pods in the aispm namespace.
-# Plaintext service-to-service traffic is rejected once Istio sidecars are injected.
-# Applied only when Istio CRDs exist (guarded by lookup).
+# PERMISSIVE mTLS for the aispm namespace.
+#
+# Why not STRICT (which the plan originally specified): aispm-agents
+# runs Ambient (no sidecar) so its ztunnel reaches sidecar
+# destinations in aispm via HBONE. The destination sidecar sees plain
+# TCP coming from its local ztunnel listener and STRICT rejects it
+# at L4. PERMISSIVE accepts both mTLS and plain at L4, while
+# sidecar↔sidecar within aispm continues to use mTLS automatically.
+#
+# The security envelope is still defended by:
+#   - NetworkPolicy default-deny + narrow egress allowlist (L3/L4)
+#   - Istio AuthorizationPolicy with the agent-runtime SA principal (L7)
+#   - HBONE itself, which carries SPIFFE identity from ztunnel
+#
+# When Istio CNI + waypoint proxies are installed for the aispm
+# services that ambient peers reach, this can return to STRICT.
 {{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
@@ -10,5 +23,5 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   mtls:
-    mode: STRICT
+    mode: {{ .Values.agentRuntime.mtlsMode | default "PERMISSIVE" }}
 {{- end }}
