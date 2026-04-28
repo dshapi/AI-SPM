@@ -24,9 +24,9 @@ Implement proper governance controls around AI usage.
  
 
 ## 📋 Table of Contents
-
+- [Quick how to deploy 101](#quick-how-to-deploy-101)
 - [Project Information](#ℹ️-project-information)
-- [Platform at a Glance](#platform-at-a-glance)
+- [Platform at a Glance](#-platform-at-a-glance)
 - [Features](#features)
   - [Security & Access Control](#security--access-control)
   - [LLM Integration & Gateway](#llm-integration--gateway)
@@ -52,6 +52,8 @@ Implement proper governance controls around AI usage.
 - [Architecture Overview](#architecture-overview)
 - [Contributing](#contributing)
 
+
+
 ## ℹ️ Project Information
 
 - **👤 Author:** Dany Shapiro
@@ -60,133 +62,40 @@ Implement proper governance controls around AI usage.
 - **📄 License:** Apache-2.0
 - **📂 Repository:** [https://github.com/dshapi/AI-SPM](https://github.com/dshapi/AI-SPM)
 
-## Features
+## Quick how to deploy 101
 
-### Agent runtime control plane
+Get Orbyx AI SPM running locally in 3 steps.
 
-AI-SPM hosts customer-uploaded AI agents in sandboxed containers and
-routes their I/O through the existing security pipeline. The full chat
-loop is live (Phase 4): **prompt-guard → policy-decider (with attached
-agent policies) → Kafka chat.in → agent runtime → web_fetch / LLM proxy
-→ Kafka chat.out → output-guard → SSE → UI**, with a per-agent
-**Activity** tab showing chat turns, `web_fetch` tool calls, and LLM
-calls (model + token counts) tailing live every 5 s.
+**Step 1 — Install OrbStack**
 
-See the [operator quickstart](docs/agents/operator-quickstart.md) for
-the end-to-end pipeline diagram, provider dispatch table, common
-gotchas, and env-tunable knobs. The
-[design spec](docs/superpowers/specs/2026-04-25-agent-runtime-control-plane-mcp-design.md)
-covers architecture and V2 roadmap.
+Download and install [OrbStack](https://orbstack.dev) — This the Bare Metal / Cloud Kubernetis  
 
-#### Deploying an agent
+**Step 2 — Run the bootstrap script**
 
-The fastest path is the UI:
+Clone the repo and run the one-liner bootstrap script — it handles everything (environment setup, API keys prompt, image build, and service startup):
 
-1. Open **Inventory → Agents → Register Asset**.
-2. Drop in a `.py` file from [`Example agents/`](Example%20agents/) —
-   pick the matching **Type** in the form. Each example targets a
-   different `agent_type` enum value:
+```bash
+git clone https://github.com/dshapi/AI-SPM.git
+cd AI-SPM
+bash deploy/scripts/bootstrap-cluster.sh
+```
 
-   | File                                                  | Pick this Type      | Demonstrates |
-   |-------------------------------------------------------|---------------------|--------------|
-   | [`custom_agent.py`](Example%20agents/custom_agent.py) | `custom`            | Bare-SDK happy path with `aispm.chat.history()` conversation memory and a strong web-search prompt. **Easiest first deploy.** |
-   | [`langchain_agent.py`](Example%20agents/langchain_agent.py)         | `langchain`         | LangChain `AgentExecutor` + `@tool` calling our MCP / LLM proxies (requires LangChain in the runtime image). |
-   | [`llamaindex_agent.py`](Example%20agents/llamaindex_agent.py)       | `llamaindex`        | LlamaIndex chat-engine routed through `aispm.llm`, with a hand-rolled retrieval fallback when the package isn't installed. |
-   | [`autogpt_agent.py`](Example%20agents/autogpt_agent.py)             | `autogpt`           | Self-prompting plan → execute → reflect loop, capped at 3 hops. |
-   | [`openai_assistant_agent.py`](Example%20agents/openai_assistant_agent.py) | `openai_assistant`  | OpenAI Assistants-style request shape (system + tools), no framework. |
+The script will guide you through entering your API keys and then bring the full platform up automatically.
 
-3. Click **Register & Deploy**.
-4. Wait for runtime state to flip from **starting** to **running**
-   (~5–15 s on first deploy).
-5. Click **Open Chat** in the right-side panel and send a message. For
-   the live event timeline (chat turns + tool/LLM calls), click
-   **View Detail** in the same panel → **Activity** tab.
+**Step 3 — Open the platform**
 
-The minimum platform setup needed for chat to actually round-trip:
+Once the bootstrap completes, navigate to:
 
-- An LLM provider integration configured under
-  **Integrations → AI Providers** (Anthropic, Ollama, etc.) with a
-  working API key on it.
-- The **AI-SPM Agent Runtime Control Plane (MCP)** integration
-  configured (also under AI Providers): pick that provider as
-  **Default LLM** and your Tavily integration as **Tavily Integration**.
-  Both fields are dropdowns of existing integrations.
+| What | URL |
+|---|---|
+| **Chat UI** | http://localhost:3000 |
+| **Admin Portal** | http://localhost:3001/admin |
 
-Once the **Test** button on the agent-runtime row turns green, any
-agent you upload can chat.
+Click **Sign In** on either page — a demo JWT is minted automatically, no account needed.
 
-The same flow is also scriptable via `POST /api/spm/agents` with
-`deploy_after=true`; see
-[`docs/agents/operator-quickstart.md`](docs/agents/operator-quickstart.md)
-for the curl recipes.
+**That's it!** You're up and running.
 
-#### Adding a new integration (LLM provider, Tavily, etc.)
-
-All upstream resources — Anthropic, OpenAI, Bedrock, Vertex, Ollama,
-Groq, Tavily, Postgres, Kafka, Slack, etc. — are added the same way:
-
-1. Open **Integrations** in the admin UI (left nav under **Discover**).
-2. Click **+ Add Integration** at the top right of the page header.
-3. The vendor picker groups all 22 connector types by category
-   (AI Providers, Data / Storage, Messaging, Auth, …). Search by name
-   or scroll to the section. Click the vendor's tile.
-4. The form switches to the vendor-specific schema. Required fields
-   are marked with a red asterisk; defaults are pre-filled where the
-   connector declares one (e.g. Anthropic's base URL is
-   `https://api.anthropic.com`, Ollama defaults the port to `11434`).
-   Fill in the credentials field (API Key / IAM role / service
-   account) and any vendor knobs (default model, region, etc.).
-5. Click **Create**. The row appears in the integration list. Click
-   **Test** on the new row to probe the upstream — green means the
-   credentials work and the platform can reach the service.
-
-#### Adding an LLM specifically — minimum setup
-
-Most operators want to bring their own LLM provider for the agent
-runtime. The minimum path is:
-
-1. **Add the LLM provider** as in the section above
-   (Integrations → + Add → e.g. Anthropic). Fill in the API key.
-   Click **Test** — turns green.
-2. **Point the agent-runtime control plane at it.** Open the
-   **AI-SPM Agent Runtime Control Plane (MCP)** integration → click
-   **Configure** → **Default LLM** dropdown → pick the integration
-   you just created → **Save**. No restart needed; the proxy
-   resolves the upstream on every request.
-3. **Switch providers anytime** by changing that same **Default LLM**
-   dropdown — Anthropic ↔ Ollama ↔ etc. The proxy translates request
-   and response shape per provider, so your agent code stays
-   unchanged regardless of which one you pick. See the provider
-   dispatch table in
-   [`docs/agents/operator-quickstart.md`](docs/agents/operator-quickstart.md)
-   for what's translated where.
-
-Adding a new **model** to an existing provider doesn't need a new
-integration — set it on the provider integration's *Default Model*
-field (e.g. `claude-sonnet-4-6` on Anthropic, `llama3.2` on Ollama).
-The platform records it on the row's `config.model` and the LLM proxy
-sends it as the upstream `model` parameter.
-
-#### Adding a new asset type (model registry entry, dataset, prompt, …)
-
-The **Inventory** page (left nav under **Discover**) is where
-non-integration assets live: model registry rows, datasets, prompts,
-evals. Each has its own tab at the top of the page.
-
-- **Models** tab: click **+ Register Asset** to add a model registry
-  entry (provider, version, owner, risk metadata). Models are also
-  populated automatically by the SPM API's `/spm/v1/models/register`
-  endpoint when a service self-registers, so manual rows are usually
-  only for legacy or third-party models.
-- **Agents** tab: same flow as the deploy section above — file upload,
-  not just metadata. Agent rows are runtime-spawnable, the others
-  aren't.
-
-For programmatic registration of any asset, see
-[`docs/superpowers/specs/`](docs/superpowers/specs/) for the per-asset
-schemas and
-[`docs/agents/operator-quickstart.md`](docs/agents/operator-quickstart.md)
-for the agent-specific REST surface.
+---
 
 ## Platform at a Glance
 
