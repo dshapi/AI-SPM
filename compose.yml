@@ -1,6 +1,10 @@
 
 x-common-env: &common-env
-  KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+  # All 3 brokers listed for client resilience — Kafka auto-discovers the rest
+  # after connecting to any one, but listing all three means no single bootstrap SPOF.
+  KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+  # Read by startup_orchestrator when creating topics (app.py: KAFKA_REPLICATION_FACTOR)
+  KAFKA_REPLICATION_FACTOR: "3"
   REDIS_HOST: redis
   REDIS_PORT: 6379
   OPA_URL: http://opa:8181
@@ -48,39 +52,42 @@ x-depends-platform: &depends-platform
 services:
   # ── Infrastructure ──────────────────────────────────────────────────────────
 
-  kafka-controller:
-    image: confluentinc/cp-kafka:7.6.1
-    platform: linux/arm64/v8
-    container_name: cpm-kafka-controller
-    hostname: kafka-controller
-    environment:
-      KAFKA_NODE_ID: 1
-      KAFKA_PROCESS_ROLES: controller
-      KAFKA_LISTENERS: CONTROLLER://:9093
-      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-controller:9093
-      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+  # ── Kafka — 3-node KRaft HA ensemble ────────────────────────────────────────
+  # Each node runs both broker and controller roles (KRaft combined mode).
+  # Quorum voters are all three nodes, so the cluster tolerates one node
+  # failure without losing leadership.
+  #
+  # Replication / durability settings:
+  #   RF=3, min.insync.replicas=2 — a write is only acked once 2/3 replicas
+  #   have confirmed it, so a single broker failure never causes data loss.
+  #
+  # Bootstrap: KAFKA_BOOTSTRAP_SERVERS lists all three to avoid a single
+  # bootstrap SPOF. Kafka clients auto-discover the full broker list once
+  # connected to any one broker.
+  #
+  # Backward compat: kafka-1 has hostname alias `kafka-broker` so any
+  # container that still uses the old single-broker hostname keeps working.
+  # All new code should use the three-entry bootstrap string.
 
-  kafka-broker:
+  kafka-1:
     image: confluentinc/cp-kafka:7.6.1
     platform: linux/arm64/v8
-    container_name: cpm-kafka-broker
-    hostname: kafka-broker
-    depends_on: [kafka-controller]
+    container_name: cpm-kafka-1
+    hostname: kafka-1
     ports: ["19092:19092"]
     environment:
-      KAFKA_NODE_ID: 2
-      KAFKA_PROCESS_ROLES: broker
-      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:19092
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-broker:9092,EXTERNAL://localhost:19092
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,EXTERNAL://:19092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-1:9092,EXTERNAL://localhost:19092
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-controller:9093
-      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
-      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_NUM_PARTITIONS: 3
       CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
@@ -89,12 +96,65 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    # Phase 1 — agent runtime control plane. Customer agent containers
-    # run on the internal-only `agent-net` and need to consume their
-    # per-agent chat.in / chat.out topics directly from this broker.
-    # Dual-home so name resolution of `kafka-broker` works from both
-    # the default network (existing services) and agent-net.
-    networks: [default, agent-net]
+    # Dual-homed: default network (all platform services) + agent-net
+    # (customer agent containers that consume per-agent topics).
+    networks:
+      default:
+        aliases:
+          # Legacy alias — removes need to update every service that still
+          # resolves the old single-broker hostname.
+          - kafka-broker
+      agent-net: {}
+
+  kafka-2:
+    image: confluentinc/cp-kafka:7.6.1
+    platform: linux/arm64/v8
+    container_name: cpm-kafka-2
+    hostname: kafka-2
+    depends_on:
+      kafka-1:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 2
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-2:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
+
+  kafka-3:
+    image: confluentinc/cp-kafka:7.6.1
+    platform: linux/arm64/v8
+    container_name: cpm-kafka-3
+    hostname: kafka-3
+    depends_on:
+      kafka-1:
+        condition: service_started
+    environment:
+      KAFKA_NODE_ID: 3
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-3:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka-1:9093,2@kafka-2:9093,3@kafka-3:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+      KAFKA_MIN_INSYNC_REPLICAS: 2
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: q1Enf0NkTvaBgXGsKZoeRA
 
   redis:
     image: redis:7-alpine
@@ -154,7 +214,7 @@ services:
     volumes:
       - ./keys:/keys-rw  # read-write so orchestrator can generate keys
     depends_on:
-      kafka-broker:
+      kafka-1:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -409,6 +469,19 @@ services:
     container_name: cpm-flink-taskmanager
     command: taskmanager
     # Slot count, state backend, JM address — all in flink-conf.yaml.
+    # CEP threshold env vars are read by state.py and detection.py at module
+    # load time inside the TaskManager process (pemja in-process execution).
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
+      # CEP window sizes — how far back each sliding window looks
+      CEP_SHORT_WINDOW_SEC:       ${CEP_SHORT_WINDOW_SEC:-120}
+      CEP_LONG_WINDOW_SEC:        ${CEP_LONG_WINDOW_SEC:-3600}
+      # CEP alert thresholds — how many events trigger each alert level
+      CEP_SHORT_THRESHOLD:        ${CEP_SHORT_THRESHOLD:-5}
+      CEP_LONG_THRESHOLD:         ${CEP_LONG_THRESHOLD:-15}
+      # Drift + session config
+      CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+      CEP_SESSION_HISTORY_SIZE:   ${CEP_SESSION_HISTORY_SIZE:-10}
     volumes:
       - ./flink/flink-conf.yaml:/opt/flink/conf/flink-conf.yaml:ro
       # Bind-mount user code over the COPY-ed version so dev iteration
@@ -436,7 +509,7 @@ services:
       - ./platform_shared:/opt/flink-pyjob/platform_shared:ro
     environment:
       FLINK_JM_URL: http://flink-jobmanager:8081
-      KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       CEP_TENANT_IDS: ${CEP_TENANT_IDS:-t1}
       # Sink topic suffix — parameterized so a future shadow run (for
       # example, before rolling out a CEP rule rewrite) can point this at
@@ -444,10 +517,19 @@ services:
       # audit sink.
       CEP_AUDIT_TOPIC_SUFFIX: ${CEP_AUDIT_TOPIC_SUFFIX:-audit}
       CEP_PARALLELISM: ${CEP_PARALLELISM:-2}
+      # CEP thresholds — forwarded to the running job via the submit script.
+      # Must match what flink-taskmanager sees so shadow-run comparisons are
+      # apples-to-apples.
+      CEP_SHORT_WINDOW_SEC:       ${CEP_SHORT_WINDOW_SEC:-120}
+      CEP_LONG_WINDOW_SEC:        ${CEP_LONG_WINDOW_SEC:-3600}
+      CEP_SHORT_THRESHOLD:        ${CEP_SHORT_THRESHOLD:-5}
+      CEP_LONG_THRESHOLD:         ${CEP_LONG_THRESHOLD:-15}
+      CEP_INTENT_DRIFT_THRESHOLD: ${CEP_INTENT_DRIFT_THRESHOLD:-0.65}
+      CEP_SESSION_HISTORY_SIZE:   ${CEP_SESSION_HISTORY_SIZE:-10}
     depends_on:
       flink-jobmanager:
         condition: service_started
-      kafka-broker:
+      kafka-1:
         condition: service_healthy
     # `restart: no` so we don't re-submit on success — the submitter exits
     # cleanly once `flink run --detached` returns. The job itself runs in
@@ -619,7 +701,7 @@ services:
     environment:
       DB_PATH: /data/agent_orchestrator.db
       LOG_LEVEL: INFO
-      KAFKA_BOOTSTRAP_SERVERS: kafka-broker:9092
+      KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     volumes:
       - ./DataVolumes/agent-orchestrator:/data
@@ -666,7 +748,7 @@ services:
       retries: 5
       start_period: 20s
     depends_on:
-      kafka-broker:
+      kafka-1:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -720,7 +802,7 @@ services:
     networks: [default, agent-net]
     depends_on:
       spm-db: { condition: service_healthy }
-      kafka-broker: { condition: service_healthy }
+      kafka-1: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
       interval: 10s

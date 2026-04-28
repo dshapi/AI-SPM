@@ -1,6 +1,19 @@
 # deploy/helm/aispm/templates/kafka-statefulset.yaml
 # KRaft combined mode: each pod runs both controller and broker roles.
 # Replaces the docker-compose split of kafka-controller + kafka-broker.
+#
+# HA configuration (replicas: 3):
+#   - All three pods participate in the KRaft controller quorum, so the
+#     cluster tolerates one node failure without losing leadership.
+#   - Replication factor = 3, min.insync.replicas = 2: a write is only
+#     acked once 2/3 replicas confirm it — single-broker failure never
+#     causes data loss or producer errors.
+#
+# Dynamic KAFKA_NODE_ID:
+#   StatefulSet pod names are kafka-0, kafka-1, kafka-2. We derive the
+#   node ID from the pod ordinal at startup via a shell command that strips
+#   the prefix from MY_POD_NAME (e.g. "kafka-2" → "2"). This avoids a
+#   separate init container and keeps the spec concise.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -20,6 +33,15 @@ spec:
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}:{{ .Values.kafka.tag }}
+          # Derive KAFKA_NODE_ID from the pod ordinal before starting Kafka.
+          # MY_POD_NAME is e.g. "kafka-2"; ${MY_POD_NAME##*-} strips everything
+          # up to and including the last hyphen, leaving just "2".
+          command:
+            - sh
+            - -c
+            - |
+              export KAFKA_NODE_ID=${MY_POD_NAME##*-}
+              exec /etc/confluent/docker/run
           ports:
             - containerPort: 9092   # PLAINTEXT (internal broker)
             - containerPort: 9093   # CONTROLLER
@@ -28,8 +50,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: KAFKA_NODE_ID
-              value: "0"
+            # KAFKA_NODE_ID is set dynamically in the command above.
             - name: KAFKA_PROCESS_ROLES
               value: "broker,controller"
             - name: KAFKA_LISTENERS
@@ -40,16 +61,24 @@ spec:
               value: PLAINTEXT
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: CONTROLLER
+            # All three pods listed so any pod can bootstrap the quorum.
+            # Ordinals 0/1/2 map to kafka-0/1/2 via the headless service.
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: "0@kafka-0.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093"
+              value: "0@kafka-0.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093,1@kafka-1.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093,2@kafka-2.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093"
             - name: KAFKA_ADVERTISED_LISTENERS
               value: "PLAINTEXT://$(MY_POD_NAME).kafka.{{ .Values.global.namespace }}.svc.cluster.local:9092"
+            # ── Replication & durability ────────────────────────────────────
+            # RF=3 so internal topics (offsets, tx state) are durable across
+            # a single-broker failure. min ISR=2 keeps producers from
+            # silently losing data while a broker is temporarily down.
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
             - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
-              value: "1"
+              value: "3"
             - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
-              value: "1"
+              value: "2"
+            - name: KAFKA_MIN_INSYNC_REPLICAS
+              value: "2"
             - name: KAFKA_NUM_PARTITIONS
               value: "3"
             - name: CLUSTER_ID

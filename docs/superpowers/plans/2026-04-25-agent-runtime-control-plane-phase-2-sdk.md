@@ -566,7 +566,7 @@ docker build -f agent_runtime/Dockerfile -t aispm-agent-runtime:latest .
 
 `tests/e2e/test_aispm_sdk_smoke.py` — uploads the spec §8 hello-world
 example, deploys it, sends a chat message, asserts a reply lands on
-`chat.out` within 30s. Uses the real stack via `./start.sh`.
+`chat.out` within 30s. Uses the real stack via `docker compose up -d`.
 
 ```python
 # fixture: spec §8 bare-minimum agent

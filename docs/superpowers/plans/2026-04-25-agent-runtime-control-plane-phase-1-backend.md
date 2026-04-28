@@ -2160,7 +2160,7 @@ def test_upload_and_list_agent(admin_token):
 - [ ] **Step 3: Bring stack up**
 
 ```
-./start.sh
+docker compose up -d
 ```
 
 Wait ~30s for everything to settle.

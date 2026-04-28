@@ -1,4 +1,32 @@
 # deploy/helm/aispm/templates/flink-jobmanager-statefulset.yaml
+#
+# Two replicas for Kubernetes-native HA:
+#   - Both pods start; leader election happens via Kubernetes ConfigMaps/Leases
+#     (scoped by kubernetes.cluster-id in flink-conf.yaml).
+#   - The active leader dispatches jobs to TaskManagers. The standby monitors
+#     the ConfigMap lease and takes over immediately if the leader pod dies.
+#   - TaskManagers use the HA ConfigMap to discover the current leader address;
+#     they do NOT use the static jobmanager.rpc.address from the config file.
+#
+# Per-pod RPC address (init container):
+#   The flink-conf ConfigMap is shared across both pods and contains a static
+#   jobmanager.rpc.address (flink-jobmanager service DNS). Each JM pod must
+#   advertise its OWN address for RPC so TaskManagers can connect back to the
+#   right pod. The prep-flink-conf init container:
+#     1. Copies the ConfigMap to a writable emptyDir (/flink-conf-rw).
+#     2. Replaces jobmanager.rpc.address with the pod's FQDN via `hostname -f`
+#        (e.g. flink-jobmanager-0.flink-jobmanager.aispm.svc.cluster.local).
+#   The main container mounts the emptyDir copy, not the raw ConfigMap.
+#
+# Shared PVCs:
+#   flink-ha (HA metadata / blob store) and flink-checkpoints are ReadWriteMany
+#   so both JM pods can read/write them concurrently. See flink-pvc.yaml.
+#
+# CEP job submission after scale-to-2:
+#   flink-pyjob-submitter-job.yaml posts to the flink-jobmanager Service which
+#   load-balances to both pods. Both pods expose the REST endpoint; the standby
+#   forwards job submissions to the active leader transparently. No changes to
+#   the submitter are needed.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -6,7 +34,7 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   serviceName: flink-jobmanager
-  replicas: 1
+  replicas: {{ .Values.flink.jobmanager.replicas | default 2 }}
   selector:
     matchLabels: { app: flink-jobmanager }
   template:
@@ -14,6 +42,34 @@ spec:
       labels: { app: flink-jobmanager }
     spec:
       serviceAccountName: flink
+      # ── Init container: inject per-pod jobmanager.rpc.address ─────────────
+      # The flink-conf ConfigMap is read-only; Flink's docker-entrypoint.sh
+      # cannot append to it. We copy it to an emptyDir and replace the static
+      # service hostname with the pod's own FQDN so each JM advertises the
+      # correct RPC endpoint for TaskManager connections.
+      initContainers:
+        - name: prep-flink-conf
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              POD_FQDN=$(hostname -f)
+              echo "Injecting jobmanager.rpc.address: ${POD_FQDN}"
+              sed "s|^jobmanager\.rpc\.address:.*|jobmanager.rpc.address: ${POD_FQDN}|" \
+                /flink-conf-base/flink-conf.yaml > /flink-conf-rw/flink-conf.yaml
+          volumeMounts:
+            - name: flink-conf
+              mountPath: /flink-conf-base
+            - name: flink-conf-rw
+              mountPath: /flink-conf-rw
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
       containers:
         - name: flink-jobmanager
           image: {{ include "aispm.image" .Values.images.flinkJob }}
@@ -22,6 +78,7 @@ spec:
           ports:
             - containerPort: 8081  # REST / UI
             - containerPort: 6123  # RPC
+            - containerPort: 6124  # BLOB server (pinned port, see flink-conf.yaml)
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
               valueFrom:
@@ -34,12 +91,21 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          resources:
+            requests:
+              cpu: {{ .Values.flink.jobmanager.resources.requests.cpu | quote }}
+              memory: {{ .Values.flink.jobmanager.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.flink.jobmanager.resources.limits.cpu | quote }}
+              memory: {{ .Values.flink.jobmanager.resources.limits.memory | quote }}
           readinessProbe:
             httpGet: { path: /overview, port: 8081 }
             initialDelaySeconds: 20
             periodSeconds: 10
           volumeMounts:
-            - name: flink-conf
+            # Mount the writable copy produced by prep-flink-conf (contains
+            # the per-pod jobmanager.rpc.address), NOT the raw ConfigMap.
+            - name: flink-conf-rw
               mountPath: /opt/flink/conf/flink-conf.yaml
               subPath: flink-conf.yaml
             - name: checkpoints
@@ -49,9 +115,13 @@ spec:
             - name: ha
               mountPath: /flink/ha
       volumes:
+        # Base ConfigMap — read-only source for the init container.
         - name: flink-conf
           configMap:
             name: flink-conf
+        # Writable copy with per-pod jobmanager.rpc.address injected.
+        - name: flink-conf-rw
+          emptyDir: {}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: flink-checkpoints

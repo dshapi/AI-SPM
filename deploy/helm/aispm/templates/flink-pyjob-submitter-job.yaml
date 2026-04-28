@@ -38,3 +38,35 @@ spec:
               value: "audit"
             - name: CEP_PARALLELISM
               value: "2"
+            # CEP rule thresholds — forwarded to the Flink job via -D java.opts
+            # so the running operators see the same values as the TM container.
+            - name: CEP_SHORT_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_WINDOW_SEC
+            - name: CEP_LONG_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_WINDOW_SEC
+            - name: CEP_SHORT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_THRESHOLD
+            - name: CEP_LONG_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_THRESHOLD
+            - name: CEP_INTENT_DRIFT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_INTENT_DRIFT_THRESHOLD
+            - name: CEP_SESSION_HISTORY_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SESSION_HISTORY_SIZE

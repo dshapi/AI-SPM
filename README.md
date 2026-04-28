@@ -608,24 +608,24 @@ A passing run ends with:
 
 ## Stopping & Cleaning Up
 
-**Stop all services including auth (keeps data):**
-
-```bash
-./stop.sh
-# or
-docker-compose -f compose.yml -f compose.auth.yml down
-```
-
-**Start everything back up:**
-
-```bash
-./start.sh
-```
-
-**Stop without the auth overlay:**
+**Stop all services (keeps data):**
 
 ```bash
 docker compose down
+# with auth overlay:
+docker compose -f compose.yml -f compose.auth.yml down
+```
+
+**Start local Docker Compose stack:**
+
+```bash
+docker compose up -d
+```
+
+**Bootstrap or re-deploy the full K8s/Helm stack:**
+
+```bash
+bash deploy/scripts/bootstrap-cluster.sh
 ```
 
 **Stop and wipe all data (volumes, generated keys):**
@@ -634,7 +634,7 @@ docker compose down
 make clean
 ```
 
-> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next `make up` (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
+> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next boot (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
 
 ---
 
@@ -969,24 +969,24 @@ A passing run ends with:
 
 ## Stopping & Cleaning Up
 
-**Stop all services including auth (keeps data):**
-
-```bash
-./stop.sh
-# or
-docker-compose -f compose.yml -f compose.auth.yml down
-```
-
-**Start everything back up:**
-
-```bash
-./start.sh
-```
-
-**Stop without the auth overlay:**
+**Stop all services (keeps data):**
 
 ```bash
 docker compose down
+# with auth overlay:
+docker compose -f compose.yml -f compose.auth.yml down
+```
+
+**Start local Docker Compose stack:**
+
+```bash
+docker compose up -d
+```
+
+**Bootstrap or re-deploy the full K8s/Helm stack:**
+
+```bash
+bash deploy/scripts/bootstrap-cluster.sh
 ```
 
 **Stop and wipe all data (volumes, generated keys):**
@@ -995,7 +995,7 @@ docker compose down
 make clean
 ```
 
-> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next `make up` (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
+> ⚠️ `make clean` deletes the RSA keys in `./keys/` and the Keycloak realm volume (`keycloak-data`). New keys are auto-generated on next boot (invalidates existing JWTs). You will also need to redo the [first-time Keycloak setup](#first-time-keycloak-setup).
 
 ---
 
@@ -1659,15 +1659,18 @@ sudo sh -c 'echo "127.0.0.1  keycloak.local auth.local aispm.local" >> /etc/host
 ### Start / Stop
 
 ```bash
-./start.sh   # full stack including auth
-./stop.sh    # tear everything down (data preserved in ./DataVolumes/)
+# Start the full stack with auth overlay:
+docker compose -f compose.yml -f compose.auth.yml up -d
+
+# Stop (data preserved in ./DataVolumes/):
+docker compose -f compose.yml -f compose.auth.yml down
 ```
 
 ### First-time Keycloak setup
 
 Only required once — Keycloak persists the realm to `./DataVolumes/keycloak/h2/`.
 
-1. `./start.sh` then open **http://keycloak.local:8180/admin/** (`admin` / `admin`)
+1. Start the stack (see above) then open **http://keycloak.local:8180/admin/** (`admin` / `admin`)
 2. Top-left dropdown → **Create realm** → name: `aispm` → **Create**
 3. **Realm Settings** → **General** tab → **Require SSL** → set to **none** → **Save**
    - Required for local-dev HTTP. If left at the default (`external`), Keycloak rejects every non-localhost request with the page "We are sorry... HTTPS required" and traefik-forward-auth's token exchange silently fails.

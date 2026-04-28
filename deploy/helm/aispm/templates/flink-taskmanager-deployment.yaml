@@ -20,6 +20,54 @@ spec:
           image: {{ include "aispm.image" .Values.images.flinkJob }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           args: ["taskmanager"]
+          env:
+            # Kafka bootstrap — needed by Python CEP operators when building
+            # KafkaSource / KafkaSink inside the TaskManager process.
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: KAFKA_BOOTSTRAP_SERVERS
+            # CEP thresholds — read by state.py and detection.py at module load.
+            # The TaskManager runs Python user code in-process (pemja), so these
+            # env vars must live on the TM container, not only on the submitter.
+            - name: CEP_SHORT_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_WINDOW_SEC
+            - name: CEP_LONG_WINDOW_SEC
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_WINDOW_SEC
+            - name: CEP_SHORT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SHORT_THRESHOLD
+            - name: CEP_LONG_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_LONG_THRESHOLD
+            - name: CEP_INTENT_DRIFT_THRESHOLD
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_INTENT_DRIFT_THRESHOLD
+            - name: CEP_SESSION_HISTORY_SIZE
+              valueFrom:
+                configMapKeyRef:
+                  name: platform-env
+                  key: CEP_SESSION_HISTORY_SIZE
+          resources:
+            requests:
+              cpu: {{ .Values.flink.taskmanager.resources.requests.cpu | quote }}
+              memory: {{ .Values.flink.taskmanager.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.flink.taskmanager.resources.limits.cpu | quote }}
+              memory: {{ .Values.flink.taskmanager.resources.limits.memory | quote }}
           volumeMounts:
             - name: flink-conf
               mountPath: /opt/flink/conf/flink-conf.yaml

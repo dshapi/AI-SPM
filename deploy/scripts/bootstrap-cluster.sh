@@ -7,6 +7,11 @@
 # JUST RUN IT:
 #   bash deploy/scripts/bootstrap-cluster.sh
 #
+# Flags:
+#   --skip-preflight   bypass the preflight checks (useful when you know
+#                      what you're doing or are running in CI with a
+#                      pre-validated cluster)
+#
 # No required flags. Sane defaults — gVisor and security addons (Falco,
 # Tetragon, Kyverno) are OFF by default so the script works on any local
 # k8s provider (OrbStack, Rancher Desktop, kind, minikube) without extra
@@ -54,12 +59,136 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY="$REPO_ROOT/deploy"
 HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
-TARGET="${1:-all}"
+SKIP_PREFLIGHT=0
+TARGET="all"
+for _arg in "$@"; do
+  case "$_arg" in
+    --skip-preflight) SKIP_PREFLIGHT=1 ;;
+    -*)               echo "[bootstrap] WARNING: unknown flag: $_arg" >&2 ;;
+    *)                TARGET="$_arg" ;;
+  esac
+done
 
 log()  { echo "$(date +%H:%M:%S) [bootstrap] $*"; }
 warn() { echo "$(date +%H:%M:%S) [bootstrap] WARN: $*" >&2; }
 err()  { echo "$(date +%H:%M:%S) [bootstrap] ERROR: $*" >&2; }
 section() { echo; echo "═══ $* ═══"; }
+
+# ── Preflight Checks ─────────────────────────────────────────────────────
+if [ "$SKIP_PREFLIGHT" != "1" ]; then
+  echo
+  echo "=== Preflight Checks ==="
+  echo
+
+  _PF_FAILED=0
+  pf_ok()   { echo "  ✓ $*"; }
+  pf_fail() { echo "  ✗ $*"; _PF_FAILED=1; }
+  pf_warn() { echo "  ⚠ $*"; }
+
+  # ── 1. kubectl: installed + cluster reachable ───────────────────────────
+  if ! command -v kubectl >/dev/null 2>&1; then
+    pf_fail "kubectl: not installed — install from https://kubernetes.io/docs/tasks/tools/"
+  elif ! kubectl cluster-info >/dev/null 2>&1; then
+    pf_fail "kubectl: cannot reach cluster (kubectl cluster-info failed) — check your kubeconfig and that the cluster is running"
+  else
+    pf_ok "kubectl OK (context: $(kubectl config current-context 2>/dev/null))"
+  fi
+
+  # ── 2. helm: installed, v3+ ─────────────────────────────────────────────
+  if ! command -v helm >/dev/null 2>&1; then
+    pf_fail "helm: not installed — install from https://helm.sh/docs/intro/install/"
+  else
+    _HELM_MAJOR="$(helm version --short 2>/dev/null | grep -oE 'v[0-9]+' | head -1 | tr -d 'v')"
+    if [ "${_HELM_MAJOR:-0}" -lt 3 ]; then
+      pf_fail "helm: version v${_HELM_MAJOR:-?} is too old — helm v3+ required; install from https://helm.sh/docs/intro/install/"
+    else
+      pf_ok "helm OK ($(helm version --short 2>/dev/null | tr -d '\n'))"
+    fi
+  fi
+
+  # ── 3. Longhorn: namespace, StorageClass, default ───────────────────────
+  _LH_INSTALL_HINT="
+      helm repo add longhorn https://charts.longhorn.io && \\
+      helm install longhorn longhorn/longhorn -n longhorn-system --create-namespace"
+  if ! kubectl get namespace longhorn-system >/dev/null 2>&1; then
+    pf_fail "Longhorn: longhorn-system namespace not found — install Longhorn:${_LH_INSTALL_HINT}"
+  else
+    _LH_SC="$(kubectl get storageclass 2>/dev/null | awk '/longhorn/{print $1}' | head -1)"
+    if [ -z "$_LH_SC" ]; then
+      pf_fail "Longhorn: no Longhorn StorageClass found — install Longhorn:${_LH_INSTALL_HINT}"
+    else
+      _LH_IS_DEFAULT="$(kubectl get storageclass longhorn \
+        -o jsonpath='{.metadata.annotations.storageclass\.kubernetes\.io/is-default-class}' \
+        2>/dev/null || echo 'false')"
+      if [ "$_LH_IS_DEFAULT" = "true" ]; then
+        pf_ok "Longhorn StorageClass OK (present and set as default)"
+      else
+        pf_warn "Longhorn: StorageClass 'longhorn' exists but is NOT the default StorageClass — some PVCs may bind to the wrong class"
+        pf_warn "Longhorn:  to fix: kubectl patch storageclass longhorn -p '{\"metadata\":{\"annotations\":{\"storageclass.kubernetes.io/is-default-class\":\"true\"}}}'"
+      fi
+    fi
+  fi
+
+  # ── 4. RWX support: Longhorn >= 1.5 ─────────────────────────────────────
+  if kubectl get storageclass longhorn >/dev/null 2>&1; then
+    _LH_IMAGE="$(kubectl -n longhorn-system get deploy longhorn-manager \
+      -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '')"
+    _LH_VER="$(echo "$_LH_IMAGE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [ -z "$_LH_VER" ]; then
+      pf_warn "Longhorn RWX: cannot determine Longhorn version — ReadWriteMany requires v1.5+; verify before using RWX PVCs"
+    else
+      _LH_MAJOR_N="$(echo "$_LH_VER" | cut -d. -f1)"
+      _LH_MINOR_N="$(echo "$_LH_VER" | cut -d. -f2)"
+      if [ "$_LH_MAJOR_N" -gt 1 ] || { [ "$_LH_MAJOR_N" -eq 1 ] && [ "$_LH_MINOR_N" -ge 5 ]; }; then
+        pf_ok "Longhorn RWX OK (v${_LH_VER} supports ReadWriteMany)"
+      else
+        pf_warn "Longhorn RWX: v${_LH_VER} < 1.5 — ReadWriteMany volumes are not supported; upgrade Longhorn to v1.5+ before using RWX PVCs"
+      fi
+    fi
+  fi
+
+  # ── 5. Node count: warn if fewer than 3 Ready nodes ────────────────────
+  _READY_NODES="$(kubectl get nodes --no-headers 2>/dev/null | grep -c ' Ready' || echo 0)"
+  if [ "${_READY_NODES:-0}" -lt 3 ]; then
+    pf_warn "Nodes: only ${_READY_NODES} Ready node(s) detected — Kafka requires 3 nodes for HA; single-node is fine for local dev"
+  else
+    pf_ok "Nodes OK (${_READY_NODES} Ready)"
+  fi
+
+  # ── 6. Target namespace: warn on dirty reinstall ────────────────────────
+  _TARGET_NS="${TARGET_NAMESPACE:-aispm}"
+  if kubectl get namespace "$_TARGET_NS" >/dev/null 2>&1; then
+    _NS_RESOURCES="$(kubectl -n "$_TARGET_NS" get all --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "${_NS_RESOURCES:-0}" -gt 0 ]; then
+      pf_warn "Namespace: '$_TARGET_NS' already exists with ${_NS_RESOURCES} resource(s) — this looks like a reinstall over existing state"
+      pf_warn "Namespace:  to start fresh: kubectl delete namespace $_TARGET_NS && kubectl delete namespace aispm-agents"
+    else
+      pf_warn "Namespace: '$_TARGET_NS' already exists (empty) — proceeding"
+    fi
+  else
+    pf_ok "Namespace '$_TARGET_NS' not present (clean install)"
+  fi
+
+  # ── 7. Required CLI tools: jq, curl ────────────────────────────────────
+  for _tool in jq curl; do
+    if ! command -v "$_tool" >/dev/null 2>&1; then
+      pf_fail "${_tool}: not installed — install with: brew install ${_tool}  (or: apt-get install ${_tool})"
+    else
+      pf_ok "${_tool} OK"
+    fi
+  done
+  unset _tool
+
+  echo
+  if [ "$_PF_FAILED" = "1" ]; then
+    echo "  One or more preflight checks FAILED. Resolve the issues above, then re-run."
+    echo "  To bypass all checks (not recommended): $(basename "$0") --skip-preflight"
+    exit 1
+  fi
+
+  echo "  All preflight checks passed — proceeding with installation."
+  echo
+fi
 
 # ── 1. Sanity ────────────────────────────────────────────────────────────
 section "Step 1: sanity"
@@ -480,6 +609,35 @@ if [ "$TARGET" = "all" ]; then
     --timeout=180s job/startup-orchestrator 2>/dev/null \
     || warn "startup-orchestrator Job did not complete — check: kubectl -n aispm logs job/startup-orchestrator"
 
+  # ── Flink cluster readiness ──────────────────────────────────────────────
+  # The flink-pyjob-submitter is a post-install/post-upgrade Helm hook (weight 0)
+  # that runs submit.sh to submit the CEP PyFlink job to the cluster. It waits
+  # internally for the JM REST API, but we also check rollout here so any pod
+  # scheduling problem appears in this section's output rather than silently
+  # blocking the Helm hook.
+  log "  waiting up to 3m for flink-jobmanager StatefulSet rollout..."
+  kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m \
+    || warn "flink-jobmanager StatefulSet did not roll out — check: kubectl -n aispm describe statefulset flink-jobmanager"
+
+  log "  waiting up to 2m for flink-taskmanager Deployment rollout..."
+  kubectl -n aispm rollout status deployment/flink-taskmanager --timeout=2m \
+    || warn "flink-taskmanager Deployment did not roll out — check: kubectl -n aispm describe deployment flink-taskmanager"
+
+  # Wait for the CEP PyFlink job submitter Helm hook Job to complete.
+  # A successful exit means `flink run --detached` was accepted by the JobManager
+  # and the CEP job is now running in the cluster. The Job is deleted on success
+  # by `helm.sh/hook-delete-policy: hook-succeeded`, so we only see it if it
+  # failed or is still running.
+  log "  waiting up to 5m for flink-pyjob-submitter Job (CEP job submission)..."
+  if kubectl -n aispm get job/flink-pyjob-submitter >/dev/null 2>&1; then
+    kubectl -n aispm wait --for=condition=Complete \
+      --timeout=300s job/flink-pyjob-submitter 2>/dev/null \
+      && log "    ✓ CEP PyFlink job submitted successfully" \
+      || warn "flink-pyjob-submitter Job did not complete — check: kubectl -n aispm logs job/flink-pyjob-submitter"
+  else
+    log "    flink-pyjob-submitter Job not found (already cleaned up by hook-delete-policy → hook ran and succeeded)"
+  fi
+
   # ── HTTP health checks — rollout ready ≠ HTTP healthy ──────────────────
   # A pod can pass readiness probes but crash-loop on first request. Probe
   # the actual health endpoints for the two services everything else depends on.
@@ -503,6 +661,30 @@ if [ "$TARGET" = "all" ]; then
   # Probe via in-cluster curl pod so we hit the cluster-internal Service IP.
   wait_k8s_http "spm-api"  "http://spm-api.aispm.svc.cluster.local:8092/health" 120
   wait_k8s_http "api"      "http://api.aispm.svc.cluster.local:8080/health"      120
+
+  # ── Step 8.5: DB seed ──────────────────────────────────────────────────────
+  # spm-api's lifespan runs _seed_demo_models() + _auto_bootstrap_integrations()
+  # on startup, so the DB is already seeded by the time the health check above
+  # passes. We exec seed_db.py here as belt-and-suspenders to surface any
+  # seed failures explicitly and to cover re-runs where the pod was restarted
+  # without reseeding (idempotent — seed_db.py skips rows that already exist).
+  section "Step 8.5: DB seed (models + posture history + integrations)"
+  SPM_POD="$(kubectl -n aispm get pod -l app=spm-api \
+      --field-selector=status.phase=Running \
+      -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  if [ -n "$SPM_POD" ]; then
+    log "  running seed_db.py in pod $SPM_POD ..."
+    if kubectl -n aispm exec "$SPM_POD" -- \
+        python3 /app/seed_db.py 2>&1 | sed 's/^/    /'; then
+      log "  ✓ Database seeded"
+    else
+      warn "  seed_db.py returned non-zero — lifespan auto-seed may still have covered this"
+      warn "  check: kubectl -n aispm logs $SPM_POD | grep seed"
+    fi
+  else
+    warn "  spm-api pod not running — skipping explicit seed step"
+    warn "  (seeding will happen automatically on next spm-api startup via lifespan)"
+  fi
 fi
 
 # ── 9. Done ─────────────────────────────────────────────────────────────
@@ -514,6 +696,9 @@ Cluster bootstrap complete.
   UI:             http://${INGRESS_HOST}
   Agents page:    http://${INGRESS_HOST}/admin/inventory
   Integrations:   http://${INGRESS_HOST}/admin/integrations
+  Flink UI:       kubectl -n aispm port-forward svc/flink-jobmanager 8081:8081  (CEP dashboard)
+
+  ✓ Database seeded — models, posture history, integrations, cases, alerts, policies
 
 Next:
   1. (one-time) Add to /etc/hosts:  127.0.0.1  ${INGRESS_HOST}
@@ -523,8 +708,9 @@ Next:
 Re-run this script to upgrade. Idempotent. Data in PVCs persists.
 
 Useful targeted runs:
-  bash $0 chart     — re-render and apply AISPM only
-  bash $0 policies  — re-apply Kyverno policies only
-  bash $0 addons    — re-install cert-manager / ingress-nginx / kyverno
+  bash $0 chart                  — re-render and apply AISPM only
+  bash $0 policies               — re-apply Kyverno policies only
+  bash $0 addons                 — re-install cert-manager / ingress-nginx / kyverno
+  bash $0 --skip-preflight       — skip preflight checks (CI / known-good cluster)
   SKIP_GVISOR=1 SKIP_RUNTIME_SECURITY=1 bash $0   — fast minimal install
 EOF

@@ -3,6 +3,22 @@
 #
 # See docs/plans/2026-04-24-pyflink-cep-migration.md Phase 0 for the
 # rationale behind every value here.
+#
+# ── HA note ─────────────────────────────────────────────────────────────────
+# This file is for the LOCAL DOCKER COMPOSE stack only.
+# Docker Compose runs a SINGLE JobManager — JobManager HA is not configured
+# here because:
+#   1. k8s-native HA (high-availability.type: kubernetes) requires the
+#      Kubernetes API (ConfigMaps/Leases for leader election) which is
+#      unavailable in a compose environment.
+#   2. ZooKeeper-based HA would add a 3-node ZK ensemble to the compose
+#      stack purely for dev — not worth the overhead.
+# Conclusion: HA is a production-only concern. Flink HA settings live in
+# deploy/helm/aispm/templates/flink-conf-configmap.yaml (k8s template).
+#
+# Checkpointing IS configured below (RocksDB, EXACTLY_ONCE, 60s interval)
+# so the local dev job is fully restartable within a single JM lifetime.
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ── JobManager ───────────────────────────────────────────────────────────────
 jobmanager.rpc.address: flink-jobmanager

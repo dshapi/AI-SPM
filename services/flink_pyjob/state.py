@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from typing import Iterable, List, Tuple, TYPE_CHECKING
 
@@ -75,11 +76,15 @@ else:
 
 log = logging.getLogger("flink-pyjob.cep")
 
-# Window + history sizing — match platform_shared/config defaults
-_SHORT_WINDOW_SEC = 120
-_LONG_WINDOW_SEC = 3600
-_SESSION_HISTORY_SIZE = 20
-_POSTURE_HISTORY_SIZE = 20
+# Window + history sizing — read from environment at module load time so that
+# the values in values.yaml / compose.yml (CEP_SHORT_WINDOW_SEC, etc.) are
+# honoured without recompiling the image. The defaults here match the
+# platform_shared config defaults and are overridden by the env injected into
+# the TaskManager container (flink-taskmanager deployment / compose service).
+_SHORT_WINDOW_SEC:    int   = int(os.environ.get("CEP_SHORT_WINDOW_SEC",   "120"))
+_LONG_WINDOW_SEC:     int   = int(os.environ.get("CEP_LONG_WINDOW_SEC",    "3600"))
+_SESSION_HISTORY_SIZE: int  = int(os.environ.get("CEP_SESSION_HISTORY_SIZE", "20"))
+_POSTURE_HISTORY_SIZE: int  = _SESSION_HISTORY_SIZE  # keep them in sync
 
 
 class CEPDetector(_Base):

@@ -6,22 +6,27 @@ should this event produce?". Kept as pure functions so the cascade
 can be unit-tested without a Flink runtime AND so any future shadow
 run (e.g. testing a CEP rule rewrite) can reuse the same logic.
 
-Thresholds: short=5 events / 120s, long=15 events / 3600s, drift=0.85.
-Callers may inject overrides for testing or tenant-specific tuning.
+Thresholds are read from environment variables at module load time so that
+values.yaml / compose.yml overrides (CEP_SHORT_THRESHOLD, CEP_LONG_THRESHOLD,
+CEP_INTENT_DRIFT_THRESHOLD) take effect without rebuilding the image. The env
+vars are injected into the TaskManager container, which is where the Python
+user code runs (pemja in-process). The hardcoded literals below are the
+production defaults and are also used by unit tests when no env is set.
 """
 from __future__ import annotations
 
+import os
 from typing import List, Mapping
 
 from platform_shared.risk import is_critical_combination
 
 
-# Defaults pinned here so unit tests are deterministic without dragging
-# in platform_shared.config (which reads env vars). Production callers
-# should pass settings.cep_short_threshold etc. explicitly.
-_DEFAULT_SHORT_THRESHOLD = 5
-_DEFAULT_LONG_THRESHOLD = 15
-_DEFAULT_DRIFT_THRESHOLD = 0.85
+# Read CEP threshold config from environment at module load so that
+# values.yaml / compose env overrides are honoured at runtime.
+# Defaults match the values.yaml platformEnv section.
+_DEFAULT_SHORT_THRESHOLD: int   = int(os.environ.get("CEP_SHORT_THRESHOLD",        "5"))
+_DEFAULT_LONG_THRESHOLD:  int   = int(os.environ.get("CEP_LONG_THRESHOLD",         "15"))
+_DEFAULT_DRIFT_THRESHOLD: float = float(os.environ.get("CEP_INTENT_DRIFT_THRESHOLD", "0.65"))
 
 
 def determine_alert_level(

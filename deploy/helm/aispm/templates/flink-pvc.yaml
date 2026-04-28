@@ -1,19 +1,44 @@
 # deploy/helm/aispm/templates/flink-pvc.yaml
-# Dev: two separate RWO PVCs (local-path doesn't support RWX).
-# JM uses flink-checkpoints for savepoints; TM uses flink-taskmanager-state for RocksDB.
-# Prod: switch storageClass to longhorn and accessModes to ReadWriteMany for shared access.
+#
+# PVC access-mode notes for 2-JobManager HA:
+#
+#   flink-checkpoints (ReadWriteMany):
+#     Both JM replicas mount this PVC. The active JM writes checkpoint
+#     metadata; the standby must be able to read it during recovery.
+#     Requires a RWX-capable StorageClass (Longhorn, NFS, CephFS).
+#     Dev caveat: local-path does NOT support RWX. In a single-node dev
+#     cluster (Rancher Desktop / OrbStack), both JM pods land on the
+#     same node so the OS-level RWO constraint is not violated — both
+#     pods can mount the same local-path PVC concurrently on one node.
+#     Multi-node dev or prod MUST use a RWX-capable StorageClass.
+#
+#   flink-ha (ReadWriteMany):
+#     Holds JobGraph blobs and HA metadata published by the leader.
+#     The standby JM reads these blobs to reconstruct job state on
+#     failover. Same RWX requirement as flink-checkpoints.
+#
+#   flink-savepoints + flink-taskmanager-state (ReadWriteOnce):
+#     Single-writer semantics: only the active JM triggers savepoints,
+#     and each TM replica has its own volume via volumeClaimTemplates.
+#     RWO is correct and sufficient here.
+
+# ── Checkpoint storage (shared by both JM replicas) ─────────────────────────
+# ReadWriteMany: active JM writes, standby reads on recovery.
+# StorageClass must support RWX in multi-node deployments (use longhorn in prod).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: flink-checkpoints
   namespace: {{ .Values.global.namespace }}
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
   storageClassName: local-path
   resources:
     requests:
       storage: 5Gi
 ---
+# ── Savepoint storage (active JM only) ──────────────────────────────────────
+# RWO is sufficient: only the active JM triggers savepoints.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -26,7 +51,7 @@ spec:
     requests:
       storage: 5Gi
 ---
-# TaskManager gets its own state volume (RocksDB checkpoint data)
+# ── TaskManager RocksDB state (single TM writer) ─────────────────────────────
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -39,17 +64,17 @@ spec:
     requests:
       storage: 5Gi
 ---
-# JobManager HA storage — holds JobGraph blobs that the leader publishes
-# to the cluster. ConfigMaps reference these by URI. Without this volume
-# a JM restart loses the active job and clients holding stale job IDs
-# get a 404 forever from the REST API.
+# ── JobManager HA blob store (shared by both JM replicas) ────────────────────
+# ReadWriteMany: leader publishes JobGraph blobs here; standby reads them
+# on failover to reconstruct the active job without client re-submission.
+# StorageClass must support RWX in multi-node deployments (use longhorn in prod).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: flink-ha
   namespace: {{ .Values.global.namespace }}
 spec:
-  accessModes: [ReadWriteOnce]
+  accessModes: [ReadWriteMany]
   storageClassName: local-path
   resources:
     requests:

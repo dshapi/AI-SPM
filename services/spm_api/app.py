@@ -266,6 +266,35 @@ async def _auto_bootstrap_integrations() -> None:
         log.warning("integrations bootstrap failed (non-fatal): %s", exc)
 
 
+async def _seed_demo_models() -> None:
+    """Idempotently seed ModelRegistry with demo models on startup.
+
+    Seeds 12 realistic models covering varied providers (anthropic, openai,
+    local, internal, aws, azure), risk tiers, statuses, and model types so
+    the Inventory page shows meaningful data out of the box.
+
+    Also seeds 30 days of daily PostureSnapshot history so the Posture page
+    has trend data.
+
+    Non-fatal — a failure here never blocks API startup.
+    """
+    try:
+        from seed_db import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
+        from spm.db.session import get_session_factory
+
+        factory = get_session_factory()
+        async with factory() as db:
+            n_models = await seed_models(db)
+            log.info("_seed_demo_models: %d new model(s) inserted (%d total defined)",
+                     n_models, len(DEMO_MODELS))
+        async with factory() as db:
+            n_snap = await seed_posture_snapshots(db)
+            if n_snap:
+                log.info("_seed_demo_models: %d posture snapshots inserted", n_snap)
+    except Exception as exc:
+        log.warning("_seed_demo_models failed (non-fatal): %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables if they don't exist (fallback if migrations weren't run)
@@ -276,6 +305,9 @@ async def lifespan(app: FastAPI):
     # Auto-seed integrations table so the Integrations page is populated
     # on first deploy without any manual bootstrap call.
     await _auto_bootstrap_integrations()
+    # Seed demo models + posture history so Inventory / Posture pages are
+    # populated on first deploy without any manual step.
+    await _seed_demo_models()
     log.info("spm-api started")
     yield
     await get_engine().dispose()

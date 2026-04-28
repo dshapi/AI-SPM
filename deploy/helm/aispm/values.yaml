@@ -34,14 +34,40 @@ images:
 flink:
   image: flink
   tag: "1.18-scala_2.12"
+  # Resource requests/limits for JobManager and TaskManager pods.
+  # These defaults are sized for a single-node dev cluster (OrbStack / Rancher
+  # Desktop). For production increase limits to match flink-conf.yaml memory
+  # settings: JM=1600m process size → 2Gi limit; TM=2048m → 3Gi limit.
+  jobmanager:
+    # 2 replicas for k8s-native HA: one active leader, one hot standby.
+    # Leader election uses Kubernetes ConfigMaps/Leases (flink-rbac.yaml).
+    # Each JM gets its own RPC address injected at pod start (init container
+    # in flink-jobmanager-statefulset.yaml overwrites jobmanager.rpc.address).
+    replicas: 2
+    resources:
+      requests:
+        cpu: "250m"
+        memory: "1Gi"
+      limits:
+        cpu: "1"
+        memory: "2Gi"
+  taskmanager:
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "1500Mi"
+      limits:
+        cpu: "2"
+        memory: "3Gi"
 
 kafka:
   image: confluentinc/cp-kafka
   tag: "7.6.1"
-  replicas: 1
+  replicas: 3                # 3-node KRaft quorum: tolerates 1 broker failure
   clusterId: q1Enf0NkTvaBgXGsKZoeRA
   storage: 10Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
+  minInsyncReplicas: 2       # producer acks require 2/3 in-sync replicas
 
 redis:
   image: redis
@@ -65,7 +91,14 @@ spmDb:
 # ── Platform env (non-secret) ────────────────────────────────────────────────
 # Mirrors x-common-env in compose.yml — keep these in sync.
 platformEnv:
-  KAFKA_BOOTSTRAP_SERVERS: kafka-broker.aispm.svc.cluster.local:9092
+  # All 3 broker headless-DNS entries listed — clients auto-discover the full
+  # cluster after connecting to any one, but listing all three avoids a single
+  # bootstrap SPOF. Used by all services and the startup-orchestrator Job.
+  KAFKA_BOOTSTRAP_SERVERS: kafka-0.kafka.aispm.svc.cluster.local:9092,kafka-1.kafka.aispm.svc.cluster.local:9092,kafka-2.kafka.aispm.svc.cluster.local:9092
+  # Read by startup_orchestrator (app.py: KAFKA_REPLICATION_FACTOR) when
+  # creating topics so all user topics also get RF=3.
+  KAFKA_REPLICATION_FACTOR: "3"
+  KAFKA_MIN_INSYNC_REPLICAS: "2"
   OPA_URL: http://opa.aispm.svc.cluster.local:8181
   JWT_ALGORITHM: RS256
   JWT_ISSUER: cpm-platform

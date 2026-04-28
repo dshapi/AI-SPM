@@ -37,6 +37,13 @@ kafka:
   replicas: 3
   # Three brokers with three RuntimeClass kata pods means real fault
   # tolerance + microVM isolation per broker.
+  minInsyncReplicas: 2
+
+flink:
+  jobmanager:
+    # Prod: 2 JM replicas for k8s-native HA. Requires Longhorn (RWX)
+    # for flink-ha and flink-checkpoints PVCs so both pods share state.
+    replicas: 2
 
 redis:
   storageClass: longhorn

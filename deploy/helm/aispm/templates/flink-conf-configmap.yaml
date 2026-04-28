@@ -1,5 +1,21 @@
 # deploy/helm/aispm/templates/flink-conf-configmap.yaml
-# Generated from flink/flink-conf.yaml
+# Generated from flink/flink-conf.yaml (k8s variant — includes HA settings absent in compose)
+#
+# ── jobmanager.rpc.address override ─────────────────────────────────────────
+# The value "flink-jobmanager" below is a PLACEHOLDER. With 2 JM replicas,
+# each pod must advertise its own FQDN for RPC so TaskManagers can connect
+# back to the correct pod. The prep-flink-conf init container in
+# flink-jobmanager-statefulset.yaml replaces this line at pod startup with:
+#   jobmanager.rpc.address: <pod-hostname-fqdn>
+# e.g. flink-jobmanager-0.flink-jobmanager.aispm.svc.cluster.local
+# TaskManagers discover the ACTIVE JM via the HA ConfigMap/Lease (not this
+# address), so the static value is only ever used before the init container
+# runs — it is always overwritten before Flink starts.
+#
+# rest.address stays as the ClusterIP service "flink-jobmanager" — REST
+# clients (the submitter job, UI) should always hit the service, which
+# routes to whichever JM pod has its readiness probe satisfied.
+# ─────────────────────────────────────────────────────────────────────────────
 apiVersion: v1
 kind: ConfigMap
 metadata:

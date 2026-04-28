@@ -174,6 +174,30 @@ spec:
       port: 6123
     - name: blob
       port: 6124
+      # Port 6124 is pinned in flink-conf.yaml (blob.server.port: 6124).
+      # Without a fixed port the TM/submitter can't reach the BLOB server
+      # through the Service — a random ephemeral port would change on restart.
+---
+# Headless service for TaskManager pod-to-pod + JM→TM discovery.
+# The flink-conf.yaml sets taskmanager.host: flink-taskmanager, which
+# resolves to this headless service's ClusterIP=None DNS entry. Without
+# this the JobManager cannot reach TaskManager containers to assign slots,
+# and newly-registered TMs fail with "address unreachable from JM" errors.
+apiVersion: v1
+kind: Service
+metadata:
+  name: flink-taskmanager
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: flink-taskmanager
+spec:
+  clusterIP: None
+  selector: { app: flink-taskmanager }
+  ports:
+    - name: data
+      port: 6121   # TM data port (shuffle / network exchange)
+    - name: ipc
+      port: 6122   # TM IPC (internal RPC between TM instances)
 ---
 apiVersion: v1
 kind: Service

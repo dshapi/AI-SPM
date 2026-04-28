@@ -117,6 +117,56 @@ wait_http "api"          "http://localhost:8080/health" 180 4 || FAILED=1
 wait_http "spm-mcp"      "http://localhost:8500/health"  90 3 || FAILED=1
 wait_http "spm-llm-proxy" "http://localhost:8501/health"  90 3 || FAILED=1
 
+# ── Flink JobManager — wait for REST API then verify CEP job submitted ────────
+# The flink-pyjob-submitter container runs submit.sh which waits internally for
+# the JM REST API. We still poll here so the success banner is accurate AND so
+# any JM startup problem surfaces before the user sees "stack is up".
+log "Waiting for Flink JobManager REST API (http://localhost:8081, up to 120s)..."
+FLINK_JM_DEADLINE=$(( $(date +%s) + 120 ))
+FLINK_JM_READY=0
+while [ "$(date +%s)" -lt "$FLINK_JM_DEADLINE" ]; do
+  if curl -sf --max-time 3 "http://localhost:8081/overview" >/dev/null 2>&1; then
+    log "  ✓ Flink JobManager REST API is up"
+    FLINK_JM_READY=1
+    break
+  fi
+  sleep 3
+done
+if [ "$FLINK_JM_READY" -eq 0 ]; then
+  err "Flink JobManager did not become ready within 120s"
+  err "  → check: docker compose logs flink-jobmanager"
+  FAILED=1
+fi
+
+# Wait for the CEP PyFlink job submitter to complete successfully.
+# The submitter is a one-shot container (restart: no) that exits 0 when
+# `flink run --detached` returns. An exit code != 0 means job submission
+# failed (JM rejected, Kafka unreachable, etc.).
+log "Waiting for flink-pyjob-submitter to complete CEP job submission (up to 180s)..."
+SUBMITTER_DEADLINE=$(( $(date +%s) + 180 ))
+SUBMITTER_DONE=0
+while [ "$(date +%s)" -lt "$SUBMITTER_DEADLINE" ]; do
+  SUB_STATUS=$(docker inspect --format='{{.State.Status}}' cpm-flink-pyjob-submitter 2>/dev/null || echo "missing")
+  SUB_EXIT=$(docker inspect --format='{{.State.ExitCode}}' cpm-flink-pyjob-submitter 2>/dev/null || echo "")
+  if [ "$SUB_STATUS" = "exited" ] && [ "$SUB_EXIT" = "0" ]; then
+    log "  ✓ CEP PyFlink job submitted successfully"
+    SUBMITTER_DONE=1
+    break
+  elif [ "$SUB_STATUS" = "exited" ] && [ "$SUB_EXIT" != "0" ]; then
+    err "flink-pyjob-submitter exited with code $SUB_EXIT — CEP job submission failed"
+    err "  → check: docker compose logs flink-pyjob-submitter"
+    FAILED=1
+    SUBMITTER_DONE=1
+    break
+  fi
+  sleep 4
+done
+if [ "$SUBMITTER_DONE" -eq 0 ]; then
+  err "flink-pyjob-submitter did not finish within 180s"
+  err "  → check: docker compose logs flink-pyjob-submitter"
+  FAILED=1
+fi
+
 if [ "$FAILED" -ne 0 ]; then
   err "────────────────────────────────────────────────────────"
   err "One or more services failed to become healthy."
@@ -134,6 +184,7 @@ echo "  API           → http://localhost:8080"
 echo "  SPM API       → http://localhost:8092"
 echo "  spm-mcp       → http://localhost:8500/health     (agent tools — web_fetch)"
 echo "  spm-llm-proxy → http://localhost:8501/health     (OpenAI-compat LLM shim)"
+echo "  Flink UI      → http://localhost:8081            (CEP JobManager dashboard)"
 echo "  Grafana       → http://localhost:3000"
 echo "  Prometheus    → http://localhost:9090"
 echo "  Traefik       → http://localhost:9091/dashboard/"
