@@ -4,26 +4,24 @@
 # Single entrypoint for the entire AISPM stack — works for both local
 # Docker Compose (dev) and Kubernetes (staging / prod).
 #
-# ── MODES ────────────────────────────────────────────────────────────────────
+# ── AUTO-DETECTION ───────────────────────────────────────────────────────────
 #
-#   Default (no flag):   Kubernetes bootstrap — provider-aware (Rancher
-#                        Desktop / OrbStack / Lima); idempotent; safe to
-#                        re-run on an existing cluster.
-#
-#   --compose            Docker Compose startup (replaces the old start.sh).
-#                        Brings the full stack up locally and blocks until all
-#                        core services are healthy.
+#   Default (no flag):   Auto-detects the right mode.
+#                        • kubectl can reach a cluster → Kubernetes bootstrap
+#                        • no live cluster              → Docker Compose startup
 #
 #   --down [--volumes]   Docker Compose teardown (replaces the old stop.sh).
 #                        Stops all services. Pass --volumes to also wipe
 #                        persistent volumes (redis, postgres, grafana, etc.).
 #
+#   --k8s                Force Kubernetes mode even when compose would normally win.
+#
 # ── QUICK START ──────────────────────────────────────────────────────────────
 #
-#   Local compose:   bash deploy/scripts/bootstrap-cluster.sh --compose
+#   Start (auto):    bash deploy/scripts/bootstrap-cluster.sh
 #   Stop compose:    bash deploy/scripts/bootstrap-cluster.sh --down
 #   Wipe everything: bash deploy/scripts/bootstrap-cluster.sh --down --volumes
-#   Kubernetes:      bash deploy/scripts/bootstrap-cluster.sh
+#   Force k8s:       bash deploy/scripts/bootstrap-cluster.sh --k8s
 #
 # ── COMPOSE ENV KNOBS (--compose mode) ──────────────────────────────────────
 #   BUILD=1    force-rebuild every image before starting
@@ -63,11 +61,11 @@ HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
 SKIP_PREFLIGHT=0
 TARGET="all"
-MODE="k8s"           # k8s | compose | down
+MODE=""              # auto-detected below: compose | k8s | down
 DOWN_EXTRA_ARGS=""
 for _arg in "$@"; do
   case "$_arg" in
-    --compose)         MODE="compose" ;;
+    --k8s)             MODE="k8s" ;;   # force k8s even when compose would win
     --down)            MODE="down" ;;
     --volumes|-v)      DOWN_EXTRA_ARGS="$DOWN_EXTRA_ARGS --volumes" ;;
     --skip-preflight)  SKIP_PREFLIGHT=1 ;;
@@ -75,6 +73,21 @@ for _arg in "$@"; do
     *)                 TARGET="$_arg" ;;
   esac
 done
+
+# ── Auto-detect mode ─────────────────────────────────────────────────────
+# --down was explicit; honour it. Otherwise: if kubectl can reach a live
+# cluster use k8s, else fall back to Docker Compose.
+if [ -z "$MODE" ]; then
+  if command -v kubectl >/dev/null 2>&1 && kubectl cluster-info >/dev/null 2>&1; then
+    MODE="k8s"
+    echo "$(date +%H:%M:%S) [bootstrap] kubectl cluster reachable — running Kubernetes bootstrap"
+    echo "$(date +%H:%M:%S) [bootstrap]   (to force Docker Compose: pass --down or run without a live cluster)"
+  else
+    MODE="compose"
+    echo "$(date +%H:%M:%S) [bootstrap] no live kubectl cluster — running Docker Compose startup"
+    echo "$(date +%H:%M:%S) [bootstrap]   (to force Kubernetes: ensure kubectl context is set and cluster is reachable)"
+  fi
+fi
 
 log()  { echo "$(date +%H:%M:%S) [bootstrap] $*"; }
 warn() { echo "$(date +%H:%M:%S) [bootstrap] WARN: $*" >&2; }
@@ -109,7 +122,7 @@ if [ "$MODE" = "down" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ── COMPOSE mode  (replaces start.sh) ──────────────────────────────────────
+# ── COMPOSE mode  (auto-selected when no live k8s cluster is detected) ──────
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "$MODE" = "compose" ]; then
   BUILD=${BUILD:-}   # set BUILD=1 to force-rebuild every image before starting
