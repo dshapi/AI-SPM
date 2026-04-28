@@ -1,42 +1,40 @@
 #!/usr/bin/env bash
 # deploy/scripts/bootstrap-cluster.sh
 #
-# Single-command cluster setup. Provider-aware (Rancher Desktop /
-# OrbStack / Lima); idempotent; safe to re-run on an existing cluster.
+# Single entrypoint for the entire AISPM stack — works for both local
+# Docker Compose (dev) and Kubernetes (staging / prod).
 #
-# JUST RUN IT:
-#   bash deploy/scripts/bootstrap-cluster.sh
+# ── MODES ────────────────────────────────────────────────────────────────────
 #
-# Flags:
+#   Default (no flag):   Kubernetes bootstrap — provider-aware (Rancher
+#                        Desktop / OrbStack / Lima); idempotent; safe to
+#                        re-run on an existing cluster.
+#
+#   --compose            Docker Compose startup (replaces the old start.sh).
+#                        Brings the full stack up locally and blocks until all
+#                        core services are healthy.
+#
+#   --down [--volumes]   Docker Compose teardown (replaces the old stop.sh).
+#                        Stops all services. Pass --volumes to also wipe
+#                        persistent volumes (redis, postgres, grafana, etc.).
+#
+# ── QUICK START ──────────────────────────────────────────────────────────────
+#
+#   Local compose:   bash deploy/scripts/bootstrap-cluster.sh --compose
+#   Stop compose:    bash deploy/scripts/bootstrap-cluster.sh --down
+#   Wipe everything: bash deploy/scripts/bootstrap-cluster.sh --down --volumes
+#   Kubernetes:      bash deploy/scripts/bootstrap-cluster.sh
+#
+# ── COMPOSE ENV KNOBS (--compose mode) ──────────────────────────────────────
+#   BUILD=1    force-rebuild every image before starting
+#   AUTH=1     include compose.auth.yml (adds Keycloak / auth overlay)
+#
+# ── KUBERNETES FLAGS ─────────────────────────────────────────────────────────
 #   --skip-preflight   bypass the preflight checks (useful when you know
 #                      what you're doing or are running in CI with a
 #                      pre-validated cluster)
 #
-# No required flags. Sane defaults — gVisor and security addons (Falco,
-# Tetragon, Kyverno) are OFF by default so the script works on any local
-# k8s provider (OrbStack, Rancher Desktop, kind, minikube) without extra
-# setup. Enable them for production with the env knobs below.
-#
-# What this does, in order:
-#   1.  Sanity-check kubectl context + container runtime
-#   2.  Create namespaces (aispm, aispm-agents) with the right labels
-#   3.  Build all images into the cluster's containerd image store
-#   4.  Install gVisor runtime (opt-in; off by default)
-#   5.  Install cluster-level addons (helm):
-#         cert-manager, ingress-nginx, istio (base + istiod)
-#         + optionally falco, tetragon, kyverno (all off by default)
-#   6.  Render the AISPM helm chart with values.yaml + values.dev.yaml
-#       and apply (skipping helm release tracking — see comment in
-#       step 6 for why this is the simpler path on dev)
-#   7.  Apply Kyverno cluster policies (if Kyverno is enabled)
-#   8.  Wait for the platform to be healthy
-#   9.  Print next steps (chat URL, agent upload, etc.)
-#
-# Targeted re-runs:
-#   bash deploy/scripts/bootstrap-cluster.sh chart     # only re-apply chart
-#   bash deploy/scripts/bootstrap-cluster.sh policies  # only re-apply Kyverno
-#
-# Env knobs (all optional — defaults are safe for local dev):
+# ── KUBERNETES ENV KNOBS ─────────────────────────────────────────────────────
 #   INSTALL_GVISOR=1         install gVisor runsc (needs containerd; off by default)
 #   INSTALL_SECURITY=1       install Falco + Tetragon (off by default)
 #   INSTALL_KYVERNO=1        install Kyverno + cluster policies (off by default)
@@ -47,6 +45,10 @@
 #                            pod networking on OrbStack and many local k8s
 #                            providers; use only on prod kubeadm/GKE)
 #   VALUES_FILE=<path>       override which values file to render
+#
+# ── KUBERNETES TARGETED RE-RUNS ──────────────────────────────────────────────
+#   bash deploy/scripts/bootstrap-cluster.sh chart     # only re-apply chart
+#   bash deploy/scripts/bootstrap-cluster.sh policies  # only re-apply Kyverno
 #
 # Designed to make the OrbStack migration a one-liner — quit Rancher
 # Desktop, install OrbStack, enable its k8s, run this script.
@@ -61,11 +63,16 @@ HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
 SKIP_PREFLIGHT=0
 TARGET="all"
+MODE="k8s"           # k8s | compose | down
+DOWN_EXTRA_ARGS=""
 for _arg in "$@"; do
   case "$_arg" in
-    --skip-preflight) SKIP_PREFLIGHT=1 ;;
-    -*)               echo "[bootstrap] WARNING: unknown flag: $_arg" >&2 ;;
-    *)                TARGET="$_arg" ;;
+    --compose)         MODE="compose" ;;
+    --down)            MODE="down" ;;
+    --volumes|-v)      DOWN_EXTRA_ARGS="$DOWN_EXTRA_ARGS --volumes" ;;
+    --skip-preflight)  SKIP_PREFLIGHT=1 ;;
+    -*)                echo "[bootstrap] WARNING: unknown flag: $_arg" >&2 ;;
+    *)                 TARGET="$_arg" ;;
   esac
 done
 
@@ -73,6 +80,203 @@ log()  { echo "$(date +%H:%M:%S) [bootstrap] $*"; }
 warn() { echo "$(date +%H:%M:%S) [bootstrap] WARN: $*" >&2; }
 err()  { echo "$(date +%H:%M:%S) [bootstrap] ERROR: $*" >&2; }
 section() { echo; echo "═══ $* ═══"; }
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ── COMPOSE DOWN mode  (replaces stop.sh) ──────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "down" ]; then
+  log "Stopping AISPM Docker Compose stack..."
+
+  # agent-runtime containers are spawned on demand by spm-api (not in the
+  # compose file). Stop them first so the network teardown doesn't orphan them.
+  agent_ctrs=$(docker ps -q \
+    --filter "name=^agent-" \
+    --filter "ancestor=aispm-agent-runtime:latest" 2>/dev/null || true)
+  if [ -n "$agent_ctrs" ]; then
+    _count=$(echo "$agent_ctrs" | wc -l | tr -d ' ')
+    log "  stopping ${_count} agent runtime container(s)..."
+    # 10s grace matches spm-api's stop_agent_container() graceful-shutdown path.
+    docker stop -t 10 $agent_ctrs >/dev/null
+    docker rm -f      $agent_ctrs >/dev/null
+  fi
+
+  # shellcheck disable=SC2086
+  docker compose -f "$REPO_ROOT/compose.yml" -f "$REPO_ROOT/compose.auth.yml" \
+    down $DOWN_EXTRA_ARGS
+  log "Stack stopped."
+  [ -n "$DOWN_EXTRA_ARGS" ] && log "  Persistent volumes wiped ($DOWN_EXTRA_ARGS)."
+  exit 0
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# ── COMPOSE mode  (replaces start.sh) ──────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+if [ "$MODE" = "compose" ]; then
+  BUILD=${BUILD:-}   # set BUILD=1 to force-rebuild every image before starting
+  AUTH=${AUTH:-}     # set AUTH=1 to include compose.auth.yml (Keycloak + auth)
+
+  COMPOSE_FILES="-f $REPO_ROOT/compose.yml"
+  if [ -n "$AUTH" ]; then
+    COMPOSE_FILES="$COMPOSE_FILES -f $REPO_ROOT/compose.auth.yml"
+  fi
+
+  # ── Pre-build one-shot images ──────────────────────────────────────────
+  # aispm-flink-pyjob: shared by flink-jobmanager, flink-taskmanager, and
+  # flink-pyjob-submitter. Built from flink-jobmanager's build context.
+  if ! docker image inspect aispm-flink-pyjob:latest >/dev/null 2>&1; then
+    log "Building aispm-flink-pyjob image (first-time, ~1 min)..."
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES build flink-jobmanager || {
+      err "Failed to build aispm-flink-pyjob — aborting"; exit 1
+    }
+  fi
+
+  # aispm-agent-runtime: behind the build-only profile. spm-api spawns one
+  # container per uploaded agent using this tag — must exist before spm-api starts.
+  if ! docker image inspect aispm-agent-runtime:latest >/dev/null 2>&1; then
+    log "Building aispm-agent-runtime image (first-time)..."
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES --profile build-only build agent-runtime-build || {
+      err "Failed to build aispm-agent-runtime — aborting"; exit 1
+    }
+  fi
+
+  if [ -n "$BUILD" ]; then
+    log "BUILD=1 — rebuilding all images..."
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES build \
+      || { err "Image build failed — aborting"; exit 1; }
+    # shellcheck disable=SC2086
+    docker compose $COMPOSE_FILES --profile build-only build agent-runtime-build \
+      || { err "agent-runtime build failed — aborting"; exit 1; }
+  fi
+
+  # ── Bring the stack up ─────────────────────────────────────────────────
+  log "Starting stack..."
+  # shellcheck disable=SC2086
+  docker compose $COMPOSE_FILES up -d --remove-orphans || {
+    err "docker compose up failed — check above for errors"; exit 1
+  }
+
+  # ── Wait for services to be truly healthy ─────────────────────────────
+  # `compose up -d` returns when containers are *created*, not *healthy*.
+  # Poll actual health endpoints before printing the success banner.
+
+  wait_http() {
+    local name="$1" url="$2" max="${3:-180}" interval="${4:-4}"
+    local deadline
+    deadline=$(( $(date +%s) + max ))
+    log "Waiting for $name ($url)..."
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      if curl -sf --max-time 3 "$url" >/dev/null 2>&1; then
+        log "  ✓ $name healthy"; return 0
+      fi
+      sleep "$interval"
+    done
+    err "$name did not become healthy within ${max}s"
+    err "  → check: docker compose logs $name"
+    return 1
+  }
+
+  FAILED=0
+
+  # startup-orchestrator is a one-shot container — poll its exit code.
+  log "Waiting for startup-orchestrator to complete (up to 120s)..."
+  SO_DEADLINE=$(( $(date +%s) + 120 ))
+  while [ "$(date +%s)" -lt "$SO_DEADLINE" ]; do
+    SO_STATUS=$(docker inspect --format='{{.State.Status}}' \
+      cpm-startup-orchestrator 2>/dev/null || echo "missing")
+    SO_EXIT=$(docker inspect --format='{{.State.ExitCode}}' \
+      cpm-startup-orchestrator 2>/dev/null || echo "")
+    if [ "$SO_STATUS" = "exited" ] && [ "$SO_EXIT" = "0" ]; then
+      log "  ✓ startup-orchestrator completed"; break
+    elif [ "$SO_STATUS" = "exited" ] && [ "$SO_EXIT" != "0" ]; then
+      err "startup-orchestrator exited with code $SO_EXIT"
+      err "  → check: docker compose logs startup-orchestrator"
+      FAILED=1; break
+    fi
+    sleep 3
+  done
+  if [ "$(date +%s)" -ge "$SO_DEADLINE" ] && [ "$FAILED" -eq 0 ]; then
+    err "startup-orchestrator did not finish within 120s"
+    FAILED=1
+  fi
+
+  # Flink JobManager REST — the CEP job submitter needs the JM to be up.
+  log "Waiting for Flink JobManager REST (up to 120s)..."
+  FLINK_DEADLINE=$(( $(date +%s) + 120 ))
+  while [ "$(date +%s)" -lt "$FLINK_DEADLINE" ]; do
+    if curl -sf --max-time 3 "http://localhost:8081/overview" >/dev/null 2>&1; then
+      log "  ✓ Flink JobManager REST healthy"; break
+    fi
+    sleep 5
+  done
+  if [ "$(date +%s)" -ge "$FLINK_DEADLINE" ]; then
+    warn "Flink JobManager did not respond within 120s — CEP job may not have been submitted"
+    warn "  → check: docker compose logs flink-jobmanager"
+  fi
+
+  # flink-pyjob-submitter is a one-shot container — wait for it to exit cleanly.
+  log "Waiting for flink-pyjob-submitter to complete (up to 180s)..."
+  FJS_DEADLINE=$(( $(date +%s) + 180 ))
+  while [ "$(date +%s)" -lt "$FJS_DEADLINE" ]; do
+    FJS_STATUS=$(docker inspect --format='{{.State.Status}}' \
+      cpm-flink-pyjob-submitter 2>/dev/null || echo "missing")
+    FJS_EXIT=$(docker inspect --format='{{.State.ExitCode}}' \
+      cpm-flink-pyjob-submitter 2>/dev/null || echo "")
+    if [ "$FJS_STATUS" = "exited" ] && [ "$FJS_EXIT" = "0" ]; then
+      log "  ✓ CEP PyFlink job submitted successfully"; break
+    elif [ "$FJS_STATUS" = "exited" ] && [ "$FJS_EXIT" != "0" ]; then
+      warn "flink-pyjob-submitter exited with code $FJS_EXIT"
+      warn "  → check: docker compose logs flink-pyjob-submitter"
+      break
+    elif [ "$FJS_STATUS" = "missing" ]; then
+      # Container not yet created — still starting
+      sleep 4; continue
+    fi
+    sleep 4
+  done
+
+  # Core platform HTTP health checks.
+  wait_http "spm-api"       "http://localhost:8092/health" 180 4 || FAILED=1
+  wait_http "api"           "http://localhost:8080/health" 180 4 || FAILED=1
+  wait_http "spm-mcp"       "http://localhost:8500/health"  90 3 || FAILED=1
+  wait_http "spm-llm-proxy" "http://localhost:8501/health"  90 3 || FAILED=1
+
+  if [ "$FAILED" -ne 0 ]; then
+    err "──────────────────────────────────────────────────────"
+    err "One or more services failed to become healthy."
+    err "Diagnose with:"
+    err "  docker compose ps"
+    err "  docker compose logs <service>"
+    err "──────────────────────────────────────────────────────"
+    exit 1
+  fi
+
+  # ── Success banner ────────────────────────────────────────────────────
+  echo ""
+  echo "Stack is up and healthy."
+  echo "  API           → http://localhost:8080"
+  echo "  SPM API       → http://localhost:8092"
+  echo "  spm-mcp       → http://localhost:8500/health"
+  echo "  spm-llm-proxy → http://localhost:8501/health"
+  echo "  Flink UI      → http://localhost:8081           (CEP dashboard)"
+  echo "  Grafana       → http://localhost:3000"
+  echo "  Prometheus    → http://localhost:9090"
+  echo "  Traefik       → http://localhost:9091/dashboard/"
+  if [ -n "$AUTH" ]; then
+    echo "  Keycloak      → http://keycloak.local:8180"
+    echo ""
+    echo "  With auth:    http://aispm.local/admin"
+    echo "  OrbiX Chat:   http://aispm.local"
+  fi
+  echo ""
+  echo "Logs:  docker compose logs -f [service]"
+  echo "Stop:  bash deploy/scripts/bootstrap-cluster.sh --down"
+  exit 0
+fi
+
+# ── Everything below this line is the Kubernetes bootstrap ─────────────────
 
 # ── Preflight Checks ─────────────────────────────────────────────────────
 if [ "$SKIP_PREFLIGHT" != "1" ]; then
