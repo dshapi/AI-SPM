@@ -129,6 +129,12 @@ jobs:
           # it here. Pin matches services/spm_api/requirements.txt.
           pip install prometheus-fastapi-instrumentator==7.0.0
 
+          # tests/test_agent_controller.py imports `kubernetes.client.exceptions`
+          # to mock the K8s API. The agent_controller module itself imports
+          # `kubernetes` lazily inside functions, but the tests need it at
+          # import time. Pin matches services/spm_api/requirements.txt.
+          pip install "kubernetes==31.*"
+
       # ── 4. Readiness gate — deterministic, no race conditions ─────────────
       - name: Wait for PostgreSQL
         run: |
