@@ -30,6 +30,15 @@ spec:
               value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
             - name: SPM_DB_URL
               value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            # LLM model for threat hunting — matches LLM_MODEL in .env / DB int-017.
+            - name: HUNT_MODEL
+              value: "llama3.2"
+            - name: HUNT_BATCH_WINDOW_SEC
+              value: "30"
+            - name: HUNT_QUEUE_MAX
+              value: "20"
+            - name: LOG_LEVEL
+              value: "INFO"
           readinessProbe:
             httpGet: { path: /health, port: 8095 }
             initialDelaySeconds: 20

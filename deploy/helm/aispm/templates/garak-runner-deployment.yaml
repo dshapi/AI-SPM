@@ -26,6 +26,24 @@ spec:
           env:
             - name: CPM_API_URL
               value: "http://api.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+            # SPM_DB_URL needed by platform_shared.integration_config.hydrate_env_from_db()
+            # at startup to pull GARAK_INTERNAL_SECRET and SPM_INTERNAL_BOOTSTRAP_SECRET.
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: PROBE_TIMEOUT_S
+              value: "60"
+            - name: GARAK_WORKERS
+              value: "4"
+            - name: GARAK_PARALLEL_ATTEMPTS
+              value: "8"
+            - name: GARAK_MAX_WORKERS
+              value: "8"
+            - name: GARAK_PARALLEL_USE_THREADS
+              value: "1"
+            - name: GARAK_PROMPT_OVERSAMPLE
+              value: "4"
           volumeMounts:
             - name: jwt-keys
               mountPath: /keys

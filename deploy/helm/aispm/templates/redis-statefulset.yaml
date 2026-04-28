@@ -28,6 +28,8 @@ spec:
             - {{ .Values.redis.maxmemory }}
             - --maxmemory-policy
             - allkeys-lru
+            - --loglevel
+            - warning
           ports:
             - containerPort: 6379
           readinessProbe:

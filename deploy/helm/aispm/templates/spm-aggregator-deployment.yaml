@@ -24,10 +24,17 @@ spec:
             - secretRef:
                 name: platform-secrets
           env:
+            - name: SPM_DB_URL
+              value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
             - name: SPM_API_URL
               value: "http://spm-api.{{ .Values.global.namespace }}.svc.cluster.local:8092"
+            - name: SPM_MODEL_BLOCK_THRESHOLD
+              value: "0.85"
+            - name: SPM_SNAPSHOT_INTERVAL_SEC
+              value: "300"
+            - name: SPM_ENFORCEMENT_WINDOW
+              value: "3"
           readinessProbe:
-            exec:
-              command: ["sh", "-c", "kill -0 1"]
-            initialDelaySeconds: 10
-            periodSeconds: 15
+            httpGet: { path: /health, port: 8080 }
+            initialDelaySeconds: 15
+            periodSeconds: 10

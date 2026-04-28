@@ -33,3 +33,8 @@ spec:
                   key: KAFKA_BOOTSTRAP_SERVERS
             - name: CEP_TENANT_IDS
               value: "t1"
+            # Sink topic suffix — audit for live; audit_shadow for shadow runs.
+            - name: CEP_AUDIT_TOPIC_SUFFIX
+              value: "audit"
+            - name: CEP_PARALLELISM
+              value: "2"
