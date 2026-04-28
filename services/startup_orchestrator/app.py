@@ -9,7 +9,8 @@ Automatically provisions:
 4. Kafka consumer group pre-registration
 5. Redis key schema defaults (rate limit config, freeze state sentinel)
 6. OPA health check + policy validation
-7. Service inventory registration in Redis
+7. Self-register CPM models with AI SPM
+8. Emit startup audit record
 
 Run: python app.py
 Exits 0 on success, 1 on failure.
@@ -21,7 +22,6 @@ import time
 import json
 import logging
 import subprocess
-import hashlib
 
 # Allow import of platform_shared from any working directory
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -153,25 +153,45 @@ def ensure_rsa_keys() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def wait_for_kafka(max_wait: int = 120) -> KafkaAdminClient:
-    log.info("── Step 2: Waiting for Kafka at %s ──", KAFKA_BOOTSTRAP)
+    """Connect to Kafka and return a KafkaAdminClient, retrying until max_wait.
+
+    Catches *all* exceptions (not just KafkaError) so that DNS failures,
+    OS-level connection errors, and transient socket errors are all retried
+    rather than crashing the orchestrator immediately.
+    """
+    log.info("── Step 2: Waiting for Kafka at %s (max %ds) ──", KAFKA_BOOTSTRAP, max_wait)
     deadline = time.time() + max_wait
+    last_exc: Exception | None = None
     while time.time() < deadline:
+        admin: KafkaAdminClient | None = None
         try:
             admin = KafkaAdminClient(
                 bootstrap_servers=KAFKA_BOOTSTRAP,
                 client_id="cpm-startup-orchestrator",
                 request_timeout_ms=5000,
             )
-            log.info("  ✓ Kafka reachable")
+            # Verify connectivity by listing topics — constructor alone doesn't
+            # guarantee the broker is actually reachable and responsive.
+            admin.list_topics()
+            log.info("  ✓ Kafka reachable and responsive")
             return admin
-        except KafkaError as e:
-            log.info("  Kafka not ready: %s — retrying in 3s...", e)
+        except Exception as e:
+            last_exc = e
+            if admin is not None:
+                try:
+                    admin.close()
+                except Exception:
+                    pass
+            remaining = int(deadline - time.time())
+            log.info("  Kafka not ready (%s) — retrying in 3s... (%ds remaining)", e, remaining)
             time.sleep(3)
-    raise RuntimeError(f"Kafka not reachable after {max_wait}s")
+    raise RuntimeError(
+        f"Kafka not reachable after {max_wait}s — last error: {last_exc}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 3: Create Kafka topics
+# Step 3: Create Kafka topics (tenant + global)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _retention_for(topic_name: str) -> int:
@@ -191,7 +211,6 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
     tenant_topic_names = all_topics_for_tenants(TENANTS)
 
     # Global topics live alongside tenant topics on the same cluster.
-    # Currently just the UI-lineage stream consumed by the orchestrator.
     global_topic_names = [
         GlobalTopics.MODEL_EVENTS,
         GlobalTopics.LINEAGE_EVENTS,
@@ -218,11 +237,15 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
         admin.create_topics(new_topics=topics_to_create, validate_only=False)
         log.info("  ✓ %d topics created", len(topics_to_create))
     except TopicAlreadyExistsError:
-        log.info("  Topics already exist — skipping")
+        log.info("  Topics already exist — idempotent, skipping")
+    except KafkaError as e:
+        # Individual topics may partially fail (e.g. some already exist and
+        # the batch raises). Log as a warning — the orchestrator is designed
+        # to be idempotent; missing topics will surface as consumer errors.
+        log.warning("  Topic creation warning (some may already exist): %s", e)
     except Exception as e:
-        # Per-topic AlreadyExists is fine; log other failures without
-        # crashing the orchestrator (idempotent boot is the contract).
-        log.warning("  Topic creation warning: %s", e)
+        log.error("  ✗ Topic creation failed: %s", e)
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +263,7 @@ def configure_kafka_acls() -> None:
     if not os.path.exists(kafka_acls_cmd):
         kafka_acls_cmd = "kafka-acls"
 
+    acl_errors = 0
     for tenant_id in TENANTS:
         principal = f"User:cpm-{tenant_id}"
         # ACL set should match what create_kafka_topics() provisions —
@@ -255,13 +279,23 @@ def configure_kafka_acls() -> None:
                     "--topic", topic,
                 ]
                 try:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=10
+                    )
                     if result.returncode == 0:
                         log.debug("  ACL set: %s %s %s", principal, op, topic)
                     else:
-                        log.warning("  ACL warning: %s", result.stderr.strip())
+                        log.warning(
+                            "  ACL non-zero exit for %s %s %s: %s",
+                            principal, op, topic, result.stderr.strip()
+                        )
+                        acl_errors += 1
+                except subprocess.TimeoutExpired:
+                    log.warning("  ACL command timed out for %s %s %s", principal, op, topic)
+                    acl_errors += 1
                 except Exception as e:
-                    log.warning("  ACL configure failed: %s", e)
+                    log.warning("  ACL command failed for %s %s %s: %s", principal, op, topic, e)
+                    acl_errors += 1
 
         # Consumer group ACLs
         for group in CONSUMER_GROUPS:
@@ -274,36 +308,63 @@ def configure_kafka_acls() -> None:
                 "--group", group,
             ]
             try:
-                subprocess.run(cmd, capture_output=True, text=True, timeout=10)
-            except Exception:
-                pass
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=10
+                )
+                if result.returncode != 0:
+                    log.warning(
+                        "  Consumer group ACL non-zero for %s/%s: %s",
+                        principal, group, result.stderr.strip()
+                    )
+                    acl_errors += 1
+            except subprocess.TimeoutExpired:
+                log.warning("  Consumer group ACL timed out for %s/%s", principal, group)
+                acl_errors += 1
+            except Exception as e:
+                log.warning("  Consumer group ACL failed for %s/%s: %s", principal, group, e)
+                acl_errors += 1
 
-        log.info("  ✓ ACLs configured for principal %s", principal)
+        if acl_errors == 0:
+            log.info("  ✓ ACLs configured for principal %s", principal)
+        else:
+            log.warning("  ACL configuration for %s completed with %d warning(s)", principal, acl_errors)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 5: Redis defaults
 # ─────────────────────────────────────────────────────────────────────────────
 
-def seed_redis_defaults() -> None:
+def seed_redis_defaults() -> redis.Redis:
     log.info("── Step 5: Seeding Redis defaults ──")
-    kwargs = {"host": REDIS_HOST, "port": REDIS_PORT, "decode_responses": True}
+    kwargs: dict = {"host": REDIS_HOST, "port": REDIS_PORT, "decode_responses": True}
     if REDIS_PASSWORD:
         kwargs["password"] = REDIS_PASSWORD
 
-    # Wait for Redis
-    r = None
+    # Wait for Redis with explicit connection tracking.
+    # NOTE: redis.Redis() does NOT connect on construction — it only connects
+    # on the first command (ping). We must track success with a flag, not by
+    # testing `r is None`, which would always be False after the first attempt.
+    r: redis.Redis | None = None
+    connected = False
     for attempt in range(20):
         try:
-            r = redis.Redis(**kwargs)
-            r.ping()
+            candidate = redis.Redis(**kwargs)
+            candidate.ping()
+            r = candidate
+            connected = True
             log.info("  ✓ Redis reachable at %s:%d", REDIS_HOST, REDIS_PORT)
             break
         except Exception as e:
-            log.info("  Redis not ready: %s — retrying in 2s...", e)
+            log.info(
+                "  Redis not ready (attempt %d/20): %s — retrying in 2s...",
+                attempt + 1, e
+            )
             time.sleep(2)
-    if r is None:
-        raise RuntimeError("Redis not reachable at startup")
+
+    if not connected or r is None:
+        raise RuntimeError(
+            f"Redis not reachable after 20 attempts (40s) at {REDIS_HOST}:{REDIS_PORT}"
+        )
 
     # Platform configuration keys
     platform_config = {
@@ -353,19 +414,18 @@ def seed_redis_defaults() -> None:
 def validate_opa() -> None:
     log.info("── Step 6: Validating OPA policies ──")
 
-    # Wait for OPA
+    # Wait for OPA health endpoint
     for attempt in range(30):
         try:
             resp = requests.get(f"{OPA_URL}/health", timeout=3)
             if resp.status_code == 200:
                 log.info("  ✓ OPA reachable at %s", OPA_URL)
                 break
-        except Exception:
-            pass
-        log.info("  OPA not ready — retrying in 3s... (%d/30)", attempt + 1)
+        except Exception as e:
+            log.info("  OPA not ready (attempt %d/30): %s — retrying in 3s...", attempt + 1, e)
         time.sleep(3)
     else:
-        raise RuntimeError("OPA not reachable after 90s")
+        raise RuntimeError(f"OPA not reachable after 90s at {OPA_URL}")
 
     # Smoke-test each policy with minimal valid input
     policy_smoke_tests = [
@@ -439,11 +499,70 @@ def validate_opa() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 7: Emit startup audit event
+# Step 7: Self-register CPM models with AI SPM
+# ─────────────────────────────────────────────────────────────────────────────
+
+def register_cpm_models_with_spm() -> None:
+    """Self-register CPM's own models in spm-api.
+
+    spm-api is NOT in startup-orchestrator's depends_on (it starts in parallel).
+    This step retries for up to ~60s to give spm-api time to come up. If it
+    doesn't, we log a warning and continue — models can be registered later on
+    the next restart, and the warning makes it visible in logs.
+    """
+    log.info("── Step 7: Registering CPM models with AI SPM ──")
+    models = [
+        {
+            "name": "llama-guard-3", "version": "3.0.0",
+            "provider": "local", "purpose": "content_screening",
+            "risk_tier": "limited", "tenant_id": "global",
+            "status": "approved", "approved_by": "startup-orchestrator",
+        },
+        {
+            "name": "output-guard-llm", "version": SERVICE_VERSION,
+            "provider": "local", "purpose": "output_screening",
+            "risk_tier": "limited", "tenant_id": "global",
+            "status": "approved", "approved_by": "startup-orchestrator",
+        },
+    ]
+    max_attempts = 20  # ~60s at 3s sleep
+    for attempt in range(max_attempts):
+        try:
+            for model in models:
+                resp = requests.post(
+                    f"{SPM_API_URL}/models",
+                    json=model,
+                    timeout=5.0,
+                )
+                if resp.status_code in (200, 201, 409):  # 409 = already exists, ok
+                    log.info("  ✓ Registered: %s (HTTP %d)", model["name"], resp.status_code)
+                else:
+                    raise RuntimeError(
+                        f"spm-api returned {resp.status_code} for {model['name']}"
+                    )
+            return  # success
+        except Exception as e:
+            remaining = max_attempts - attempt - 1
+            if remaining > 0:
+                log.info(
+                    "  SPM registration attempt %d/%d failed: %s — retrying in 3s...",
+                    attempt + 1, max_attempts, e
+                )
+                time.sleep(3)
+            else:
+                log.warning(
+                    "  ✗ SPM registration failed after %d attempts: %s — "
+                    "models will be unregistered until the next restart",
+                    max_attempts, e
+                )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 8: Emit startup audit event
 # ─────────────────────────────────────────────────────────────────────────────
 
 def emit_startup_audit(r: redis.Redis) -> None:
-    log.info("── Step 7: Startup audit record ──")
+    log.info("── Step 8: Startup audit record ──")
     for tenant_id in TENANTS:
         record = {
             "ts": int(time.time() * 1000),
@@ -466,70 +585,6 @@ def emit_startup_audit(r: redis.Redis) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 8: Create global SPM topic
-# ─────────────────────────────────────────────────────────────────────────────
-
-def create_global_topics(admin: KafkaAdminClient) -> None:
-    """Create the global model_events topic used by AI SPM."""
-    log.info("── Step 8: Creating global SPM topic ──")
-    from platform_shared.topics import GlobalTopics
-    topic_name = GlobalTopics().MODEL_EVENTS
-    try:
-        admin.create_topics([
-            NewTopic(
-                name=topic_name,
-                num_partitions=1,
-                replication_factor=REPLICATION_FACTOR,
-                topic_configs={"retention.ms": str(7 * 24 * 3600 * 1000)},
-            )
-        ], validate_only=False)
-        log.info("  ✓ Created: %s", topic_name)
-    except TopicAlreadyExistsError:
-        log.info("  Topic already exists — skipping")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 9: Self-register CPM models with AI SPM
-# ─────────────────────────────────────────────────────────────────────────────
-
-def register_cpm_models_with_spm() -> None:
-    """Self-register CPM's own models in spm-api. Retries up to 10 times."""
-    log.info("── Step 9: Registering CPM models with AI SPM ──")
-    models = [
-        {
-            "name": "llama-guard-3", "version": "3.0.0",
-            "provider": "local", "purpose": "content_screening",
-            "risk_tier": "limited", "tenant_id": "global",
-            "status": "approved", "approved_by": "startup-orchestrator",
-        },
-        {
-            "name": "output-guard-llm", "version": SERVICE_VERSION,
-            "provider": "local", "purpose": "output_screening",
-            "risk_tier": "limited", "tenant_id": "global",
-            "status": "approved", "approved_by": "startup-orchestrator",
-        },
-    ]
-    for attempt in range(10):
-        try:
-            for model in models:
-                resp = requests.post(
-                    f"{SPM_API_URL}/models",
-                    json=model,
-                    timeout=5.0,
-                )
-                if resp.status_code in (200, 201, 409):  # 409 = already exists, ok
-                    log.info("  ✓ Registered: %s", model["name"])
-                else:
-                    raise RuntimeError(f"spm-api returned {resp.status_code}")
-            return  # success
-        except Exception as e:
-            log.warning("  SPM registration attempt %d/10 failed: %s", attempt + 1, e)
-            if attempt < 9:
-                time.sleep(3)
-    log.warning("  SPM registration failed after 10 attempts — continuing without it")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -539,19 +594,36 @@ def main() -> int:
     log.info("╚══════════════════════════════════════════════╝")
     log.info("Environment: %s | Tenants: %s", ENVIRONMENT, TENANTS)
 
+    admin: KafkaAdminClient | None = None
     try:
+        # Step 1 — RSA keys (idempotent; must run before any JWT-signing service)
         ensure_rsa_keys()
+
+        # Step 2+3 — Kafka: wait for readiness, create all topics in one pass
         admin = wait_for_kafka()
-        create_kafka_topics(admin)
-        admin.close()
+        try:
+            create_kafka_topics(admin)
+        finally:
+            # Always close the admin client even if topic creation raises
+            try:
+                admin.close()
+            except Exception:
+                pass
+            admin = None
+
+        # Step 4 — ACLs (optional; controlled by KAFKA_ENABLE_ACLS)
         configure_kafka_acls()
+
+        # Step 5 — Redis defaults; returns a live client for use in step 8
         r = seed_redis_defaults()
+
+        # Step 6 — OPA health + policy smoke tests
         validate_opa()
-        # Reopen admin client for global topics
-        admin2 = wait_for_kafka(max_wait=30)
-        create_global_topics(admin2)
-        admin2.close()
+
+        # Step 7 — Model registration in spm-api (best-effort with retries)
         register_cpm_models_with_spm()
+
+        # Step 8 — Audit record (written last so it only appears on full success)
         emit_startup_audit(r)
 
         log.info("╔══════════════════════════════════════════════╗")
@@ -562,6 +634,15 @@ def main() -> int:
     except Exception as e:
         log.error("✗ Startup FAILED: %s", e, exc_info=True)
         return 1
+    finally:
+        # Belt-and-suspenders: close admin if it was opened but never closed
+        # (e.g. if wait_for_kafka succeeded but create_kafka_topics raised
+        # before the inner finally ran due to a BaseException).
+        if admin is not None:
+            try:
+                admin.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

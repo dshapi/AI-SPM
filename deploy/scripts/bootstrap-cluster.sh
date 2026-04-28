@@ -4,40 +4,44 @@
 # Single-command cluster setup. Provider-aware (Rancher Desktop /
 # OrbStack / Lima); idempotent; safe to re-run on an existing cluster.
 #
+# JUST RUN IT:
+#   bash deploy/scripts/bootstrap-cluster.sh
+#
+# No required flags. Sane defaults — gVisor and security addons (Falco,
+# Tetragon, Kyverno) are OFF by default so the script works on any local
+# k8s provider (OrbStack, Rancher Desktop, kind, minikube) without extra
+# setup. Enable them for production with the env knobs below.
+#
 # What this does, in order:
 #   1.  Sanity-check kubectl context + container runtime
 #   2.  Create namespaces (aispm, aispm-agents) with the right labels
 #   3.  Build all images into the cluster's containerd image store
-#   4.  Install gVisor runtime (if requested, on by default in dev)
+#   4.  Install gVisor runtime (opt-in; off by default)
 #   5.  Install cluster-level addons (helm):
-#         cert-manager, ingress-nginx, istio-cni (optional),
-#         falco + falcosidekick, tetragon, kyverno
+#         cert-manager, ingress-nginx, istio (base + istiod)
+#         + optionally falco, tetragon, kyverno (all off by default)
 #   6.  Render the AISPM helm chart with values.yaml + values.dev.yaml
 #       and apply (skipping helm release tracking — see comment in
 #       step 6 for why this is the simpler path on dev)
-#   7.  Apply Kyverno cluster policies (admission gating)
+#   7.  Apply Kyverno cluster policies (if Kyverno is enabled)
 #   8.  Wait for the platform to be healthy
 #   9.  Print next steps (chat URL, agent upload, etc.)
 #
-# Usage:
-#   bash deploy/scripts/bootstrap-cluster.sh           # full install
-#   SKIP_GVISOR=1 bash deploy/scripts/bootstrap-cluster.sh
-#   SKIP_RUNTIME_SECURITY=1 bash deploy/scripts/bootstrap-cluster.sh
+# Targeted re-runs:
 #   bash deploy/scripts/bootstrap-cluster.sh chart     # only re-apply chart
 #   bash deploy/scripts/bootstrap-cluster.sh policies  # only re-apply Kyverno
 #
-# Env knobs (all optional):
-#   SKIP_GVISOR=1            don't install runsc
-#   SKIP_RUNTIME_SECURITY=1  skip Falco + Tetragon
-#   SKIP_KYVERNO=1           skip Kyverno + cluster policies
+# Env knobs (all optional — defaults are safe for local dev):
+#   INSTALL_GVISOR=1         install gVisor runsc (needs containerd; off by default)
+#   INSTALL_SECURITY=1       install Falco + Tetragon (off by default)
+#   INSTALL_KYVERNO=1        install Kyverno + cluster policies (off by default)
 #   SKIP_INGRESS=1           skip ingress-nginx
 #   SKIP_CERT_MANAGER=1      skip cert-manager
-#   ENABLE_ISTIO_CNI=1       install istio-cni (default OFF — on OrbStack
-#                            and many local k8s providers istio-cni
-#                            corrupts pod networking; the legacy
-#                            istio-init initContainer is more reliable
-#                            for dev. Set to 1 only for prod kubeadm/GKE.)
-#   VALUES_FILE=values.dev.yaml      override which values file to render
+#   SKIP_ISTIO=1             skip Istio (base + istiod)
+#   ENABLE_ISTIO_CNI=1       install istio-cni (off by default — corrupts
+#                            pod networking on OrbStack and many local k8s
+#                            providers; use only on prod kubeadm/GKE)
+#   VALUES_FILE=<path>       override which values file to render
 #
 # Designed to make the OrbStack migration a one-liner — quit Rancher
 # Desktop, install OrbStack, enable its k8s, run this script.
@@ -197,8 +201,8 @@ fi
 # ── 4. gVisor runtime ────────────────────────────────────────────────────
 section "Step 4: gVisor runtime"
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "gvisor" ]; then
-  if [ "${SKIP_GVISOR:-0}" = "1" ]; then
-    log "  SKIP_GVISOR=1 — skipping"
+  if [ "${INSTALL_GVISOR:-0}" != "1" ]; then
+    log "  gVisor skipped (set INSTALL_GVISOR=1 to install — requires containerd cluster)"
   elif printf '%s' "$NODE_RUNTIME" | grep -qi '^docker'; then
     # OrbStack and Docker Desktop k8s use Docker as the CRI. Docker
     # doesn't dispatch RuntimeClass to extra runtimes — it needs
@@ -356,13 +360,11 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
   fi
 
   section "Step 5d: falco + falcosidekick"
-  # Pin to chart 4.20.x / falco 0.42.x — falco 0.43.x has an upstream
-  # duplicate-container-plugin bug that crashloops on every install
-  # (https://github.com/falcosecurity/falco/issues/3257-style).
-  # falcoctl.artifact.install/follow disabled because they hit
-  # ghcr.io on every pod boot — flaky on first install. Rules
-  # baked into the image are enough.
-  if [ "${SKIP_RUNTIME_SECURITY:-0}" != "1" ]; then
+  # Off by default — Falco requires kernel headers or modern_ebpf support
+  # which is not available on all local k8s providers. Set INSTALL_SECURITY=1
+  # to enable. Pin to chart 4.20.x / falco 0.42.x — falco 0.43.x has an
+  # upstream duplicate-container-plugin bug that crashloops on every install.
+  if [ "${INSTALL_SECURITY:-0}" = "1" ]; then
     helm repo add falcosecurity https://falcosecurity.github.io/charts >/dev/null 2>&1 || true
     helm repo update falcosecurity >/dev/null 2>&1 || true
     FALCO_CHART_VERSION="${FALCO_CHART_VERSION:-4.20.5}"
@@ -379,15 +381,14 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
       --set falcoctl.artifact.follow.enabled=false \
       --wait --timeout=5m \
       || warn "  falco helm returned non-zero"
-    # falcoctl.artifact.install/follow disabled because they hit
-    # ghcr.io and falcosecurity.github.io on every pod boot, and on
-    # OrbStack's flaky DNS that pinned the init container in
-    # CrashLoopBackOff. Rules baked into the image are enough for
-    # dev. Re-enable in prod (values.prod.yaml) where DNS is stable.
+  else
+    log "  Falco + falcosidekick skipped (set INSTALL_SECURITY=1 to enable)"
   fi
 
   section "Step 5e: tetragon"
-  if [ "${SKIP_RUNTIME_SECURITY:-0}" != "1" ]; then
+  # Off by default — Tetragon requires BPF support and often needs
+  # 'mount --make-rshared /sys' inside the VM. Set INSTALL_SECURITY=1 to enable.
+  if [ "${INSTALL_SECURITY:-0}" = "1" ]; then
     helm repo add cilium https://helm.cilium.io >/dev/null 2>&1 || true
     helm repo update cilium >/dev/null 2>&1 || true
     helm upgrade --install tetragon cilium/tetragon \
@@ -396,13 +397,17 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
       --set tetragon.bpf.autoMount.enabled=false \
       --wait --timeout=5m \
       || warn "  tetragon helm returned non-zero (often needs 'mount --make-rshared /sys' inside the VM first)"
+  else
+    log "  Tetragon skipped (set INSTALL_SECURITY=1 to enable)"
   fi
 
   section "Step 5f: kyverno"
-  if [ "${SKIP_KYVERNO:-0}" != "1" ]; then
+  # Off by default for local dev — Kyverno admission webhooks can block pod
+  # scheduling in unexpected ways during development. Set INSTALL_KYVERNO=1
+  # to enable. Pin to 3.3.7 — newer chart's CRDs use selectableFields (k8s 1.30+).
+  if [ "${INSTALL_KYVERNO:-0}" = "1" ]; then
     helm repo add kyverno https://kyverno.github.io/kyverno >/dev/null 2>&1 || true
     helm repo update kyverno >/dev/null 2>&1 || true
-    # Pin to 3.3.7 — newer chart's CRDs use selectableFields (k8s 1.30+).
     helm upgrade --install kyverno kyverno/kyverno \
       -n kyverno --create-namespace --version 3.3.7 \
       --set admissionController.replicas=1 \
@@ -411,6 +416,8 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
       --set reportsController.replicas=1 \
       --wait --timeout=5m \
       || warn "  kyverno helm returned non-zero"
+  else
+    log "  Kyverno skipped (set INSTALL_KYVERNO=1 to enable)"
   fi
 fi
 
@@ -441,24 +448,61 @@ fi
 # ── 7. Kyverno cluster policies ──────────────────────────────────────────
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "policies" ]; then
   section "Step 7: Kyverno cluster policies"
-  POLICIES_FILE="$DEPLOY/k8s/kyverno/cluster-policies.yaml"
-  if [ -f "$POLICIES_FILE" ]; then
-    kubectl apply -f "$POLICIES_FILE" || warn "policies apply returned non-zero"
-    log "  applied $(grep -c '^kind:' "$POLICIES_FILE") policies"
+  if [ "${INSTALL_KYVERNO:-0}" = "1" ]; then
+    POLICIES_FILE="$DEPLOY/k8s/kyverno/cluster-policies.yaml"
+    if [ -f "$POLICIES_FILE" ]; then
+      kubectl apply -f "$POLICIES_FILE" || warn "policies apply returned non-zero"
+      log "  applied $(grep -c '^kind:' "$POLICIES_FILE") policies"
+    else
+      log "  no policy file at $POLICIES_FILE — skipping"
+    fi
   else
-    log "  no policy file at $POLICIES_FILE — skipping"
+    log "  Kyverno not installed — skipping cluster policies"
   fi
 fi
 
 # ── 8. Wait for platform health ─────────────────────────────────────────
 if [ "$TARGET" = "all" ]; then
   section "Step 8: platform readiness"
-  log "  waiting up to 5m for spm-api to be ready..."
+
+  # ── Rollout status — wait for pods to be scheduled and running ─────────
+  log "  waiting up to 5m for spm-api rollout..."
   kubectl -n aispm rollout status deploy/spm-api --timeout=5m \
-    || warn "spm-api didn't reach ready in time"
-  log "  waiting up to 2m for kafka..."
+    || warn "spm-api rollout didn't complete in time"
+
+  log "  waiting up to 2m for kafka StatefulSet..."
   kubectl -n aispm rollout status statefulset/kafka --timeout=2m \
-    || warn "kafka not ready"
+    || warn "kafka StatefulSet not ready"
+
+  # ── startup-orchestrator Job — must complete before services are usable ──
+  log "  waiting up to 3m for startup-orchestrator Job to complete..."
+  kubectl -n aispm wait --for=condition=Complete \
+    --timeout=180s job/startup-orchestrator 2>/dev/null \
+    || warn "startup-orchestrator Job did not complete — check: kubectl -n aispm logs job/startup-orchestrator"
+
+  # ── HTTP health checks — rollout ready ≠ HTTP healthy ──────────────────
+  # A pod can pass readiness probes but crash-loop on first request. Probe
+  # the actual health endpoints for the two services everything else depends on.
+  wait_k8s_http() {
+    local name="$1" url="$2" max="${3:-120}"
+    local deadline
+    deadline=$(( $(date +%s) + max ))
+    log "  HTTP health: $name ($url, max ${max}s)..."
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+      if kubectl -n aispm run --rm -i --restart=Never --image=curlimages/curl:8.6.0 \
+          healthcheck-"$(date +%s)" -- curl -sf --max-time 3 "$url" >/dev/null 2>&1; then
+        log "    ✓ $name responding"
+        return 0
+      fi
+      sleep 5
+    done
+    warn "    $name did not respond within ${max}s at $url"
+    return 0  # warn only — don't block the whole script on HTTP probe flakiness
+  }
+
+  # Probe via in-cluster curl pod so we hit the cluster-internal Service IP.
+  wait_k8s_http "spm-api"  "http://spm-api.aispm.svc.cluster.local:8092/health" 120
+  wait_k8s_http "api"      "http://api.aispm.svc.cluster.local:8080/health"      120
 fi
 
 # ── 9. Done ─────────────────────────────────────────────────────────────
