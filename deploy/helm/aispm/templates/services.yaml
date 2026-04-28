@@ -172,6 +172,8 @@ spec:
       port: 8081
     - name: rpc
       port: 6123
+    - name: blob
+      port: 6124
 ---
 apiVersion: v1
 kind: Service

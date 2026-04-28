@@ -21,7 +21,10 @@ data:
     rest.address: flink-jobmanager
     rest.bind-address: 0.0.0.0
     rest.port: 8081
-    
+    # Pin BLOB server to a fixed port so the Service can expose it.
+    # Default is 0 (random) — TM can't reach it through the Service otherwise.
+    blob.server.port: 6124
+
     # ── TaskManager ──────────────────────────────────────────────────────────────
     taskmanager.bind-host: 0.0.0.0
     taskmanager.host: flink-taskmanager
@@ -47,6 +50,14 @@ data:
     execution.checkpointing.max-concurrent-checkpoints: 1
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
     
+    # ── High availability (k8s-native) ───────────────────────────────────────────
+    # Without this, JobManager restarts wipe in-memory job state — any client
+    # holding a job ID (browser tab, integration probe) gets 404 forever.
+    high-availability.type: kubernetes
+    high-availability.storageDir: file:///flink/ha
+    kubernetes.cluster-id: aispm-flink
+    kubernetes.namespace: {{ .Values.global.namespace }}
+
     # ── Restart strategy ─────────────────────────────────────────────────────────
     restart-strategy.type: exponential-delay
     restart-strategy.exponential-delay.initial-backoff: 10s

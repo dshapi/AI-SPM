@@ -39,12 +39,26 @@ def adapt_to_events(
     if not data:
         return []
 
+    # Map collector-emitted severity labels to numeric guard scores so the
+    # downstream scorer.compute_risk_score() picks up the collector's intent
+    # instead of flattening every anomaly to a single 0.65 baseline.
+    _SEV_TO_SCORE = {
+        "critical": 0.95,
+        "high":     0.85,
+        "medium":   0.55,
+        "low":      0.30,
+    }
+
     now = datetime.now(timezone.utc).isoformat()
     events = []
     for item in data:
-        # Derive a guard signal so scorer.py can weight events appropriately.
-        # Anomalous items get a "flag" verdict; routine status items get "allow".
         is_anomalous = bool(item.get("anomalous"))
+        sev = str(item.get("severity") or "").lower()
+        guard_score = _SEV_TO_SCORE.get(
+            sev,
+            0.65 if is_anomalous else 0.0,   # back-compat for collectors
+                                             # that don't set severity yet
+        )
         event = {
             # Routing / tagging
             "_topic":       f"cpm.{TENANT_ID}.threathunting_scan",
@@ -57,9 +71,15 @@ def adapt_to_events(
             "tenant_id":    TENANT_ID,
             # Payload — the raw collector item
             "data":         item,
-            # Scoring hints for scorer.py (used by compute_risk_score / compute_confidence)
-            "guard_verdict": "flag" if is_anomalous else "allow",
-            "guard_score":   0.65 if is_anomalous else 0.0,
+            # Scoring hints for scorer.py.
+            #   - guard_verdict "block" makes the event count toward
+            #     frequency_factor (anomalous findings are already pre-filtered
+            #     as significant — flag/allow under-weighted them).
+            #   - risk_tier carries the collector's severity label so
+            #     _extract_tier() can map it to its tier weight.
+            "guard_verdict": "block" if is_anomalous else "allow",
+            "guard_score":   guard_score,
+            "risk_tier":     sev or ("high" if is_anomalous else ""),
         }
         events.append(event)
 

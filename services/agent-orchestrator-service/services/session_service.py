@@ -21,12 +21,44 @@ for the event timeline.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Awaitable, Coroutine, List, Optional
 from uuid import UUID, uuid4
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fire-and-forget helper
+# ─────────────────────────────────────────────────────────────────────────────
+# Kafka emits, audit writes, and other "tell observers what happened" calls
+# don't gate the user's response. Detaching them to background tasks moves
+# them off the critical path so the chat round-trip ends as soon as the
+# LLM + output scan complete.
+#
+# Tasks are kept in a module-level set so the event loop can't garbage-collect
+# them mid-flight, and exceptions are logged instead of becoming
+# "Task exception was never retrieved" warnings.
+_BG_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _detach(coro: Coroutine[Any, Any, Any], *, name: str) -> None:
+    """Schedule a background task and log any exception it raises."""
+    task = asyncio.create_task(coro, name=name)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+    def _log_failure(t: asyncio.Task[Any]) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            logging.getLogger(__name__).warning(
+                "background task %r failed: %s", name, exc,
+            )
+    task.add_done_callback(_log_failure)
 
 from clients.policy_client import PolicyClient, PolicyResult
 from dependencies.auth import IdentityContext

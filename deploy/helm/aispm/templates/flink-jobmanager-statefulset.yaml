@@ -13,9 +13,10 @@ spec:
     metadata:
       labels: { app: flink-jobmanager }
     spec:
+      serviceAccountName: flink
       containers:
         - name: flink-jobmanager
-          image: {{ .Values.flink.image }}:{{ .Values.flink.tag }}
+          image: {{ include "aispm.image" .Values.images.flinkJob }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           args: ["jobmanager"]
           ports:
@@ -27,6 +28,12 @@ spec:
                 configMapKeyRef:
                   name: platform-env
                   key: KAFKA_BOOTSTRAP_SERVERS
+            # K8s HA needs the pod to know its own namespace at runtime —
+            # Flink reads this to scope leader-election ConfigMaps/Leases.
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           readinessProbe:
             httpGet: { path: /overview, port: 8081 }
             initialDelaySeconds: 20
@@ -39,6 +46,8 @@ spec:
               mountPath: /flink/checkpoints
             - name: savepoints
               mountPath: /flink/savepoints
+            - name: ha
+              mountPath: /flink/ha
       volumes:
         - name: flink-conf
           configMap:
@@ -49,3 +58,6 @@ spec:
         - name: savepoints
           persistentVolumeClaim:
             claimName: flink-savepoints
+        - name: ha
+          persistentVolumeClaim:
+            claimName: flink-ha

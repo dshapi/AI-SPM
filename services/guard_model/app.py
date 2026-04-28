@@ -45,8 +45,12 @@ app = FastAPI(title="CPM Guard Model v3", version="3.0.0")
 # ─────────────────────────────────────────────────────────────────────────────
 
 GROQ_API_KEY  = os.getenv("GROQ_API_KEY", "")
-GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "")   # empty = Groq cloud default
-GROQ_MODEL    = os.getenv("GUARD_GROQ_MODEL", os.getenv("GROQ_MODEL", "llama-guard-4-12b"))
+# Base URL from Ollama integration config (int-017.config.base_url → GROQ_BASE_URL),
+# hydrated by hydrate_env_from_db() above.  Empty = Groq cloud default (unused here).
+GROQ_BASE_URL = os.getenv("GROQ_BASE_URL", "")
+# Model and prompt mode are hardcoded — guard always uses local llama-guard3 via Ollama.
+GROQ_MODEL        = "llama-guard3"
+GUARD_PROMPT_MODE_HARDCODED = "llama_guard"
 
 # Two backend modes:
 #   (a) GROQ_BASE_URL is set  → treat it as a generic OpenAI-compatible endpoint
@@ -204,6 +208,21 @@ _REGEX_CATEGORIES: list[_RegexCategory] = [
         r"do\s+anything\s+now",
         r"bypass\s+(safety|content\s+filter|guardrail|policy)",
         r"forget\s+(everything|all\s+previous|your\s+training)",
+        # Grandma / deceased-relative persona jailbreak (grandma.Substances probe)
+        r"pretend\s+to\s+be\s+(my\s+)?(deceased|late|dead|old)?\s*(grand(ma|mother|pa|father))",
+        r"my\s+(deceased|late|dead)\s+(grand(ma|mother|pa|father))\s+(used\s+to|would|always)",
+        r"(pretend|act|roleplay)\s+(to\s+be|as)\s+(my\s+)?(grand(ma|mother|pa|father))",
+        r"(tell|read)\s+me\s+(bedtime\s+)?stories?\s+about\s+how\s+to",
+        r"pretend\s+you('?re|\s+are)\s+my\s+(grand|deceased|late)",
+    ]),
+    # Drug / controlled-substance synthesis — S9 block
+    _RegexCategory("S9", "block", weight=1.0, patterns=[
+        r"(make|synthesize|produce|manufacture|cook)\s+"
+        r"(meth(amphetamine)?|heroin|cocaine|fentanyl|lsd|mdma|ecstasy|crack|pcp)",
+        r"(synthesis|production|manufacture)\s+(of\s+)?"
+        r"(meth(amphetamine)?|heroin|cocaine|fentanyl|lsd|mdma|ecstasy)",
+        r"how\s+to\s+(cook|make|produce|synthesize)\s+(drugs?|narcotics?|meth|heroin|cocaine)",
+        r"(drug|narcotic)\s+(synthesis|production|recipe|formula)\s+steps?",
     ]),
 ]
 
@@ -318,21 +337,18 @@ def _wrap_user_for_classification(text: str) -> str:
 # Module-level value preserved as a *boot-time fallback* so existing tests and
 # `/health` reporters that read it directly keep working.  Runtime classification
 # uses _live_prompt_mode() so a UI flip propagates within one cache TTL.
-GUARD_PROMPT_MODE = os.getenv("GUARD_PROMPT_MODE", "json").lower()
-if GUARD_PROMPT_MODE not in ("json", "llama_guard"):
-    log.warning("Unknown GUARD_PROMPT_MODE=%r, defaulting to 'json'", GUARD_PROMPT_MODE)
-    GUARD_PROMPT_MODE = "json"
+# Prompt mode and model are hardcoded — guard always uses local llama-guard3 via Ollama.
+# llama_guard = real Llama-Guard model producing "safe" / "unsafe\nSn" format (not JSON).
+GUARD_PROMPT_MODE = GUARD_PROMPT_MODE_HARDCODED  # always "llama_guard"
 
 
 def _live_prompt_mode() -> str:
-    raw = (get_credential_by_env("GUARD_PROMPT_MODE", default=GUARD_PROMPT_MODE) or GUARD_PROMPT_MODE).lower()
-    return raw if raw in ("json", "llama_guard") else "json"
+    return "llama_guard"
 
 
 def _live_groq_model() -> str:
-    # Two env names map to the same DB field — UI stores it under int-017.config.model
-    # (LLM_MODEL).  Local override (GUARD_GROQ_MODEL) still wins via env fallback.
-    return get_credential_by_env("LLM_MODEL", default=GROQ_MODEL) or GROQ_MODEL
+    # Model is hardcoded to llama-guard3; base URL comes from integrations config (DB).
+    return GROQ_MODEL
 
 # Set GUARD_DEBUG=1 to have every LLM request log the raw response — useful
 # when diagnosing parser-vs-model disagreements (e.g. model refuses to emit

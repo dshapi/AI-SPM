@@ -409,7 +409,14 @@ export function useSimulationState() {
 
   // ── Start simulation ─────────────────────────────────────────────────────
   const startSimulation = useCallback(async (config) => {
-    const sid = crypto.randomUUID()
+    // crypto.randomUUID() requires a secure context (HTTPS). Fall back to a
+    // Math.random UUID for http://aispm.local dev environments.
+    const sid = (typeof crypto !== 'undefined' && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random() * 16 | 0
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16)
+        })
     terminatedRef.current = false
     dispatchedRef.current = new Set()
 

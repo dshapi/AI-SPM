@@ -14,9 +14,10 @@ spec:
     metadata:
       labels: { app: flink-taskmanager }
     spec:
+      serviceAccountName: flink
       containers:
         - name: flink-taskmanager
-          image: {{ .Values.flink.image }}:{{ .Values.flink.tag }}
+          image: {{ include "aispm.image" .Values.images.flinkJob }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           args: ["taskmanager"]
           volumeMounts:

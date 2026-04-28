@@ -1,5 +1,4 @@
 from __future__ import annotations
-from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -7,26 +6,27 @@ from pydantic_settings import BaseSettings
 TENANT_ID = "t1"
 
 
+# ─── Hardcoded LLM backend (OrbStack k8s → host Ollama) ──────────────────────
+# Intentionally NOT exposed as env-configurable Settings fields so that
+# hydrate_env_from_db() and stale shell exports cannot override them.
+#
+# From inside an OrbStack k8s pod, the host is reachable at host.lima.internal
+# (host.docker.internal is a docker-engine-only alias and does NOT resolve
+# inside k8s pods).  Run `getent hosts host.lima.internal` from inside a pod
+# to confirm; on newer OrbStack builds host.orb.internal also resolves.
+HUNT_MODEL    = "llama3.2"
+GROQ_BASE_URL = "http://host.lima.internal:11434/v1"
+GROQ_API_KEY  = "local"   # any non-empty string — Ollama ignores it
+
+
 class Settings(BaseSettings):
     # Kafka
     kafka_bootstrap_servers: str = "kafka-broker:9092"
-
-    # Groq / LLM — set GROQ_API_KEY to your Groq key for cloud inference.
-    # When using a local llama.cpp backend (GROQ_BASE_URL=http://llm:8080/v1)
-    # the key is ignored by the server; any non-empty string works.
-    groq_api_key: str = Field(default="local", min_length=1)
-    hunt_model:   str = "llama-3.3-70b-versatile"
 
     # Hunt tuning
     hunt_batch_window_sec: int = 30
     hunt_queue_max:        int = 20
     threathunting_ai_interval_sec: int = 300
-
-    # LLM backend
-    # Set GROQ_BASE_URL=http://llm:8080/v1 to use the local llama.cpp server
-    # instead of the Groq cloud API.  GROQ_API_KEY is still required by the
-    # OpenAI SDK but is ignored by llama.cpp (any non-empty string works).
-    groq_base_url: str = "https://api.groq.com/openai/v1"
 
     # Downstream services
     orchestrator_url:  str = "http://agent-orchestrator:8094"

@@ -26,6 +26,10 @@ spec:
           env:
             - name: SPM_DB_URL
               value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+            # GROQ_BASE_URL (Ollama endpoint) is intentionally NOT set here.
+            # It is hydrated from the Ollama integration config (int-017.config.base_url)
+            # in spm-db by hydrate_env_from_db() at startup.
+            # Model (llama-guard3) and prompt mode (llama_guard) are hardcoded in app.py.
           volumeMounts:
             - name: jwt-keys
               mountPath: /keys

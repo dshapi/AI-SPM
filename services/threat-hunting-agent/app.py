@@ -37,7 +37,7 @@ import redis as redis_lib
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from config import get_settings
+from config import get_settings, HUNT_MODEL, GROQ_BASE_URL, GROQ_API_KEY
 from agent.agent import build_agent, run_hunt
 from consumer.kafka_consumer import ThreatHuntConsumer
 from consumer.session_poller import SessionPoller
@@ -127,13 +127,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Case tool configured: orchestrator=%s", settings.orchestrator_url)
 
     # -- Agent -------------------------------------------------------------------
+    # LLM backend is hardcoded (host Ollama via OrbStack) — not env-configurable.
     agent = build_agent(
-        groq_api_key=settings.groq_api_key,
-        model=settings.hunt_model,
-        base_url=settings.groq_base_url,
+        groq_api_key=GROQ_API_KEY,
+        model=HUNT_MODEL,
+        base_url=GROQ_BASE_URL,
     )
     app.state.agent = agent
-    logger.info("LangChain agent built: model=%s base_url=%s", settings.hunt_model, settings.groq_base_url)
+    logger.info("LangChain agent built: model=%s base_url=%s", HUNT_MODEL, GROQ_BASE_URL)
 
     # -- FindingsService ---------------------------------------------------------
     findings_svc = FindingsService(

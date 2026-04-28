@@ -216,8 +216,8 @@ def _build_tools() -> list:
 
 def build_agent(
     groq_api_key: str,
-    model: str = "llama-3.3-70b-versatile",
-    base_url: str = "https://api.groq.com/openai/v1",
+    model: str = "llama3.2",
+    base_url: str = "http://host.lima.internal:11434/v1",
 ) -> Any:
     """
     Build and return the LLM client.

@@ -38,3 +38,19 @@ spec:
   resources:
     requests:
       storage: 5Gi
+---
+# JobManager HA storage — holds JobGraph blobs that the leader publishes
+# to the cluster. ConfigMaps reference these by URI. Without this volume
+# a JM restart loses the active job and clients holding stale job IDs
+# get a 404 forever from the REST API.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: flink-ha
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi

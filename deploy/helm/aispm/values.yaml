@@ -82,8 +82,10 @@ platformEnv:
   AGENT_CONTROLLER_URL: http://spm-api.aispm.svc.cluster.local:8092
   AGENT_POD_NAMESPACE: aispm-agents
   AGENT_RUNTIME_IMAGE: aispm-agent-runtime:latest
-  # Threat-hunting-agent LLM backend — points at spm-llm-proxy which fronts Ollama
-  GROQ_BASE_URL: "http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1"
+  # Threat-hunting-agent + guard-model LLM backend — points directly at host Ollama.
+  # spm-llm-proxy requires per-agent bearer tokens; internal services (hunt, guard)
+  # bypass it and talk to Ollama directly.  Matches int-017.config.base_url in spm-db.
+  GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
 
 # ── Agent runtime ────────────────────────────────────────────────────────────
 agentRuntime:

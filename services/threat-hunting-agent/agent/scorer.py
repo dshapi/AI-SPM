@@ -79,9 +79,15 @@ def compute_risk_score(events: List[Dict[str, Any]]) -> float:
     tier_weights = [_TIER_WEIGHTS.get(_extract_tier(e), 0.0) for e in events]
     severity_weight = max(max(raw_scores), max(tier_weights))
 
-    # frequency_factor: 0.5 baseline, +0.5/6 per blocked event, capped at 1.0
+    # frequency_factor: 0.5 baseline, +0.5/6 per blocked event, capped at 1.0.
+    # Proactive ThreatHunting AI batches are already pre-filtered through the
+    # collector's threshold — penalising them for low frequency double-counts
+    # the filter and produces artificially low risk_scores (0.32–0.40 range).
+    # Treat any all-proactive batch as a full-strength signal.
     blocked_count    = sum(1 for e in events if _is_blocked(e))
     frequency_factor = min(1.0, 0.5 + blocked_count / 6.0)
+    if events and all(e.get("is_proactive") for e in events):
+        frequency_factor = 1.0
 
     # anomaly_factor: cross-actor activity is more alarming
     principals    = {e.get("principal") or e.get("user_id", "") for e in events}
