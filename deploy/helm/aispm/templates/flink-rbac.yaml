@@ -1,0 +1,72 @@
+# deploy/helm/aispm/templates/flink-rbac.yaml
+#
+# RBAC for the Flink cluster (JobManager + TaskManager).
+#
+# Why this is needed:
+#   Both the flink-jobmanager StatefulSet and flink-taskmanager Deployment
+#   set serviceAccountName: flink. Without this file the pods fail to schedule
+#   with "serviceaccount flink not found".
+#
+# What the Role grants:
+#   ConfigMaps  (get/list/watch/create/update/patch/delete)
+#     — K8s-native HA uses ConfigMaps as distributed locks for leader election.
+#       The JobManager writes a ConfigMap whose name encodes the cluster-id;
+#       any standby JM (or a JM restart) reads/updates it to claim leadership.
+#
+#   Leases  (get/list/watch/create/update/patch/delete)
+#     — Flink 1.17+ also uses coordination.k8s.io/v1 Lease objects (same
+#       leader-election pattern, preferred over ConfigMaps in newer versions).
+#
+#   Pods  (get/list/watch)
+#     — TaskManager registration: the JM queries the pod list to discover TM
+#       addresses when the headless Service DNS is not yet propagated.
+#       Read-only is enough here.
+#
+# Scope: namespaced Role (not ClusterRole) so permissions are confined to the
+# aispm namespace. If you add cross-namespace agent namespaces that need to
+# submit Flink jobs, promote this to ClusterRole + ClusterRoleBinding.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: flink
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: flink
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: flink
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: flink
+rules:
+  # Leader election (HA) — ConfigMaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Leader election (HA) — Leases (preferred in Flink 1.17+)
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # TaskManager pod discovery
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: flink
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: flink
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: flink
+subjects:
+  - kind: ServiceAccount
+    name: flink
+    namespace: {{ .Values.global.namespace }}
