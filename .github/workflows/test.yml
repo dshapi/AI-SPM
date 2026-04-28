@@ -96,7 +96,7 @@ jobs:
           # Core service stack: fastapi, pytest, pytest-asyncio, httpx,
           # kafka-python-ng, redis, PyJWT[crypto], cryptography, pydantic
           pip install -r services/api/requirements.txt
-
+          pip install kubernetes
           # SPM model-registry ORM and migration tooling
           pip install \
             "sqlalchemy[asyncio]>=2.0" \
