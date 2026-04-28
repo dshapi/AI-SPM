@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import agent_controller
+import kubernetes
 
 
 # ─── Task 11 — mint_agent_tokens ──────────────────────────────────────────
