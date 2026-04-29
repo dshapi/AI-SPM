@@ -141,6 +141,25 @@
 #      GUARD_FAIL_CLOSED stays default-off and the LLM is pointed at
 #      hosted Groq with a real API key.
 #
+#  19. Deployments' readiness probes must point at a port the workload
+#      actually listens on. spm-aggregator originally specified
+#      `httpGet: /health on :8080` but the workload only ever exposed
+#      Prometheus on :9091 — readiness probe always failed, the pod
+#      sat at 1/2 Running, and rollouts timed out. The fix is in the
+#      chart: probe at /metrics on 9091. If you add new headless
+#      services, audit their readinessProbe before declaring victory.
+#
+#  18. spm-aggregator's psycopg2 connections need TCP keepalives. On a
+#      quiet dev cluster, postgres connections sit idle for hours
+#      between Kafka audit events; without keepalives the kernel /
+#      firewall silently drops the socket and the next message hits
+#      `psycopg2.InterfaceError: connection already closed`. The audit
+#      event is then lost (the except-handler reconnects, but the
+#      previous message is gone). Symptom: Runtime page in the UI
+#      shows nothing for recent agent activity even though Kafka has
+#      the events. Fix: get_db_conn() now passes
+#      keepalives_idle=30 keepalives_interval=10 keepalives_count=3.
+#
 #  17. The obfuscation_screen at services/api/models/obfuscation_screen.py
 #      is the catch-all for character-insertion / punctuation-broken
 #      jailbreaks (`Ign-ore pre-vious in-struc-tions`, `i.g.n.o.r.e`).
@@ -1467,6 +1486,20 @@ if [ "$TARGET" = "all" ]; then
   probe_authz "spm-mcp /health" \
     "http://spm-mcp.aispm.svc.cluster.local:8500/health" 200 \
     || die "spm-mcp /health unreachable from sidecar-less pod (integration tests will fail)"
+
+  # spm-mcp — sidecar-less callers (ambient-no-ztunnel agents) must
+  # reach /mcp on port 8500 for tool calls (web_fetch et al.). Anything
+  # other than 403 means the path-based rule is in place. We POST so
+  # we exercise the same verb the agent uses.
+  got=$(kubectl -n aispm exec "$_PROBE_POD" -- \
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
+    -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    'http://spm-mcp.aispm.svc.cluster.local:8500/mcp' 2>/dev/null || echo "ERR")
+  if [ "$got" = "403" ]; then
+    die "spm-mcp /mcp returned 403 — custom agents will fail tool calls (web_fetch, etc.). Ensure spm-mcp-allow-agents has a path-based rule for /mcp. See invariant 11."
+  fi
+  log "    ✓ spm-mcp /mcp → HTTP $got (path-rule allows sidecar-less callers)"
 
   # spm-llm-proxy — platform-namespace callers (spm-api agent_chat)
   # must reach /v1/models on port 8500.

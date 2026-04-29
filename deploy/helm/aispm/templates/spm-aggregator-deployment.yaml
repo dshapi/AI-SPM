@@ -17,7 +17,11 @@ spec:
           image: {{ include "aispm.image" .Values.images.spmAggregator }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
-            - containerPort: 8080
+            # Prometheus metrics — also doubles as the readiness probe
+            # target. The aggregator is otherwise headless (no HTTP API);
+            # its data plane is Kafka consumer + Postgres writer threads.
+            - name: metrics
+              containerPort: 9091
           envFrom:
             - configMapRef:
                 name: platform-env
@@ -35,6 +39,12 @@ spec:
             - name: SPM_ENFORCEMENT_WINDOW
               value: "3"
           readinessProbe:
-            httpGet: { path: /health, port: 8080 }
+            # /metrics is always 200 once Prometheus client is initialized
+            # (start_http_server(9091) in app.py:main). The aggregator
+            # doesn't expose a dedicated /health — Kafka consumer health
+            # is enforced by group membership, DB health by per-message
+            # processing. If you add a real /health endpoint later,
+            # switch this back.
+            httpGet: { path: /metrics, port: 9091 }
             initialDelaySeconds: 15
             periodSeconds: 10

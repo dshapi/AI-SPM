@@ -86,6 +86,23 @@ spec:
       to:
         - operation:
             ports: ["8500"]
+    # Sidecar-less / ambient-without-ztunnel callers (agents in dev where
+    # the agents namespace is labeled `istio.io/dataplane-mode=ambient`
+    # but ztunnel isn't installed). Without a peer identity, the
+    # namespace-based rules above can't match, and every tool call from
+    # the custom agent gets "RBAC: access denied" at Envoy. The agent's
+    # MCP_TOKEN is what actually authenticates the caller — Istio here
+    # is defense-in-depth, not the trust boundary. Scope kept narrow
+    # to the MCP surface only — same pattern as spm-llm-proxy below.
+    - to:
+        - operation:
+            ports: ["8500"]
+            paths:
+              - "/mcp"
+              - "/mcp/*"
+              - "/tools"
+              - "/tools/*"
+              - "/health"
 ---
 # ── spm-llm-proxy: agent pods → Ollama / OpenAI / Anthropic proxy ────────
 # Two ALLOW rules — both gated to port 8500 to keep the surface narrow:

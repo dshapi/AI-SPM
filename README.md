@@ -64,25 +64,54 @@ Implement proper governance controls around AI usage.
 
 ## Quick how to deploy 101
 
-Get Orbyx AI SPM running locally in 3 steps.
+Get Orbyx AI SPM running locally in a few simple steps.
+Prerequisites:
 
-**Step 1 — Install OrbStack**
+## Mac OS:
+```bash
+brew install mkcert istioctl
+mkcert -install
+```
 
-Download and install [OrbStack](https://orbstack.dev) — This the Bare Metal / Cloud Kubernetis  
+## Ubuntu / Debian:
+```bash
+sudo apt-get update
+sudo apt-get install -y libnss3-tools  # mkcert needs this to trust the CA in browsers (SSL suport)
+```
 
-**Step 2 — Run the bootstrap script**
+## Fedora / RHEL
+```bash
+sudo dnf install -y nss-tools
+```
+## all OS
+```bash
+curl -fsSLo /tmp/mkcert "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-linux-amd64"
+sudo install -m 0755 /tmp/mkcert /usr/local/bin/mkcert
+
+curl -fsSL https://istio.io/downloadIstio | sh -
+sudo install -m 0755 istio-*/bin/istioctl /usr/local/bin/istioctl
+
+mkcert -install
+```
+If you're on arm64 Linux, swap linux-amd64 → linux-arm64 in the mkcert URL.
+
+## **Step 1 — Install OrbStack**
+
+Download and install [OrbStack](https://orbstack.dev) — This is Bare Metal / Cloud Kubernetis  
+
+## **Step 2 — Run the bootstrap script**
 
 Clone the repo and run the one-liner bootstrap script — it handles everything (environment setup, API keys prompt, image build, and service startup):
 
 ```bash
 git clone https://github.com/dshapi/AI-SPM.git
 cd AI-SPM
-bash deploy/scripts/bootstrap-cluster.sh
+bash SKIP_FALCO=1 SKIP_KYVERNO=1 RESET_KAFKA=1 bash deploy/scripts/bootstrap-cluster.sh
 ```
 
 The script will guide you through entering your API keys and then bring the full platform up automatically.
 
-**Step 3 — Open the platform**
+## **Step 3 — Open the platform**
 
 Once the bootstrap completes, navigate to:
 

@@ -72,7 +72,28 @@ def derive_event_id(tenant_id: str, event_type: str, timestamp: str) -> str:
 # ── DB helpers (synchronous psycopg2 for consumer loop) ──────────────────────
 
 def get_db_conn():
-    return psycopg2.connect(SPM_DB_URL)
+    """Open a psycopg2 connection with TCP keepalives so long idle
+    periods (e.g. between Kafka messages on a quiet dev cluster) don't
+    let the kernel/firewall silently drop the socket. Without this,
+    the first message after >1h of idle time hits
+    `psycopg2.InterfaceError: connection already closed` — by then the
+    audit event is already lost; the except-handler reconnects but the
+    Runtime page in the UI shows a gap.
+
+    The values:
+      keepalives=1          — enable
+      keepalives_idle=30s   — start probing after 30s idle (well below
+                              any reasonable NAT/firewall timeout)
+      keepalives_interval=10s
+      keepalives_count=3    — drop after 3 missed probes (~60s)
+    """
+    return psycopg2.connect(
+        SPM_DB_URL,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=3,
+    )
 
 
 def upsert_snapshot(conn, model_id: Optional[str], tenant_id: str,
@@ -341,6 +362,18 @@ def main() -> None:
                     db_conn.rollback()
                 except Exception:
                     pass
+                # Reconnect on connection-level errors so the next
+                # 30s tick doesn't fail the same way. Mirrors the
+                # main consumer loop's reconnect path.
+                try:
+                    db_conn.close()
+                except Exception:
+                    pass
+                try:
+                    db_conn = get_db_conn()
+                    log.info("Coverage refresh: reconnected to DB")
+                except Exception as e2:
+                    log.error("Coverage refresh: DB reconnect failed: %s", e2)
             time.sleep(30)
 
     cov_conn = get_db_conn()
