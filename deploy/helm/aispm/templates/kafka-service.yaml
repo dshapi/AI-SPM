@@ -15,7 +15,10 @@ spec:
     - name: controller
       port: 9093
 ---
-# Named ClusterIP service — matches KAFKA_BOOTSTRAP_SERVERS in platformEnv
+# Named ClusterIP service — used by init containers (job wait-for-kafka)
+# that just need "any reachable broker", separate from the headless DNS
+# entries that KAFKA_BOOTSTRAP_SERVERS in the platform-env ConfigMap
+# (templated from .Values.kafka.replicas) lists for client auto-discovery.
 apiVersion: v1
 kind: Service
 metadata:

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import {
   Search, X, Download, Bookmark, FileText,
   ShieldCheck, ShieldAlert, Shield, Activity,
@@ -15,6 +15,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { fetchPostureSummary } from '../api/spm.js'
 
 // ── Design tokens ──────────────────────────────────────────────────────────────
 
@@ -791,6 +792,22 @@ export default function Posture() {
   const [onlyUncovered,  setOnlyUncovered]  = useState(false)
   const [selectedDomain, setSelectedDomain] = useState(null)
 
+  // ── Live posture summary from spm-api /posture/summary ────────────────────
+  // Backed by the seeded posture_snapshots table (30 daily rows from
+  // seed_db.py). Hits a real endpoint, falls back to null on failure so
+  // the page still renders its (still-mocked) rich sub-sections offline.
+  // Key takeaway: this is the ONE thing on the Posture page sourced from
+  // real data today — the rest of the constants below are placeholders
+  // pending corresponding backend tables.
+  const [liveSummary, setLiveSummary] = useState(null)
+  useEffect(() => {
+    let cancelled = false
+    fetchPostureSummary({ days: 30 }).then(s => {
+      if (!cancelled) setLiveSummary(s)
+    })
+    return () => { cancelled = true }
+  }, [])
+
   // Filtered domains
   const filteredDomains = DOMAINS.filter(d => {
     if (filterDomain !== 'All Domains' && d.name !== filterDomain) return false
@@ -877,6 +894,71 @@ export default function Posture() {
           stripColor={domainsAtRisk > 0 ? 'bg-orange-500' : 'bg-gray-200'}
         />
       </div>
+
+      {/* ── Live Activity strip (real data from posture_snapshots) ──
+          Sourced from spm-api GET /posture/summary, which aggregates the
+          30 daily rows seeded by services/spm_api/seed_db.py. The block
+          renders only when the API returns data — if spm-api is offline
+          or the seed hasn't run, the strip silently disappears so the
+          rest of the page (still mocked) keeps rendering. */}
+      {liveSummary && liveSummary.snapshot_count > 0 && (
+        <div>
+          <div className="flex items-center gap-2 mb-2">
+            <span className="inline-flex items-center gap-1 text-[10px] font-black uppercase tracking-[0.06em] px-2 py-0.5 rounded-full border text-emerald-700 bg-emerald-50 border-emerald-200">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              Live
+            </span>
+            <p className="text-[12px] font-semibold text-gray-700">
+              Platform activity — last {liveSummary.window_days} days
+              <span className="text-[11px] font-medium text-gray-400 ml-2">
+                ({liveSummary.snapshot_count} daily snapshots)
+              </span>
+            </p>
+          </div>
+          <div className="grid grid-cols-4 gap-4">
+            <KpiCard
+              label="Total Requests"
+              value={liveSummary.total_requests.toLocaleString()}
+              sub={`${liveSummary.total_blocks.toLocaleString()} blocked (${liveSummary.block_rate_pct}%)`}
+              icon={Activity}
+              iconBg="bg-blue-500"
+              valueTint="text-gray-900"
+              stripColor="bg-blue-500"
+            />
+            <KpiCard
+              label="Avg Risk Score"
+              value={liveSummary.avg_risk_score.toFixed(2)}
+              sub={`Peak ${liveSummary.max_risk_score.toFixed(2)} over window`}
+              icon={ShieldAlert}
+              iconBg={liveSummary.avg_risk_score >= 0.6 ? 'bg-red-500'
+                    : liveSummary.avg_risk_score >= 0.4 ? 'bg-yellow-500' : 'bg-emerald-500'}
+              valueTint={liveSummary.avg_risk_score >= 0.6 ? 'text-red-600'
+                       : liveSummary.avg_risk_score >= 0.4 ? 'text-yellow-600' : 'text-emerald-600'}
+              stripColor={liveSummary.avg_risk_score >= 0.6 ? 'bg-red-500'
+                        : liveSummary.avg_risk_score >= 0.4 ? 'bg-yellow-400' : 'bg-emerald-500'}
+            />
+            <KpiCard
+              label="Avg Intent Drift"
+              value={liveSummary.avg_intent_drift.toFixed(3)}
+              sub="Lower is better — semantic stability"
+              icon={Workflow}
+              iconBg="bg-purple-500"
+              valueTint={liveSummary.avg_intent_drift >= 0.15 ? 'text-red-600'
+                       : liveSummary.avg_intent_drift >= 0.08 ? 'text-yellow-600' : 'text-emerald-600'}
+              stripColor="bg-purple-500"
+            />
+            <KpiCard
+              label="TTP Hits"
+              value={liveSummary.total_ttp_hits}
+              sub={`${liveSummary.total_escalations} escalations triggered`}
+              icon={Zap}
+              iconBg="bg-orange-500"
+              valueTint={liveSummary.total_ttp_hits > 0 ? 'text-orange-600' : 'text-gray-900'}
+              stripColor={liveSummary.total_ttp_hits > 0 ? 'bg-orange-500' : 'bg-gray-200'}
+            />
+          </div>
+        </div>
+      )}
 
       {/* ── Filter bar ── */}
       <div className="flex items-center gap-2 flex-wrap">

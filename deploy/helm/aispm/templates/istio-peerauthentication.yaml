@@ -15,7 +15,10 @@
 #
 # When Istio CNI + waypoint proxies are installed for the aispm
 # services that ambient peers reach, this can return to STRICT.
-{{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
+#
+# Istio is always installed by the bootstrap script — the prior capability
+# guard is gone (it caused other Istio templates to render-or-not depending
+# on which --api-versions flag the caller happened to pass).
 apiVersion: security.istio.io/v1beta1
 kind: PeerAuthentication
 metadata:
@@ -24,4 +27,3 @@ metadata:
 spec:
   mtls:
     mode: {{ .Values.agentRuntime.mtlsMode | default "PERMISSIVE" }}
-{{- end }}

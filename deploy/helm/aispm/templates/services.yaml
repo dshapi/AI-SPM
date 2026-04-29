@@ -20,7 +20,14 @@ metadata:
 spec:
   selector: { app: opa }
   ports:
-    - port: 8181
+    # `name: http` (and `appProtocol: HTTP`) tells Istio this is HTTP
+    # traffic so it applies HTTP-aware filters at the sidecar — required
+    # for path-based rules in opa-allow-platform AuthorizationPolicy
+    # to actually match. Without these, Istio treats 8181 as plain TCP
+    # and HTTP path filters silently never match.
+    - name: http
+      port: 8181
+      appProtocol: HTTP
 ---
 apiVersion: v1
 kind: Service
@@ -217,7 +224,11 @@ metadata:
 spec:
   selector: { app: spm-mcp }
   ports:
-    - port: 8500
+    # Same naming convention as opa / spm-llm-proxy — required for
+    # Istio HTTP-aware filtering (path-based AuthZ).
+    - name: http
+      port: 8500
+      appProtocol: HTTP
 ---
 apiVersion: v1
 kind: Service
@@ -227,7 +238,13 @@ metadata:
 spec:
   selector: { app: spm-llm-proxy }
   ports:
-    - port: 8500
+    # `name: http` + appProtocol so Istio attaches HTTP-aware filters —
+    # without these, path-based AuthorizationPolicy rules silently never
+    # match (Istio falls back to L4-only matching). See same fix on the
+    # opa Service above.
+    - name: http
+      port: 8500
+      appProtocol: HTTP
 ---
 apiVersion: v1
 kind: Service

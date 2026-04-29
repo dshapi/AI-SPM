@@ -30,6 +30,32 @@ log = logging.getLogger(__name__)
 _TIMEOUT_S = 30
 
 
+def _raise_for_status_with_detail(r: httpx.Response) -> None:
+    """Like ``r.raise_for_status()`` but appends the response body's
+    ``detail`` so non-2xx responses from spm-mcp surface a useful error.
+    See the matching helper in ``aispm/llm.py`` for the rationale.
+    """
+    if r.status_code < 400:
+        return
+    detail = ""
+    try:
+        body = r.json()
+    except Exception:                                          # noqa: BLE001
+        body = None
+    if isinstance(body, dict):
+        d = body.get("detail") or body.get("error") or body.get("message")
+        if isinstance(d, dict):
+            detail = str(d.get("message") or d)
+        elif d:
+            detail = str(d)
+    if not detail:
+        detail = (r.text or "").strip()[:500]
+    kind = "Client" if r.status_code < 500 else "Server"
+    base = f"{kind} error '{r.status_code} {r.reason_phrase}' for url '{r.url}'"
+    msg = f"{base}\n  → {detail}" if detail else base
+    raise httpx.HTTPStatusError(msg, request=r.request, response=r)
+
+
 class MCPError(RuntimeError):
     """Raised when the MCP server returns an ``error`` field instead of
     a ``result``. The error code + message from the server are
@@ -85,7 +111,7 @@ async def call(tool: str, **kwargs) -> Dict[str, Any]:
 
     async with httpx.AsyncClient(timeout=_TIMEOUT_S) as c:
         r = await c.post(_MCP_URL, json=body, headers=headers)
-    r.raise_for_status()
+    _raise_for_status_with_detail(r)
 
     payload = r.json()
     err = payload.get("error")

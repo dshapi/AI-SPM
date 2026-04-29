@@ -86,10 +86,10 @@ The script will guide you through entering your API keys and then bring the full
 
 Once the bootstrap completes, navigate to:
 
-| What | URL |
-|---|---|
-| **Chat UI** | http://localhost:3000 |
-| **Admin Portal** | http://localhost:3001/admin |
+| What | URL                        |
+|---|----------------------------|
+| **Chat UI** | http://aispm.local      |
+| **Admin Portal** | http://aispm.local/admin/  |
 
 Click **Sign In** on either page — a demo JWT is minted automatically, no account needed.
 

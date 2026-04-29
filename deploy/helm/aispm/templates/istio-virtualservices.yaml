@@ -5,7 +5,11 @@
 #   /api/*      → api:8080              strip /api
 #   /ws/*       → api:8080              no rewrite (WebSocket)
 #   /*          → ui:3001
-{{- if and .Values.ingress.enabled (.Capabilities.APIVersions.Has "networking.istio.io/v1beta1") }}
+{{- /* Istio is always installed by the bootstrap script — the previous     */}}
+{{- /* capability check (`.Capabilities.APIVersions.Has`) silently dropped   */}}
+{{- /* this template under `helm template` because --api-versions wasn't    */}}
+{{- /* passed for networking.istio.io. Guard kept only on ingress.enabled. */}}
+{{- if .Values.ingress.enabled }}
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:

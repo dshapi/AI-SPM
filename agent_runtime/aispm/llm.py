@@ -35,6 +35,40 @@ _TIMEOUT_S = 120
 _DEFAULT_MODEL = ""
 
 
+def _raise_for_status_with_detail(r: httpx.Response) -> None:
+    """Like ``r.raise_for_status()`` but appends the response body's
+    ``detail`` (FastAPI's HTTPException shape) so the caller's
+    ``str(e)`` actually says *why* the proxy errored.
+
+    Without this, the customer agent's ``f"(agent error: {e})"``
+    surfaces only ``Server error '502 Bad Gateway' for url '...'``,
+    throwing away the proxy's hard-won diagnostic
+    (e.g. "Anthropic upstream is missing api_key — configure it on
+    the Anthropic integration"). The default httpx message format is
+    preserved so any code that pattern-matches on it still works;
+    detail is appended on a new line.
+    """
+    if r.status_code < 400:
+        return
+    detail = ""
+    try:
+        body = r.json()
+    except Exception:                                          # noqa: BLE001
+        body = None
+    if isinstance(body, dict):
+        d = body.get("detail") or body.get("error") or body.get("message")
+        if isinstance(d, dict):
+            detail = str(d.get("message") or d)
+        elif d:
+            detail = str(d)
+    if not detail:
+        detail = (r.text or "").strip()[:500]
+    kind = "Client" if r.status_code < 500 else "Server"
+    base = f"{kind} error '{r.status_code} {r.reason_phrase}' for url '{r.url}'"
+    msg = f"{base}\n  → {detail}" if detail else base
+    raise httpx.HTTPStatusError(msg, request=r.request, response=r)
+
+
 async def complete(
     messages: List[Dict[str, str]],
     *,
@@ -89,7 +123,7 @@ async def complete(
     async with httpx.AsyncClient(timeout=_TIMEOUT_S) as c:
         r = await c.post(f"{_BASE_URL}/chat/completions",
                           json=body, headers=headers)
-    r.raise_for_status()
+    _raise_for_status_with_detail(r)
 
     data = r.json()
     return Completion(

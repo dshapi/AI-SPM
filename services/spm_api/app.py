@@ -956,3 +956,12 @@ try:
 except ModuleNotFoundError:
     from services.spm_api.agent_chat import router as agent_chat_router  # noqa: E402
 app.include_router(agent_chat_router)
+
+# Posture — surfaces seeded posture_snapshots so the UI Posture page can
+# show real data instead of hardcoded constants. seed_db.py writes 30
+# daily rows on first boot; this endpoint reads them back.
+try:
+    from posture_routes import router as posture_router  # type: ignore  # noqa: E402
+except ModuleNotFoundError:
+    from services.spm_api.posture_routes import router as posture_router  # noqa: E402
+app.include_router(posture_router)

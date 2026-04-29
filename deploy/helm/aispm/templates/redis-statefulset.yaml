@@ -12,6 +12,15 @@ spec:
   template:
     metadata:
       labels: { app: redis }
+      annotations:
+        # Don't inject the Istio sidecar into Redis. Same reasoning as
+        # kafka-statefulset.yaml: Envoy's L4 interception breaks Redis's
+        # RESP protocol — the server immediately closes the connection
+        # when the client sends a non-TLS frame, surfacing in clients
+        # as `Connection closed by server.` despite TCP being open.
+        # Redis runs in-cluster and is reached only by trusted services;
+        # we don't gain anything by also wrapping it in Istio mTLS.
+        sidecar.istio.io/inject: "false"
     spec:
       containers:
         - name: redis

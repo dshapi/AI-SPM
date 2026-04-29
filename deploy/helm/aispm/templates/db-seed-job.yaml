@@ -1,0 +1,104 @@
+# deploy/helm/aispm/templates/db-seed-job.yaml
+#
+# Idempotent DB seed Job. Runs `python3 /app/seed_db.py` against the spm-db
+# Postgres instance to populate models, posture history, integrations,
+# cases, alerts, and policies.
+#
+# Why a hook instead of doing it from bootstrap-cluster.sh:
+#   - Removes runtime coupling: the bootstrap script no longer needs to
+#     `kubectl exec` into a "currently running" spm-api pod (which depends
+#     on rollout state, can race startup-orchestrator, etc.).
+#   - The Job owns its own image, command, and env — single source of
+#     truth lives in the chart, not split between shell and Python.
+#   - Reproducible across compose ↔ k8s: bootstrap-cluster.sh just runs
+#     `helm upgrade --install` (or template+apply) and the seed runs
+#     itself. CI gets identical behavior to a human `helm install`.
+#
+# spm-api's lifespan also runs _seed_demo_models() on first startup, so
+# this Job is belt-and-suspenders — but as a hook it surfaces failures
+# explicitly to the helm release status, which a lifespan-time error
+# does not.
+#
+# Hook ordering:
+#   weight -5  startup-orchestrator (Kafka topics, JWT keys)
+#   weight  0  flink-pyjob-submitter
+#   weight  5  this Job (DB seed)
+# We run AFTER the orchestrator because the seed reads platform-secrets
+# and platform-env which the orchestrator may augment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: db-seed
+  namespace: {{ .Values.global.namespace }}
+  # NB: previously a `helm.sh/hook` post-install/post-upgrade Job. Hooks
+  # were inert under `helm template | kubectl apply` (which is what the
+  # bootstrap uses) and the bootstrap now sequences this Job in the
+  # `data-init` tier — so the annotations were just confusing. Removed.
+spec:
+  backoffLimit: 3
+  # Hard deadline for the whole Job. seed_db.py is idempotent and should
+  # complete in seconds; if it's still going after 5 minutes something is
+  # wrong with the database connection.
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      annotations:
+        # Same reasoning as startup-orchestrator-job.yaml: don't inject
+        # the istio sidecar into a one-shot Job. Init containers and
+        # the seed itself don't need mTLS.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      initContainers:
+        # Wait for spm-db to accept connections before running the seed.
+        # Without this, the first run after a fresh install can race the
+        # postgres StatefulSet's startup probe.
+        - name: wait-for-spm-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              DB_HOST="spm-db.{{ .Values.global.namespace }}.svc.cluster.local"
+              DB_PORT="5432"
+              MAX_ATTEMPTS=120
+              attempt=0
+              echo "Waiting for spm-db at ${DB_HOST}:${DB_PORT} (max ${MAX_ATTEMPTS} attempts)..."
+              until nc -z "${DB_HOST}" "${DB_PORT}" 2>/dev/null; do
+                attempt=$(( attempt + 1 ))
+                if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
+                  echo "ERROR: spm-db not reachable after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS}x2s). Giving up."
+                  exit 1
+                fi
+                echo "  attempt ${attempt}/${MAX_ATTEMPTS}: spm-db not ready — sleeping 2s..."
+                sleep 2
+              done
+              echo "spm-db TCP port open."
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+      containers:
+        - name: db-seed
+          image: {{ include "aispm.image" .Values.images.spmApi }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          command: ["python3", "/app/seed_db.py"]
+          envFrom:
+            - configMapRef:
+                name: platform-env
+            - secretRef:
+                name: platform-secrets
+          env:
+            - name: SPM_DB_URL
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"

@@ -169,6 +169,13 @@ def wait_for_kafka(max_wait: int = 120) -> KafkaAdminClient:
                 bootstrap_servers=KAFKA_BOOTSTRAP,
                 client_id="cpm-startup-orchestrator",
                 request_timeout_ms=5000,
+                # Pin the API version to skip auto-probing. kafka-python-ng's
+                # version probe sends ApiVersionsRequest_v4 first against
+                # Confluent 7.6.x (Kafka 3.6) brokers that only support up to
+                # v3, fails to fall back, and raises `UnrecognizedBrokerVersion`.
+                # Confluent 7.6 is Kafka 3.6, which is wire-compatible with
+                # client API version 2.5.0 — that's our floor.
+                api_version=(2, 5, 0),
             )
             # Verify connectivity by listing topics — constructor alone doesn't
             # guarantee the broker is actually reachable and responsive.

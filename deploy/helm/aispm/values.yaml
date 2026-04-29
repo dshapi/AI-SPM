@@ -64,6 +64,7 @@ kafka:
   image: confluentinc/cp-kafka
   tag: "7.6.1"
   replicas: 3                # 3-node KRaft quorum: tolerates 1 broker failure
+  minInsyncReplicas: 2       # consumer of replication factor; dev overrides to 1
   clusterId: q1Enf0NkTvaBgXGsKZoeRA
   storage: 10Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
@@ -90,21 +91,33 @@ spmDb:
 
 # ── Platform env (non-secret) ────────────────────────────────────────────────
 # Mirrors x-common-env in compose.yml — keep these in sync.
+#
+# NOTE: KAFKA_BOOTSTRAP_SERVERS, KAFKA_REPLICATION_FACTOR, and
+# KAFKA_MIN_INSYNC_REPLICAS used to live here as static strings sized for
+# 3 brokers. That broke dev (kafka.replicas=1) two ways:
+#   1. Bootstrap list referenced kafka-1 / kafka-2 DNS names that don't
+#      resolve, sending the kafka-python client into a probe loop that
+#      eventually surfaced as `UnrecognizedBrokerVersion`.
+#   2. Topic creation with RF=3 failed `NOT_ENOUGH_REPLICAS` against a
+#      single broker.
+# These are now derived from .Values.kafka.replicas in the ConfigMap
+# template (configmap-platform-env.yaml) so the same chart works for
+# 1-broker dev and 3-broker prod without a values override.
 platformEnv:
-  # All 3 broker headless-DNS entries listed — clients auto-discover the full
-  # cluster after connecting to any one, but listing all three avoids a single
-  # bootstrap SPOF. Used by all services and the startup-orchestrator Job.
-  KAFKA_BOOTSTRAP_SERVERS: kafka-0.kafka.aispm.svc.cluster.local:9092,kafka-1.kafka.aispm.svc.cluster.local:9092,kafka-2.kafka.aispm.svc.cluster.local:9092
-  # Read by startup_orchestrator (app.py: KAFKA_REPLICATION_FACTOR) when
-  # creating topics so all user topics also get RF=3.
-  KAFKA_REPLICATION_FACTOR: "3"
-  KAFKA_MIN_INSYNC_REPLICAS: "2"
   OPA_URL: http://opa.aispm.svc.cluster.local:8181
   JWT_ALGORITHM: RS256
   JWT_ISSUER: cpm-platform
   GUARD_MODEL_URL: http://guard-model.aispm.svc.cluster.local:8200
   GUARD_MODEL_ENABLED: "true"
   GUARD_MODEL_TIMEOUT: "60.0"
+  # LlamaGuard escalation threshold: when the model returns verdict=allow
+  # but assigns a category, the api escalates to "block" only if the
+  # confidence score >= this value. 0.6 is the prod default — tuned to
+  # avoid false positives like "yes" → S2 → killed. Dev (values.dev.yaml)
+  # overrides this to 0.3 so simulator probes catch borderline jailbreaks
+  # at low confidence (e.g. obfuscated `ign-ore pre-vious in-struc-tions`
+  # which scored 0.30 and slipped through with the prod-tight threshold).
+  GUARD_BLOCK_SCORE: "0.6"
   WS_WAIT_TIMEOUT_S: "10.0"
   RATE_LIMIT_RPM: "60"
   SERVICE_VERSION: "3.0.0"
@@ -240,9 +253,19 @@ ingress:
   host: aispm.example.com
   tlsSecretName: aispm-tls
   letsencryptEmail: ops@example.com
-  tls: true             # set false in values.dev.yaml
-  certManager: true     # set false in values.dev.yaml
-  httpsRedirect: true   # set false in values.dev.yaml
+  tls: true             # dev/prod both terminate TLS (selfsigned on dev)
+  certManager: true     # cert-manager issues + renews the cert
+  httpsRedirect: true   # 80 → 443 redirect at the Ingress
+  # cert-manager ClusterIssuer name used by both ui-ingress (annotation)
+  # and the Certificate resource. One of:
+  #   selfsigned-cluster-issuer  — dev / OrbStack; browser will warn
+  #   letsencrypt-staging        — pre-prod; real ACME, untrusted CA
+  #   letsencrypt-prod           — production; trusted, strict rate-limit
+  # All three are rendered by templates/cert-manager-issuers.yaml. Default
+  # below is `letsencrypt-staging` — burning the prod-Let's-Encrypt rate
+  # limit on a misconfigured DNS will lock you out for a week, so we
+  # require an explicit flip in prod values to switch to `letsencrypt-prod`.
+  clusterIssuer: letsencrypt-staging
 
 # ── Runtime Security ─────────────────────────────────────────────────────────
 # Set falco.enabled=true only when Falco is installed (namespace falco must exist).

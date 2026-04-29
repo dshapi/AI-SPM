@@ -107,6 +107,40 @@ export function registerModelWithFile(formData, { onProgress, signal } = {}) {
   })
 }
 
+// ── Posture (real data from seeded posture_snapshots table) ─────────────────
+//
+// The Posture page used to render entirely from hardcoded JS constants even
+// though seed_db.py seeds 30 daily PostureSnapshot rows on first boot.
+// These two helpers wire the page to the real seeded data.
+//
+// Both fetchers degrade to a safe empty-shape on network/API failure so the
+// page can still render its rich (still-mocked) sub-sections offline.
+
+export async function fetchPostureSnapshots({ days = 30, tenantId = 'global', modelId } = {}) {
+  try {
+    const qs = new URLSearchParams({ days: String(days), tenant_id: tenantId })
+    if (modelId) qs.set('model_id', modelId)
+    const res = await fetch(`${SPM_BASE}/posture/snapshots?${qs}`, { headers: await _authHeaders() })
+    if (!res.ok) return []
+    const body = await res.json().catch(() => [])
+    return Array.isArray(body) ? body : []
+  } catch {
+    return []
+  }
+}
+
+export async function fetchPostureSummary({ days = 30, tenantId = 'global', modelId } = {}) {
+  try {
+    const qs = new URLSearchParams({ days: String(days), tenant_id: tenantId })
+    if (modelId) qs.set('model_id', modelId)
+    const res = await fetch(`${SPM_BASE}/posture/summary?${qs}`, { headers: await _authHeaders() })
+    if (!res.ok) return null
+    return await res.json().catch(() => null)
+  } catch {
+    return null
+  }
+}
+
 // ── Policies (read from CPM via orchestrator) ───────────────────────────────
 
 export async function fetchPolicies() {

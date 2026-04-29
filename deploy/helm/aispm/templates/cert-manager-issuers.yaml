@@ -1,0 +1,72 @@
+{{- /*
+deploy/helm/aispm/templates/cert-manager-issuers.yaml
+
+Three cluster-scoped Issuers for cert-manager. Cluster-scoped (not
+namespace-scoped) so they're shared across `aispm`, `aispm-agents`, and
+`istio-system` — any Certificate / Ingress in any namespace can reference
+them by name.
+
+Naming convention is the cert-manager community-standard:
+    selfsigned-cluster-issuer  →  for dev / local / OrbStack (no ACME)
+    letsencrypt-staging        →  for prod-staging (low rate-limit, browser
+                                  warns; use this until DNS is verified)
+    letsencrypt-prod           →  for prod-go-live (real cert; rate-limit
+                                  per-domain — ~5 certs/week — so don't
+                                  use until staging works end-to-end)
+
+The selfsigned issuer always renders (zero-config, zero side-effects). The
+ACME issuers render only when ingress.letsencryptEmail is set, because ACME
+registration without a contact email gets rejected by Let's Encrypt.
+*/ -}}
+---
+# selfsigned-cluster-issuer — used by dev (values.dev.yaml). cert-manager
+# generates a fresh self-signed cert on demand for any Certificate that
+# references this issuer. Browser will warn — that's expected for dev.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-cluster-issuer
+spec:
+  selfSigned: {}
+{{- if .Values.ingress.letsencryptEmail }}
+---
+# letsencrypt-staging — Let's Encrypt's staging environment. Issues real
+# certs but signed by an untrusted CA, so browsers warn. Generous rate
+# limits (good for debugging DNS/ACME challenge plumbing without burning
+# the prod allowance).
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: {{ .Values.ingress.letsencryptEmail | quote }}
+    privateKeySecretRef:
+      # cert-manager stores the ACME account private key here. Naming
+      # mirrors the issuer for clarity. Created lazily on first use.
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ .Values.ingress.className | default "nginx" }}
+---
+# letsencrypt-prod — Let's Encrypt's production environment. Real certs
+# trusted by all browsers. Strict rate limits (per-domain ~50/week,
+# duplicate certs ~5/week). Only use this after letsencrypt-staging
+# successfully issues a cert end-to-end against the same DNS name.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.ingress.letsencryptEmail | quote }}
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ .Values.ingress.className | default "nginx" }}
+{{- end }}

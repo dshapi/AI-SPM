@@ -8,10 +8,12 @@
 # Prerequisites (one-time):
 #   echo "127.0.0.1  aispm.local" | sudo tee -a /etc/hosts
 #
-# Then browse to: http://aispm.local  (chat UI)
-#                 http://aispm.local/admin  (admin panel — if route exists)
-#                 http://aispm.local/api/spm/docs  (SPM API Swagger)
-#                 http://aispm.local/api/docs      (platform API Swagger)
+# Then browse to: https://aispm.local  (chat UI — browser warns on first
+#                                       visit because the cert is selfsigned;
+#                                       click through and it sticks)
+#                 https://aispm.local/admin  (admin panel)
+#                 https://aispm.local/api/spm/docs  (SPM API Swagger)
+#                 https://aispm.local/api/docs      (platform API Swagger)
 
 ingress:
   host: aispm.local
@@ -20,15 +22,55 @@ ingress:
   # so the same chart renders work on either provider — install
   # whichever IngressClass you prefer and update this if needed.
   className: nginx
-  tls: false
+  # Dev runs full HTTPS via cert-manager's selfsigned ClusterIssuer (one
+  # of the three rendered by templates/cert-manager-issuers.yaml). The
+  # selfsigned issuer needs no email and no ACME — the cert is generated
+  # locally on Certificate apply, fills the aispm-tls Secret immediately,
+  # and ingress-nginx (or Istio) terminates 443. Browsers warn because
+  # the cert isn't signed by a trusted CA — that's expected and only
+  # affects the first visit.
+  #
+  # If you really want HTTP-only on dev (a tool that can't bypass cert
+  # warnings, automation that hates self-signed, etc.), set tls=false
+  # and certManager=false here.
+  tls: true
+  # certManager disabled on dev because cert-manager's selfsigned issuer
+  # generates a cert browsers flag for WebSocket connections — there's
+  # no "click through" dialog for WSS, so the Simulator/Chat pages
+  # can never establish their result-streaming socket. Instead we
+  # manage `aispm-tls` (in istio-system + aispm) via mkcert, which
+  # signs with a root CA trusted at the OS level — no warnings.
+  #
+  # The bootstrap script (Step 2) AUTOMATES this:
+  #   - calls `mkcert -install` (idempotent; one-time sudo prompt)
+  #   - mints a cert covering `ingress.host` + localhost + IPs
+  #   - creates/updates the aispm-tls secret in both namespaces
+  #   - deletes any stale cert-manager Certificate resources that
+  #     would overwrite the secret
+  #
+  # Prereq: `brew install mkcert` (preflight warns if missing).
+  # Bypass: set SKIP_MKCERT=1 to opt out of the automation; you'll
+  # need to populate aispm-tls yourself before WSS will work.
+  # If you want to flip back to cert-manager (e.g. testing the prod
+  # path), set certManager=true and re-apply the chart.
   certManager: false
-  httpsRedirect: false
+  httpsRedirect: true
+  clusterIssuer: selfsigned-cluster-issuer
 
 prometheus:
   storageClass: local-path
 
 grafana:
   storageClass: local-path
+
+# Kafka: single-broker on dev. The chart's default is 3 brokers (KRaft
+# quorum tolerating 1 failure) but anti-affinity rules make pods 2 and 3
+# Pending forever on a single-node OrbStack cluster, which times out the
+# StatefulSet rollout. Single broker is fine for dev correctness; in
+# prod values.prod.yaml keeps replicas: 3.
+kafka:
+  replicas: 1
+  minInsyncReplicas: 1
 
 agentRuntime:
   # gVisor (runsc). Requires a containerd-based cluster (Rancher
@@ -60,3 +102,44 @@ tetragon:
 # (falco 0.42.x) to avoid the 0.43.x duplicate-container-plugin bug.
 falco:
   enabled: true
+
+# Tighten LlamaGuard's allow→block escalation threshold for dev so the
+# Simulator catches low-confidence prompt-injection / tool-abuse probes
+# (score 0.30) that slip through the prod default of 0.60. Real-world
+# false positives are rare on this kind of content, but if you want the
+# prod-tight threshold for testing, override back to 0.6 or drop this
+# stanza entirely.
+platformEnv:
+  GUARD_BLOCK_SCORE: "0.3"
+  # Fail-closed when guard-model's LLM upstream is unreachable. Without
+  # this, a Connection error to the LLM falls through to a regex-only
+  # classifier that doesn't recognize obfuscated prompt-injection
+  # (e.g. `ign-ore pre-vious in-struc-tions`) and returns
+  # verdict=allow score=0.0 — making it look like every Simulator
+  # probe passes the guard. With GUARD_FAIL_CLOSED=1, the guard
+  # returns verdict=block reason="guard LLM unreachable" instead, so
+  # the chain fails-loud rather than fail-silent.
+  GUARD_FAIL_CLOSED: "1"
+  # Wire guard-model directly at host Ollama (same Ollama you used
+  # for the agent chat with llama3.2). The env var is named
+  # GROQ_BASE_URL for historical reasons but accepts any
+  # OpenAI-compatible base URL.
+  #
+  # PREREQ on the host: ollama pull llama-guard3
+  # If that errors out, try `ollama pull llama-guard3:8b` or
+  # `ollama list` to see what's actually available locally and
+  # update GROQ_MODEL below to match.
+  GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
+  GROQ_MODEL: "llama-guard3"
+
+# Flink: single-JobManager on dev. Production runs replicas=2 with RWX
+# checkpoint/HA storage (longhorn / NFS); dev's local-path provisioner
+# only supports RWO and rejects RWX bindings outright, leaving the
+# flink-checkpoints / flink-ha PVCs in Pending forever and the
+# JobManager pod stuck PreBind. RWO + 1 replica is the dev-correct
+# combination: there's no second JM to read the volume anyway.
+flink:
+  sharedAccessMode: ReadWriteOnce
+  storageClass: local-path
+  jobmanager:
+    replicas: 1

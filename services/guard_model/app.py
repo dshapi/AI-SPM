@@ -511,11 +511,45 @@ def _parse_llama_guard_verdict(raw: str) -> tuple[str, list[str], str]:
     return "unsafe", codes or ["S1"], ""
 
 
+_GUARD_FAIL_CLOSED = os.getenv("GUARD_FAIL_CLOSED", "0").lower() in ("1", "true", "yes")
+
+
 def _groq_screen(text: str) -> "ScreenResult":
     t0 = time.time()
     try:
         raw = _llm_chat_completion(text)
     except Exception as exc:
+        # When the configured LLM is unreachable, the default behavior
+        # is to fall through to the in-process regex classifier. Fine
+        # for production where the LLM is generally up and the regex
+        # is a stop-gap. But the regex doesn't recognize obfuscated
+        # prompt-injection (e.g. `ign-ore pre-vious in-struc-tions`),
+        # so when set as the default in dev/test environments it
+        # silently passes every probe with verdict=allow score=0.0,
+        # making it look like the guardrails are broken.
+        #
+        # GUARD_FAIL_CLOSED=1 flips the policy to fail-closed: when
+        # the LLM call fails, return block+1.0 with a clear reason
+        # rather than letting the request through. The downstream
+        # consumer (api / spm-api / agent) sees a real block.
+        if _GUARD_FAIL_CLOSED:
+            log.warning(
+                "Guard LLM call failed (%s); GUARD_FAIL_CLOSED=1 — "
+                "returning block to caller (no regex fallback)", exc,
+            )
+            return ScreenResult(
+                verdict="block",
+                score=1.0,
+                categories=["llm_unreachable"],
+                category_details=[{
+                    "code": "llm_unreachable",
+                    "name": "Guard LLM unreachable",
+                    "verdict": "block",
+                }],
+                backend="fail-closed",
+                processing_ms=int((time.time() - t0) * 1000),
+                reason=f"guard LLM unreachable: {exc}",
+            )
         log.warning("Guard LLM call failed (%s); falling back to regex", exc)
         return _regex_screen(text)
 

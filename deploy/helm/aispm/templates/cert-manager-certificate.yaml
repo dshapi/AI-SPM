@@ -1,0 +1,84 @@
+{{- /*
+deploy/helm/aispm/templates/cert-manager-certificate.yaml
+
+A cert-manager Certificate that materialises {{ .Values.ingress.tlsSecretName }}
+in the application namespace. This Secret is what the Istio Gateway's
+`credentialName` references for TLS termination.
+
+Why a Certificate resource and not just the Ingress shim:
+    The Ingress templates (ui-ingress.yaml) carry the
+    `cert-manager.io/cluster-issuer` annotation, which makes cert-manager
+    auto-create a matching Certificate from the Ingress's `spec.tls` block.
+    That covers the ingress-nginx path entirely — no Certificate file
+    needed.
+
+    The Istio Gateway path is different: the Gateway's `credentialName`
+    points at a Secret directly, with no annotation-driven shim. So if
+    you ever switch to istio-ingressgateway as the edge (set
+    INSTALL_ISTIO_GATEWAY=1 in the bootstrap), this Certificate is what
+    gives the Gateway something to bind 443 to.
+
+    The cost of always rendering this is one extra cert (issued in
+    parallel with the Ingress shim's). Both fill the same Secret name
+    (.Values.ingress.tlsSecretName) — cert-manager dedupes by Secret
+    name, so we end up with one Secret either way.
+
+Rendered only when tls=true AND certManager=true (i.e. you're actually
+using cert-manager to terminate). Dev with selfsigned + tls=true still
+renders this; the ClusterIssuer is just selfsigned-cluster-issuer.
+*/ -}}
+{{- /*
+We render TWO Certificate resources for the same DNS name, one per
+namespace, because the cert is consumed by two different controllers
+that look up its Secret in DIFFERENT namespaces:
+
+  1. ingress-nginx-controller — reads the Secret from the Ingress's
+     own namespace (aispm). Used for /etc/hosts → aispm.local edge.
+  2. istio-ingressgateway — reads the Secret from its own namespace
+     (istio-system). Istio 1.29+ no longer permits cross-namespace
+     credentialName references by default (was permissive in 1.13–1.28).
+
+Two Certificates is cheaper than syncing one Secret across namespaces:
+cert-manager handles renewal independently in each namespace, no
+external operator needed. Same `dnsNames` and same ClusterIssuer, so
+the cert content is identical — just two Secret copies in two places.
+*/ -}}
+{{- if and .Values.ingress.enabled .Values.ingress.tls .Values.ingress.certManager }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ingress.tlsSecretName }}
+  namespace: {{ .Values.global.namespace }}
+spec:
+  secretName: {{ .Values.ingress.tlsSecretName }}
+  # 90 days is the Let's Encrypt default; cert-manager renews at 2/3 of
+  # the lifetime by default, so this gives ~60 days runway between renewals.
+  duration: 2160h        # 90d
+  renewBefore: 720h      # 30d before expiry
+  dnsNames:
+    - {{ .Values.ingress.host | quote }}
+  issuerRef:
+    name: {{ .Values.ingress.clusterIssuer | default "selfsigned-cluster-issuer" }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+# Second Certificate in istio-system so the istio-ingressgateway can
+# find aispm-tls in its own namespace (default lookup) without needing
+# cross-namespace ReferenceGrant config.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Values.ingress.tlsSecretName }}
+  namespace: istio-system
+spec:
+  secretName: {{ .Values.ingress.tlsSecretName }}
+  duration: 2160h
+  renewBefore: 720h
+  dnsNames:
+    - {{ .Values.ingress.host | quote }}
+  issuerRef:
+    name: {{ .Values.ingress.clusterIssuer | default "selfsigned-cluster-issuer" }}
+    kind: ClusterIssuer
+    group: cert-manager.io
+{{- end }}

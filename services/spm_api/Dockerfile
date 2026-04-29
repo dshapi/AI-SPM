@@ -22,4 +22,13 @@ COPY services/spm_api/agent_validator.py .
 # Phase 4 — chat pipeline + policy attachment.
 COPY services/spm_api/agent_policies_routes.py .
 COPY services/spm_api/agent_chat.py .
+# Posture page backend — POST /posture/snapshots, /posture/summary used by
+# the UI's Posture screen. Was missing from the image build until now,
+# which is why the Posture page hit 404s in earlier debugging.
+COPY services/spm_api/posture_routes.py .
+# DB seed script — runs as the `db-seed` Job in the data-init phase.
+# Creates the schema (Base.metadata.create_all) and inserts demo
+# ModelRegistry + PostureSnapshot rows. Without this COPY the Job
+# fails immediately with "can't open file '/app/seed_db.py'".
+COPY services/spm_api/seed_db.py .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8092"]

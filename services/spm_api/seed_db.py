@@ -386,6 +386,28 @@ async def seed_posture_snapshots(db) -> int:
     return len(rows)
 
 
+async def ensure_schema() -> None:
+    """Create all tables defined on `spm.db.models.Base` if they don't exist.
+
+    The platform expects spm-api's lifespan to do `Base.metadata.create_all`
+    on first boot, but several services (api, agent-orchestrator, garak,
+    threat-hunting-agent, guard_model) call `hydrate_env_from_db()` at
+    module-import time and SELECT FROM `integrations` before spm-api has
+    ever started. In phased k8s rollouts that ordering breaks: db-seed
+    runs in `data-init`, those services start in `platform`, and spm-api's
+    lifespan only runs once spm-api itself is scheduled — which is too late.
+    Creating the schema here ensures every dependent service can import.
+    """
+    from spm.db.session import get_engine
+    from spm.db.models import Base
+
+    log.info("── ensure_schema: creating tables (idempotent) ──")
+    engine = get_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all, checkfirst=True)
+    log.info("✓ schema ready")
+
+
 async def main() -> int:
     try:
         from spm.db.session import get_session_factory
@@ -412,6 +434,14 @@ async def main() -> int:
 
     log.info("═══ spm-api DB seed ═══")
     errors = 0
+
+    # Create the schema FIRST so platform-tier services that hydrate_env_from_db()
+    # at import time find the `integrations` table they expect.
+    try:
+        await ensure_schema()
+    except Exception as e:
+        log.error("✗ ensure_schema failed: %s", e, exc_info=True)
+        return 1
 
     factory = get_session_factory()
     async with factory() as db:

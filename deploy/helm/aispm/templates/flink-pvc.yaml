@@ -23,16 +23,23 @@
 #     RWO is correct and sufficient here.
 
 # ── Checkpoint storage (shared by both JM replicas) ─────────────────────────
-# ReadWriteMany: active JM writes, standby reads on recovery.
-# StorageClass must support RWX in multi-node deployments (use longhorn in prod).
+# Access mode is values-driven:
+#   prod (.Values.flink.sharedAccessMode = ReadWriteMany) — both JM
+#     replicas mount this PVC; active writes, standby reads on recovery.
+#     Requires a RWX-capable StorageClass (longhorn / NFS / CephFS).
+#   dev  (.Values.flink.sharedAccessMode = ReadWriteOnce)  — local-path
+#     does NOT support RWX (the provisioner rejects the binding outright,
+#     not just at mount time). On dev we run a single JM (replicas: 1),
+#     so RWO is correct and the PVC actually binds.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: flink-checkpoints
   namespace: {{ .Values.global.namespace }}
 spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: local-path
+  accessModes:
+    - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}
+  storageClassName: {{ .Values.flink.storageClass | default "local-path" }}
   resources:
     requests:
       storage: 5Gi
@@ -65,17 +72,17 @@ spec:
       storage: 5Gi
 ---
 # ── JobManager HA blob store (shared by both JM replicas) ────────────────────
-# ReadWriteMany: leader publishes JobGraph blobs here; standby reads them
-# on failover to reconstruct the active job without client re-submission.
-# StorageClass must support RWX in multi-node deployments (use longhorn in prod).
+# Same RWX/RWO rationale as flink-checkpoints above — values-driven so dev
+# binds on local-path and prod uses RWX storage for true 2-replica HA.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
   name: flink-ha
   namespace: {{ .Values.global.namespace }}
 spec:
-  accessModes: [ReadWriteMany]
-  storageClassName: local-path
+  accessModes:
+    - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}
+  storageClassName: {{ .Values.flink.storageClass | default "local-path" }}
   resources:
     requests:
       storage: 2Gi

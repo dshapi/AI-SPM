@@ -66,6 +66,28 @@ ingress:
   httpsRedirect: true
   letsencryptEmail: ops@example.com
   tlsSecretName: aispm-tls
+  # Default to letsencrypt-staging — real ACME against Let's Encrypt's
+  # staging server, untrusted CA, but generous rate-limits. Use this
+  # until the ACME http-01 challenge succeeds end-to-end (DNS resolves,
+  # ingress-nginx is reachable from the public internet, the
+  # ClusterIssuer's account-key is provisioned).
+  #
+  # ── GO-LIVE FLIP ───────────────────────────────────────────────────
+  # Once staging issues a cert successfully:
+  #   1. Verify the cert in the aispm-tls Secret is from
+  #      letsencrypt-staging (look at issuer in `kubectl describe secret
+  #      aispm-tls -n aispm`).
+  #   2. Set `clusterIssuer: letsencrypt-prod` here (or via --set on
+  #      helm).
+  #   3. Delete the existing aispm-tls Secret so cert-manager re-issues
+  #      from prod: `kubectl delete secret aispm-tls -n aispm`.
+  #   4. Watch the new Certificate reconcile: `kubectl get certificate
+  #      aispm-tls -n aispm -w`.
+  #
+  # DON'T flip to letsencrypt-prod blind — the prod issuer rate-limits
+  # at ~5 duplicate certs per week per FQDN; a misconfigured DNS will
+  # burn that and lock you out.
+  clusterIssuer: letsencrypt-staging
 
 # ── Agent runtime — Kata microVM + tight quotas + STRICT mTLS ──────────────
 agentRuntime:

@@ -41,6 +41,33 @@ from .types import ChatMessage, HistoryEntry
 log = logging.getLogger(__name__)
 
 
+def _raise_for_status_with_detail(r: httpx.Response) -> None:
+    """Like ``r.raise_for_status()`` but appends the response body's
+    ``detail`` so non-2xx responses from spm-api's chat-history endpoint
+    surface a useful error. See the matching helper in ``aispm/llm.py``
+    for the rationale.
+    """
+    if r.status_code < 400:
+        return
+    detail = ""
+    try:
+        body = r.json()
+    except Exception:                                          # noqa: BLE001
+        body = None
+    if isinstance(body, dict):
+        d = body.get("detail") or body.get("error") or body.get("message")
+        if isinstance(d, dict):
+            detail = str(d.get("message") or d)
+        elif d:
+            detail = str(d)
+    if not detail:
+        detail = (r.text or "").strip()[:500]
+    kind = "Client" if r.status_code < 500 else "Server"
+    base = f"{kind} error '{r.status_code} {r.reason_phrase}' for url '{r.url}'"
+    msg = f"{base}\n  → {detail}" if detail else base
+    raise httpx.HTTPStatusError(msg, request=r.request, response=r)
+
+
 def _topic_in() -> str:
     return f"cpm.{_TENANT_ID}.agents.{_AGENT_ID}.chat.in"
 
@@ -234,7 +261,7 @@ async def history(session_id: str, limit: int = 10) -> List[HistoryEntry]:
     headers = {"Authorization": f"Bearer {_MCP_TOKEN}"}
     async with httpx.AsyncClient(timeout=10) as c:
         r = await c.get(url, params={"limit": limit}, headers=headers)
-    r.raise_for_status()
+    _raise_for_status_with_detail(r)
 
     rows = r.json()
     out: List[HistoryEntry] = []

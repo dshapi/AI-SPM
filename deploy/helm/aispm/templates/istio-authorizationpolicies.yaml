@@ -25,10 +25,10 @@ Design rules
 
 3. Operation blocks restrict to the minimum necessary path/method/port.
 
-Applied only when Istio CRDs exist (so the chart still renders cleanly
-on a cluster without Istio installed).
+Istio is always installed by the bootstrap script. The previous capability
+guard has been removed; if Istio CRDs are ever absent, the apply will fail
+loudly, which is what we want.
 */ -}}
-{{- if .Capabilities.APIVersions.Has "security.istio.io/v1beta1" }}
 {{- $platformNs := .Values.global.namespace }}
 {{- $agentNs    := .Values.agentRuntime.namespace }}
 {{- $agentSa    := printf "cluster.local/ns/%s/sa/agent-runtime" $agentNs }}
@@ -51,6 +51,15 @@ metadata:
 spec: {}   # empty spec = default-deny on every workload in the namespace
 ---
 # ── spm-mcp: agent pods → MCP tool server (port 8500) ────────────────────
+# Two ALLOW rules — both gated to port 8500 to keep the surface narrow:
+#   1. Agents (aispm-agents namespace) — the production data path: agents
+#      call MCP tools to interact with integrations.
+#   2. Platform (aispm namespace) — read-only health/probe access used by
+#      spm-api's integration test endpoint (POST /integrations/{id}/test
+#      hits http://spm-mcp:8500/health to verify reachability). Without
+#      this, every integration shows "Failed" in the UI even though the
+#      underlying MCP server is healthy — the failure is just the platform
+#      sidecar's RBAC denying its own intra-platform call.
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -71,8 +80,21 @@ spec:
       to:
         - operation:
             ports: ["8500"]
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+      to:
+        - operation:
+            ports: ["8500"]
 ---
 # ── spm-llm-proxy: agent pods → Ollama / OpenAI / Anthropic proxy ────────
+# Two ALLOW rules — both gated to port 8500 to keep the surface narrow:
+#   1. Agents (aispm-agents namespace) — production data path: agents
+#      proxy LLM calls through here for governance + cost tracking.
+#   2. Platform (aispm namespace) — spm-api's `agent_chat` module calls
+#      /v1/chat/completions on this proxy for the in-UI custom-agent
+#      chat feature. Without this rule the UI's chat returns:
+#      "403 Forbidden ... → RBAC: access denied".
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -93,6 +115,28 @@ spec:
       to:
         - operation:
             ports: ["8500"]
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+      to:
+        - operation:
+            ports: ["8500"]
+    # Sidecar-less / ambient-without-ztunnel callers (agents in dev where
+    # the agents namespace is labeled `istio.io/dataplane-mode=ambient`
+    # but ztunnel isn't installed). Without a peer identity, the
+    # namespace-based rules above can't match, and every chat request
+    # from the agent gets "RBAC: access denied" at Envoy. The app's own
+    # LLM_API_KEY check is what actually authenticates the caller —
+    # Istio here is defense-in-depth, not the trust boundary.
+    # Scope kept narrow to the chat surface only.
+    - to:
+        - operation:
+            ports: ["8500"]
+            paths:
+              - "/v1/chat/completions"
+              - "/v1/models"
+              - "/v1/embeddings"
+              - "/health"
 ---
 # ── spm-api: agent pods (narrow paths) + ingress + intra-platform ────────
 apiVersion: security.istio.io/v1beta1
@@ -145,6 +189,13 @@ spec:
               - "/healthz"
               - "/docs"
               - "/openapi.json"
+              # Public API surface served back to the UI. /models* and
+              # /posture* were missing from this list, which is why
+              # curl through the ingress hit "RBAC: access denied" on
+              # /api/spm/models and /api/spm/posture/summary even
+              # though those endpoints exist and the data is seeded.
+              - "/models*"
+              - "/posture*"
               - "/integrations*"
               - "/policies*"
               - "/agents*"
@@ -189,10 +240,21 @@ spec:
               - "/chat*"
               - "/agents*"
               - "/sessions*"
+              # /simulate/single + /simulate/garak — UI's Simulator
+              # tab posts here. Without this, "Simulate" / "Run Garak"
+              # in the UI returns "RBAC: access denied" before
+              # reaching the api app.
+              - "/simulate*"
               - "/dev-token"
               - "/auth*"
-              - "/ws"
-              - "/ws/*"
+              # /ws*  — prefix match covers /ws, /ws/sim/<id>, /ws?token=…
+              # The previous "/ws" + "/ws/*" pair missed query-string-only
+              # variants and exact /ws when the UI sent it without any
+              # trailing segment, returning 403 to the WebSocket upgrade
+              # and leaving the Simulator stuck on "Waiting for probe
+              # results" while the api side log spams `ws_buffer_full —
+              # dropping oldest`. Prefix `/ws*` is the safe fix.
+              - "/ws*"
 ---
 # ── ui: ingress only (UI is the public entry point for all browsers) ─────
 apiVersion: security.istio.io/v1beta1
@@ -277,6 +339,16 @@ spec:
             namespaces: [{{ $platformNs | quote }}]
 ---
 # ── opa: intra-platform only ─────────────────────────────────────────────
+# Two ALLOW rules so both sidecared and sidecar-less callers from the
+# same namespace can reach OPA:
+#   1. mTLS-identified callers from `aispm` (the production case — every
+#      sidecared workload has an Istio principal).
+#   2. Plain-HTTP callers restricted to OPA's safe read-only surface
+#      (/health, /v1/data/...). This covers Jobs that opt out of sidecar
+#      injection (startup-orchestrator, db-seed) — those have no Istio
+#      peer principal but still need OPA validation. The path filter
+#      keeps the data-plane API (PUT /v1/policies, DELETE /v1/data/...)
+#      gated behind mTLS even though we relaxed the source check.
 apiVersion: security.istio.io/v1beta1
 kind: AuthorizationPolicy
 metadata:
@@ -291,4 +363,9 @@ spec:
     - from:
         - source:
             namespaces: [{{ $platformNs | quote }}]
-{{- end }}
+    - to:
+        - operation:
+            methods: ["GET", "POST"]
+            paths:
+              - "/health"
+              - "/v1/data/*"

@@ -29,6 +29,15 @@ spec:
     metadata:
       labels:
         app: kafka
+      annotations:
+        # Don't inject the Istio sidecar into Kafka brokers. Envoy's L4
+        # interception buffers/reframes Kafka's binary protocol on the
+        # initial ApiVersionsRequest, which surfaces in clients (kafka-
+        # python, librdkafka, sarama) as `UnrecognizedBrokerVersion` or
+        # `Connection reset` even though the broker is healthy. Kafka
+        # has its own auth/encryption story (SASL/PLAIN, SASL/SCRAM,
+        # SSL); we don't gain anything by wrapping it in Istio mTLS.
+        sidecar.istio.io/inject: "false"
     spec:
       containers:
         - name: kafka
@@ -61,24 +70,26 @@ spec:
               value: PLAINTEXT
             - name: KAFKA_CONTROLLER_LISTENER_NAMES
               value: CONTROLLER
-            # All three pods listed so any pod can bootstrap the quorum.
-            # Ordinals 0/1/2 map to kafka-0/1/2 via the headless service.
+            # Voters list is dynamic so single-broker dev (kafka.replicas=1)
+            # doesn't try to reach kafka-1/kafka-2 and fail Raft elections.
+            # Generates "0@kafka-0...:9093,1@kafka-1...:9093,..." for as
+            # many brokers as kafka.replicas.
             - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: "0@kafka-0.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093,1@kafka-1.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093,2@kafka-2.kafka.{{ .Values.global.namespace }}.svc.cluster.local:9093"
+              value: "{{- range $i, $_ := until (int .Values.kafka.replicas) }}{{ if $i }},{{ end }}{{ $i }}@kafka-{{ $i }}.kafka.{{ $.Values.global.namespace }}.svc.cluster.local:9093{{- end }}"
             - name: KAFKA_ADVERTISED_LISTENERS
               value: "PLAINTEXT://$(MY_POD_NAME).kafka.{{ .Values.global.namespace }}.svc.cluster.local:9092"
             # ── Replication & durability ────────────────────────────────────
-            # RF=3 so internal topics (offsets, tx state) are durable across
-            # a single-broker failure. min ISR=2 keeps producers from
-            # silently losing data while a broker is temporarily down.
+            # All replication factors are bounded by the broker count: with
+            # 1 broker we use RF=1 everywhere; with 3 we get full RF=3 +
+            # ISR=2. minInsyncReplicas is values-driven (1 on dev, 2 on prod).
             - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
-              value: "3"
+              value: {{ .Values.kafka.replicas | quote }}
             - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
-              value: "3"
+              value: {{ .Values.kafka.replicas | quote }}
             - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
-              value: "2"
+              value: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
             - name: KAFKA_MIN_INSYNC_REPLICAS
-              value: "2"
+              value: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
             - name: KAFKA_NUM_PARTITIONS
               value: "3"
             - name: CLUSTER_ID

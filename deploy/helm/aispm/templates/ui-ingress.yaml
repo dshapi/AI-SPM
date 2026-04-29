@@ -23,7 +23,7 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   annotations:
     {{- if .Values.ingress.certManager }}
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
@@ -58,7 +58,7 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   annotations:
     {{- if .Values.ingress.certManager }}
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
@@ -103,7 +103,7 @@ metadata:
   namespace: {{ .Values.global.namespace }}
   annotations:
     {{- if .Values.ingress.certManager }}
-    cert-manager.io/cluster-issuer: letsencrypt-prod
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"

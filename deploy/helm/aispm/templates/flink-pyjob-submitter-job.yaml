@@ -4,10 +4,10 @@ kind: Job
 metadata:
   name: flink-pyjob-submitter
   namespace: {{ .Values.global.namespace }}
-  annotations:
-    "helm.sh/hook": post-install,post-upgrade
-    "helm.sh/hook-weight": "0"
-    "helm.sh/hook-delete-policy": hook-succeeded
+  # NB: previously a `helm.sh/hook` post-install/post-upgrade Job. Hooks
+  # were inert under `helm template | kubectl apply` and the bootstrap
+  # now sequences this Job in the `compute-init` tier (after flink-jm /
+  # flink-tm are Ready). Annotations removed.
 spec:
   backoffLimit: 3
   template:

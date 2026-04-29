@@ -77,6 +77,34 @@ async def test_complete_raises_on_4xx(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_complete_502_surfaces_proxy_detail(monkeypatch):
+    """Regression — when the proxy 502s, the agent's ``f"{e}"`` must
+    include the response body's ``detail`` so the customer sees *why*
+    the upstream failed (e.g. "Anthropic upstream is missing api_key").
+    Without this, all the chat agent ever surfaces is the bare status
+    line and the operator has no thread to pull on."""
+    async def _fake_post(self, url, **kw):
+        return httpx.Response(
+            502,
+            json={"detail": "Anthropic upstream is missing api_key — "
+                            "configure it on the Anthropic integration"},
+            request=httpx.Request("POST", url),
+        )
+    monkeypatch.setattr(httpx.AsyncClient, "post", _fake_post)
+    monkeypatch.setattr(llm, "_BASE_URL", "http://x")
+    monkeypatch.setattr(llm, "_API_KEY",  "k")
+
+    with pytest.raises(httpx.HTTPStatusError) as ei:
+        await llm.complete(messages=[{"role": "user", "content": "hi"}])
+
+    msg = str(ei.value)
+    # Status line still present (back-compat).
+    assert "502" in msg
+    # And — the new bit — the proxy's detail is in the str().
+    assert "Anthropic upstream is missing api_key" in msg
+
+
+@pytest.mark.asyncio
 async def test_complete_requires_env(monkeypatch):
     monkeypatch.setattr(llm, "_BASE_URL", "")
     monkeypatch.setattr(llm, "_API_KEY",  "")

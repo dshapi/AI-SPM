@@ -1,4 +1,10 @@
 # deploy/helm/aispm/templates/configmap-platform-env.yaml
+#
+# Kafka-shape values (bootstrap server list, replication factor, min ISR)
+# are derived from .Values.kafka.replicas rather than hardcoded in
+# .Values.platformEnv so the same chart works for single-broker dev and
+# multi-broker prod. Same pattern as KAFKA_CONTROLLER_QUORUM_VOTERS in
+# the Kafka StatefulSet.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -8,6 +14,16 @@ data:
   {{- range $k, $v := .Values.platformEnv }}
   {{ $k }}: {{ $v | quote }}
   {{- end }}
+  # Bootstrap server list scaled to kafka.replicas. Each headless-DNS
+  # entry is `kafka-<i>.kafka.<ns>.svc.cluster.local:9092`. Clients auto-
+  # discover the rest of the cluster after connecting to any one.
+  KAFKA_BOOTSTRAP_SERVERS: "{{- range $i, $_ := until (int .Values.kafka.replicas) }}{{ if $i }},{{ end }}kafka-{{ $i }}.kafka.{{ $.Values.global.namespace }}.svc.cluster.local:9092{{- end }}"
+  # Replication factor for user-created topics — bounded by broker count.
+  # 1 broker → RF=1; 3 brokers → RF=3.
+  KAFKA_REPLICATION_FACTOR: {{ .Values.kafka.replicas | quote }}
+  # min.insync.replicas — values-driven so prod can keep ISR=2 with RF=3
+  # while dev stays at 1.
+  KAFKA_MIN_INSYNC_REPLICAS: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
   JWT_PRIVATE_KEY_PATH: /keys/private.pem
   JWT_PUBLIC_KEY_PATH: /keys/public.pem
   KEYS_DIR: /keys

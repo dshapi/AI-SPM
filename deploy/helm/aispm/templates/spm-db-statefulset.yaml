@@ -14,6 +14,13 @@ spec:
     metadata:
       labels:
         app: spm-db
+      annotations:
+        # Don't inject the Istio sidecar into Postgres. Same reasoning
+        # as kafka and redis: Envoy's L4 interception can break the
+        # Postgres wire protocol's startup negotiation, especially the
+        # SSLRequest probe pgsql clients send first. Postgres runs
+        # in-cluster behind a NetworkPolicy; mTLS is not adding value.
+        sidecar.istio.io/inject: "false"
     spec:
       containers:
         - name: postgres
