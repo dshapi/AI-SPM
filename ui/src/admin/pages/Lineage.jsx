@@ -345,8 +345,74 @@ function NodeDetailPanel({ nodeId, nodes }) {
           </div>
         </div>
 
-
+        <NodeDetailsBlock details={node.details} />
       </div>
+    </div>
+  )
+}
+
+
+// Render the per-node detail rows the lineage builder attached. Hides
+// itself silently when the builder hasn't populated anything for this
+// node (older event shapes, or node types we don't enrich yet).
+function NodeDetailsBlock({ details }) {
+  if (!details || typeof details !== 'object') return null
+
+  // Pull the fields we know about. Anything else (forward-compat) is
+  // ignored — adding a new key in lineageFromEvents.js is a no-op until
+  // we render it here.
+  const rows = []
+  const push = (label, value, opts = {}) => {
+    if (value == null || value === '') return
+    rows.push({ label, value, mono: !!opts.mono, full: !!opts.full })
+  }
+
+  push('Agent',     details.agentLabel || details.agentId, { mono: !details.agentLabel })
+  push('Agent ID',  details.agentId && details.agentLabel ? details.agentId : null, { mono: true })
+  push('User',      details.userId, { mono: true })
+  push('User email', details.userEmail, { mono: true })
+  push('Trace ID',  details.traceId,  { mono: true })
+
+  push('Model',     details.model,    { mono: true })
+  if (details.tokensIn != null || details.tokensOut != null) {
+    push('Tokens',  `${details.tokensIn ?? '—'} in · ${details.tokensOut ?? '—'} out`)
+  }
+
+  push('Tool',      details.tool,     { mono: true })
+  if (details.toolArgs && Object.keys(details.toolArgs).length) {
+    push('Tool args', JSON.stringify(details.toolArgs, null, 2), { full: true, mono: true })
+  }
+  push('Status',    details.toolStatus)
+  if (details.durationMs != null) push('Duration', `${details.durationMs} ms`)
+
+  push('Prompt',    details.prompt,   { full: true })
+  push('Response',  details.response, { full: true })
+
+  if (!rows.length) return null
+
+  return (
+    <div className="px-4 py-3">
+      <SectionLabel>Details</SectionLabel>
+      <dl className="mt-2 space-y-2">
+        {rows.map(({ label, value, mono, full }, i) => (
+          <div key={`${label}-${i}`}
+               className={full ? 'flex flex-col gap-0.5' : 'flex gap-3'}>
+            <dt className={cn(
+              'text-[10px] uppercase tracking-wider text-gray-400 font-semibold',
+              full ? '' : 'shrink-0 w-20 mt-0.5',
+            )}>
+              {label}
+            </dt>
+            <dd className={cn(
+              'text-[11px] text-gray-700 leading-relaxed min-w-0 break-words',
+              mono && 'font-mono text-[10.5px]',
+              full && 'whitespace-pre-wrap bg-gray-50 rounded px-2 py-1.5 mt-0.5',
+            )}>
+              {String(value)}
+            </dd>
+          </div>
+        ))}
+      </dl>
     </div>
   )
 }

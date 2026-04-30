@@ -42,6 +42,18 @@ spec:
       labels: { app: flink-jobmanager }
     spec:
       serviceAccountName: flink
+      # ── Spread JM replicas across nodes (multi-node clusters) ─────────────
+      # Active leader and hot standby on different nodes so a single-node
+      # outage takes at most one JM. `preferred` keeps single-node dev
+      # clusters working when only one node is available.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: flink-jobmanager }
+                topologyKey: kubernetes.io/hostname
       # ── Init container: inject per-pod jobmanager.rpc.address ─────────────
       # The flink-conf ConfigMap is read-only; Flink's docker-entrypoint.sh
       # cannot append to it. We copy it to an emptyDir and replace the static
@@ -102,18 +114,31 @@ spec:
             httpGet: { path: /overview, port: 8081 }
             initialDelaySeconds: 20
             periodSeconds: 10
+          {{- /*
+          Conditionally mount checkpoint / HA PVCs based on whether the
+          chart is configured to use filesystem or S3 storage. With
+          s3:// URIs the PVCs aren't rendered (see flink-pvc.yaml) so we
+          must NOT try to mount them here — that would block scheduling
+          forever waiting for the missing PVC.
+          */}}
+          {{- $useFileCheckpoints := not (hasPrefix "s3:" (.Values.flink.checkpointsDir | default "file:///flink/checkpoints")) }}
+          {{- $useFileHa          := not (hasPrefix "s3:" (.Values.flink.haStorageDir  | default "file:///flink/ha")) }}
           volumeMounts:
             # Mount the writable copy produced by prep-flink-conf (contains
             # the per-pod jobmanager.rpc.address), NOT the raw ConfigMap.
             - name: flink-conf-rw
               mountPath: /opt/flink/conf/flink-conf.yaml
               subPath: flink-conf.yaml
+            {{- if $useFileCheckpoints }}
             - name: checkpoints
               mountPath: /flink/checkpoints
+            {{- end }}
             - name: savepoints
               mountPath: /flink/savepoints
+            {{- if $useFileHa }}
             - name: ha
               mountPath: /flink/ha
+            {{- end }}
       volumes:
         # Base ConfigMap — read-only source for the init container.
         - name: flink-conf
@@ -122,12 +147,16 @@ spec:
         # Writable copy with per-pod jobmanager.rpc.address injected.
         - name: flink-conf-rw
           emptyDir: {}
+        {{- if $useFileCheckpoints }}
         - name: checkpoints
           persistentVolumeClaim:
             claimName: flink-checkpoints
+        {{- end }}
         - name: savepoints
           persistentVolumeClaim:
             claimName: flink-savepoints
+        {{- if $useFileHa }}
         - name: ha
           persistentVolumeClaim:
             claimName: flink-ha
+        {{- end }}

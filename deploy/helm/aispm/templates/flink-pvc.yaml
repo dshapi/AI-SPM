@@ -22,6 +22,18 @@
 #     and each TM replica has its own volume via volumeClaimTemplates.
 #     RWO is correct and sufficient here.
 
+{{- /*
+Checkpoint + HA PVCs are skipped entirely when state.checkpoints.dir and
+high-availability.storageDir are configured to an s3:// (or other non-file)
+URI — Flink writes its HA blobs and checkpoint metadata to object storage,
+so there's nothing for the JM/TM containers to mount. This is what the
+multinode profile uses (MinIO via flink-s3-fs-hadoop). Only render the
+file-system PVCs when the chart is actually using filesystem storage.
+*/ -}}
+{{- $useFileCheckpoints := not (hasPrefix "s3:" (.Values.flink.checkpointsDir | default "file:///flink/checkpoints")) -}}
+{{- $useFileHa          := not (hasPrefix "s3:" (.Values.flink.haStorageDir  | default "file:///flink/ha")) -}}
+
+{{- if $useFileCheckpoints }}
 # ── Checkpoint storage (shared by both JM replicas) ─────────────────────────
 # Access mode is values-driven:
 #   prod (.Values.flink.sharedAccessMode = ReadWriteMany) — both JM
@@ -44,6 +56,7 @@ spec:
     requests:
       storage: 5Gi
 ---
+{{- end }}
 # ── Savepoint storage (active JM only) ──────────────────────────────────────
 # RWO is sufficient: only the active JM triggers savepoints.
 apiVersion: v1
@@ -70,6 +83,7 @@ spec:
   resources:
     requests:
       storage: 5Gi
+{{- if $useFileHa }}
 ---
 # ── JobManager HA blob store (shared by both JM replicas) ────────────────────
 # Same RWX/RWO rationale as flink-checkpoints above — values-driven so dev
@@ -86,3 +100,4 @@ spec:
   resources:
     requests:
       storage: 2Gi
+{{- end }}

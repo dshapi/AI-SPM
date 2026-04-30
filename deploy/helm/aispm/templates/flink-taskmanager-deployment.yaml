@@ -5,7 +5,7 @@ metadata:
   name: flink-taskmanager
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.flink.taskmanager.replicas | default 1 }}
   strategy:
     type: Recreate
   selector:
@@ -15,6 +15,16 @@ spec:
       labels: { app: flink-taskmanager }
     spec:
       serviceAccountName: flink
+      # Spread TM replicas across nodes on multi-node clusters so slot
+      # capacity stays distributed when a node goes down.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: flink-taskmanager }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: flink-taskmanager
           image: {{ include "aispm.image" .Values.images.flinkJob }}

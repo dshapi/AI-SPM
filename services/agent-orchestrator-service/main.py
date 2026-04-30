@@ -87,7 +87,22 @@ logger = logging.getLogger("agent_orchestrator")
 # ─────────────────────────────────────────────────────────────────────────────
 
 KAFKA_BOOTSTRAP    = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-DB_PATH            = os.getenv("DB_PATH", "agent_orchestrator.db")
+# Default DB location for out-of-container dev runs — kept under
+# DataVolumes/agent-orchestrator/ alongside the other persistent
+# dev-only state (matches the compose mount target). Without this
+# explicit default, running `python main.py` from the repo root
+# would drop a stray `agent_orchestrator.db` at the repo root that
+# leaks across branches and can't be cleaned by `make clean`.
+# Both compose and k8s set DB_PATH=/data/agent_orchestrator.db
+# explicitly so this default is purely a dev-outside-docker cushion.
+_DEFAULT_DB_PATH = os.path.abspath(
+    os.path.join(
+        os.path.dirname(__file__),
+        "..", "..", "DataVolumes", "agent-orchestrator",
+        "agent_orchestrator.db",
+    )
+)
+DB_PATH            = os.getenv("DB_PATH", _DEFAULT_DB_PATH)
 SERVICE_NAME       = "agent-orchestrator-service"
 SERVICE_VERSION    = "1.0.0"
 

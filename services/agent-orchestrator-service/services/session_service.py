@@ -460,6 +460,12 @@ class SessionService:
                     "session.completed": "completed",
                     "llm.response":      "ok",
                     "output.scanned":    "ok",
+                    # Chat runtime — spm-api / spm-mcp / spm-llm-proxy.
+                    # All "ok" by default; specific failures override below
+                    # via payload.ok introspection.
+                    "AgentChatMessage":  "ok",
+                    "AgentLLMCall":      "ok",
+                    "AgentToolCall":     "ok",
                 }
 
                 def _summarise(event_type: str, payload: dict) -> str:
@@ -497,6 +503,31 @@ class SessionService:
                         return "Memory returned"
                     if event_type == "final.response":
                         return "Final response generated"
+                    # ── Chat runtime ────────────────────────────────────
+                    if event_type == "AgentChatMessage":
+                        role  = (payload.get("role") or "").lower()
+                        text  = payload.get("text") or ""
+                        prefix = "Agent reply" if role in ("agent", "assistant") \
+                                 else "User prompt"
+                        if text:
+                            snippet = text[:120] + ("…" if len(text) > 120 else "")
+                            return f"{prefix}: {snippet}"
+                        return prefix
+                    if event_type == "AgentLLMCall":
+                        model = payload.get("model", "?")
+                        ti = payload.get("prompt_tokens")
+                        to = payload.get("completion_tokens")
+                        usage = ""
+                        if ti is not None or to is not None:
+                            usage = f" ({ti or '—'} in / {to or '—'} out)"
+                        return f"LLM call: {model}{usage}"
+                    if event_type == "AgentToolCall":
+                        tool   = payload.get("tool", "?")
+                        ok     = payload.get("ok", True)
+                        dur    = payload.get("duration_ms")
+                        verdict = "ok" if ok else "failed"
+                        dur_s   = f" — {dur}ms" if dur is not None else ""
+                        return f"Tool: {tool} ({verdict}){dur_s}"
                     return event_type
 
                 db_records_sorted = sorted(db_records, key=lambda r: r.timestamp)

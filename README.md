@@ -83,7 +83,7 @@ sudo apt-get install -y libnss3-tools  # mkcert needs this to trust the CA in br
 ```bash
 sudo dnf install -y nss-tools
 ```
-## all OS
+## All Linux
 ```bash
 curl -fsSLo /tmp/mkcert "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-linux-amd64"
 sudo install -m 0755 /tmp/mkcert /usr/local/bin/mkcert
@@ -95,18 +95,33 @@ mkcert -install
 ```
 If you're on arm64 Linux, swap linux-amd64 → linux-arm64 in the mkcert URL.
 
-## **Step 1 — Install OrbStack**
+## **Step 1 — Install K8S (Kind) cluster**
 
-Download and install [OrbStack](https://orbstack.dev) — This is Bare Metal / Cloud Kubernetis  
+```bash
+git clone https://github.com/dshapi/AI-SPM.git #clone the repo
+cd AI-SPM
+
+./deploy/scripts/kind-cluster.sh init   # initial 3 node K8S cluster setup
+export KUBECONFIG=$HOME/.kube/kind-aispm.yaml
+kubectl get nodes -o wide
+
+./deploy/scripts/kind-storage.sh up     #storage
+
+./deploy/scripts/kind-databases-ha.sh up #This installs CloudNativePG + 3-instance Postgres 
+                                         # cluster with streaming replication, plus 
+                                         # Bitnami Redis (1 master + 3 replicas + 3 sentinels
+
+
+```
 
 ## **Step 2 — Run the bootstrap script**
 
-Clone the repo and run the one-liner bootstrap script — it handles everything (environment setup, API keys prompt, image build, and service startup):
-
 ```bash
-git clone https://github.com/dshapi/AI-SPM.git
-cd AI-SPM
-bash SKIP_FALCO=1 SKIP_KYVERNO=1 RESET_KAFKA=1 bash deploy/scripts/bootstrap-cluster.sh
+
+SKIP_FALCO=1 SKIP_KYVERNO=1 \
+  VALUES_EXTRA=deploy/helm/aispm/values.dev-multinode.yaml \
+  ./deploy/scripts/bootstrap-cluster.sh
+
 ```
 
 The script will guide you through entering your API keys and then bring the full platform up automatically.

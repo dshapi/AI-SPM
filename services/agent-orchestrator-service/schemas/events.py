@@ -83,6 +83,13 @@ class EventType(str, Enum):
     # ── Threat-finding events ──────────────────────────────────────────────
     FINDING_CREATED         = "finding.created"
     FINDING_STATUS_CHANGED  = "finding.status_changed"
+    # ── Agent-runtime events (chat path: spm-api → agent → spm-mcp/llm-proxy)
+    # These were added when the streaming chat PR landed. Without them in
+    # the enum, get_events() coerces every chat event to UNKNOWN and the
+    # UI renders titles + descriptions as the literal string "unknown".
+    AGENT_CHAT_MESSAGE      = "AgentChatMessage"
+    AGENT_LLM_CALL          = "AgentLLMCall"
+    AGENT_TOOL_CALL         = "AgentToolCall"
     UNKNOWN                 = "unknown"
 
 

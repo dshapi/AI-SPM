@@ -143,6 +143,23 @@ const _RAW_TO_CANONICAL = {
 
   // Garak probe-level infrastructure error (non-terminal — probe failed to run)
   'simulation.probe_error': CANONICAL_EVENT_TYPES.PROBE_ERROR,
+
+  // Agent-runtime events from the chat path (Phase 2 streaming PR).
+  //
+  // ``AgentChatMessage`` is split by ``payload.role`` in canonicalise()
+  // below — user turns become SESSION_STARTED (renders as "User Prompt"
+  // node in the lineage graph), agent turns become OUTPUT_GENERATED
+  // (renders as the output node). It's intentionally NOT mapped here;
+  // canonicalise() handles it ahead of this lookup.
+  //
+  // ``AgentLLMCall`` is the spm-llm-proxy → upstream model invocation;
+  // surfaces as "LLM Processing" via RISK_CALCULATED (the lineage
+  // builder uses payload.risk_score when present, falls back to 0).
+  //
+  // ``AgentToolCall`` is the spm-mcp tool invocation (web_fetch etc.);
+  // TOOL_COMPLETED gives us the tool node + completion edge.
+  'AgentLLMCall':  CANONICAL_EVENT_TYPES.RISK_CALCULATED,
+  'AgentToolCall': CANONICAL_EVENT_TYPES.TOOL_COMPLETED,
 }
 
 const _POLICY_EVENT_TYPES = new Set(['policy.decision', 'policy_decision'])
@@ -162,6 +179,18 @@ export function canonicalise(event) {
     if (d === 'block')    return CANONICAL_EVENT_TYPES.POLICY_BLOCKED
     if (d === 'escalate') return CANONICAL_EVENT_TYPES.POLICY_ESCALATED
     return CANONICAL_EVENT_TYPES.POLICY_ALLOWED
+  }
+
+  // AgentChatMessage events carry role=user|agent in their payload.
+  // Split into the two canonical types the lineage graph already
+  // knows how to render — without this the chat events fall through
+  // as raw strings and don't add nodes.
+  if (raw === 'AgentChatMessage') {
+    const role = (event.payload?.role ?? '').toLowerCase()
+    if (role === 'agent' || role === 'assistant') {
+      return CANONICAL_EVENT_TYPES.OUTPUT_GENERATED
+    }
+    return CANONICAL_EVENT_TYPES.SESSION_STARTED  // user (default)
   }
 
   return _RAW_TO_CANONICAL[raw] ?? raw

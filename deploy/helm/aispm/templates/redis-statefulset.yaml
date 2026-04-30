@@ -1,4 +1,11 @@
 # deploy/helm/aispm/templates/redis-statefulset.yaml
+{{- /*
+Skip rendering when an external Redis HA stack (e.g. Bitnami chart in
+sentinel mode) provides the Redis service. Set redis.enabled=false in
+your values overlay and override REDIS_URL via platformEnv to point at
+the external Sentinel-aware Service.
+*/ -}}
+{{- if .Values.redis.enabled | default true }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -58,3 +65,4 @@ spec:
         resources:
           requests:
             storage: {{ .Values.redis.storage }}
+{{- end }}

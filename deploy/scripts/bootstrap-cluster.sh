@@ -141,6 +141,52 @@
 #      GUARD_FAIL_CLOSED stays default-off and the LLM is pointed at
 #      hosted Groq with a real API key.
 #
+#  22. The agent-orchestrator-service's default DB_PATH must point under
+#      DataVolumes/agent-orchestrator/, NOT at the repo root. The
+#      previous default ("agent_orchestrator.db") is a relative path,
+#      so anyone running `python main.py` from the repo root drops a
+#      stray SQLite file at the repo root that leaks across branches.
+#      Fix in main.py: _DEFAULT_DB_PATH resolves an absolute path to
+#      ../../DataVolumes/agent-orchestrator/ alongside the other
+#      persistent dev-only state. Compose and k8s set DB_PATH=/data/...
+#      explicitly via env, so this default only matters out of Docker.
+#
+#  21. The chat-runtime event types (AgentChatMessage, AgentLLMCall,
+#      AgentToolCall) MUST be registered in two places to render
+#      correctly in the UI:
+#        a) services/agent-orchestrator-service/schemas/events.py —
+#           the EventType(str, Enum) class. Without an enum entry,
+#           get_events() in session_service.py coerces the type to
+#           EventType.UNKNOWN and the UI shows "unknown" for every
+#           chat event title and description.
+#        b) ui/src/lib/sessionResults.js — the _RAW_TO_CANONICAL map
+#           plus the canonicalise() role-split for AgentChatMessage
+#           (role=user → SESSION_STARTED, role=agent → OUTPUT_GENERATED).
+#           Without these, the lineage graph's switch statement never
+#           matches, no nodes are added, and the Lineage page is empty
+#           even though session_events has rows.
+#      Symptom of regression: chat works end-to-end, agent_sessions /
+#      session_events populate in the orchestrator's SQLite, but the
+#      Runtime page shows "unknown / Prompt / unknown" rows and the
+#      Lineage page renders an empty graph.
+#
+#  20. Kafka StatefulSet readiness probe needs `timeoutSeconds: 5`,
+#      not the kubelet default of 1. The probe is an exec of
+#      `kafka-broker-api-versions --bootstrap-server localhost:9092`,
+#      which spins up a JVM client + opens a TCP connection. Under
+#      modest load (e.g. Flink CEP transaction-coordinator inits)
+#      that takes 2-3s; with timeoutSeconds=1 the probe falsely
+#      fails, k8s flips the pod NotReady, the headless DNS entry
+#      drops, and any caller doing a fresh `kafka-0.kafka...`
+#      lookup (per-request producers in spm-api's chat path) gets
+#      NXDOMAIN until the next probe pass. Symptom: chat returns
+#      "Load failed" with `KafkaConnectionError: Unable to bootstrap
+#      from kafka-0...` in spm-api logs even though kafka itself is
+#      alive. Fix lives in templates/kafka-statefulset.yaml.
+#      timeoutSeconds=5 keeps the probe responsive enough to catch
+#      real broker hangs (failureThreshold=10 still gives 50s grace
+#      before NotReady) without false-flagging brief load spikes.
+#
 #  19. Deployments' readiness probes must point at a port the workload
 #      actually listens on. spm-aggregator originally specified
 #      `httpGet: /health on :8080` but the workload only ever exposed
@@ -251,6 +297,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY="$REPO_ROOT/deploy"
 HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
+# Optional extra overlay (e.g. values.dev-multinode.yaml). Applied LAST so
+# its values win. Useful for layering cluster-shape overrides on top of
+# values.dev.yaml without forking the whole file. Empty by default.
+VALUES_EXTRA="${VALUES_EXTRA:-}"
 SKIP_PREFLIGHT=0
 TARGET="all"
 SECRETS_FROM=""      # optional override path; default is $REPO_ROOT/.env
@@ -401,6 +451,7 @@ if [ "$DRY_RUN" = "1" ]; then
 
   log "  helm lint $HELM_CHART"
   helm lint "$HELM_CHART" -f "$HELM_CHART/values.yaml" -f "$VALUES_FILE" \
+    ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     || { err "helm lint failed"; exit 1; }
 
   RENDERED=/tmp/aispm-rendered-dryrun.yaml
@@ -408,6 +459,7 @@ if [ "$DRY_RUN" = "1" ]; then
   helm template aispm "$HELM_CHART" -n aispm \
     -f "$HELM_CHART/values.yaml" \
     -f "$VALUES_FILE" \
+    ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
     --api-versions cilium.io/v1alpha1 \
@@ -522,10 +574,17 @@ if [ "$SKIP_PREFLIGHT" != "1" ]; then
   fi
 
   # ── 4. RWX support: Longhorn >= 1.5 ─────────────────────────────────────
+  # Longhorn ships longhorn-manager as a DaemonSet (since v1.5+), older
+  # charts shipped it as a Deployment. Try both. The trailing `|| echo ''`
+  # is required because under `set -euo pipefail` an unmatched grep would
+  # silently kill the whole bootstrap script.
   if kubectl get storageclass longhorn >/dev/null 2>&1; then
-    _LH_IMAGE="$(kubectl -n longhorn-system get deploy longhorn-manager \
-      -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || echo '')"
-    _LH_VER="$(echo "$_LH_IMAGE" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    _LH_IMAGE="$(kubectl -n longhorn-system get daemonset longhorn-manager \
+        -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null \
+      || kubectl -n longhorn-system get deploy longhorn-manager \
+        -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null \
+      || echo '')"
+    _LH_VER="$(printf '%s' "$_LH_IMAGE" | (grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || echo '') | head -1 || echo '')"
     if [ -z "$_LH_VER" ]; then
       pf_warn "Longhorn RWX: cannot determine Longhorn version — ReadWriteMany requires v1.5+; verify before using RWX PVCs"
     else
@@ -1220,6 +1279,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   helm template aispm "$HELM_CHART" -n aispm \
     -f "$HELM_CHART/values.yaml" \
     -f "$VALUES_FILE" \
+    ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
     --api-versions cilium.io/v1alpha1 \
@@ -1323,6 +1383,17 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     fi
   done
   apply_tier data-init
+  # ── Apply platform manifests EARLY — break the OPA dependency cycle ──
+  # startup-orchestrator (data-init) blocks until opa.aispm:8181 responds
+  # to /health, but OPA itself is in the platform tier. If we wait for
+  # data-init Jobs to complete BEFORE applying platform, OPA never gets
+  # deployed and startup-orchestrator times out forever. By applying
+  # platform manifests now (without waiting) we let OPA come up while
+  # startup-orchestrator is still retrying its OPA probe — both finish
+  # roughly together a minute or two later.
+  log "  Phase 3.5: applying platform tier early so OPA comes up while"
+  log "             startup-orchestrator is still retrying its OPA probe"
+  apply_tier platform
   log "    waiting for data-init Jobs to Complete (parallel)..."
   bs_parallel "db-seed" \
     kubectl -n aispm wait --for=condition=Complete --timeout=300s job/db-seed
@@ -1330,11 +1401,11 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     kubectl -n aispm wait --for=condition=Complete --timeout=300s job/startup-orchestrator
   bs_wait_all "data-init tier"
 
-  # ── Phase 4: platform ────────────────────────────────────────────────
-  # 22 backend Deployments. Within the tier they come up in parallel and
-  # rely on init containers / readiness probes for inter-service ordering.
+  # ── Phase 4: platform rollout-status wait ────────────────────────────
+  # Manifests were applied above (Phase 3.5). Here we just wait for the
+  # 22 Deployments to finish rolling out — most are likely Ready already
+  # by the time data-init Jobs Complete.
   log "  Phase 4: platform (22 backend services)"
-  apply_tier platform
   log "    waiting for platform tier rollouts (22 Deployments, parallel)..."
   for d in api spm-api opa guard-model agent agent-orchestrator executor \
            freeze-controller garak-runner grafana memory-service output-guard \

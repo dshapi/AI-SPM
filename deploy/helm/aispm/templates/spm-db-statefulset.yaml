@@ -1,4 +1,13 @@
 # deploy/helm/aispm/templates/spm-db-statefulset.yaml
+{{- /*
+Skip rendering when an external Postgres (e.g. CloudNativePG) is running
+as the actual primary. Set spmDb.enabled=false in your values overlay,
+and provide SPM_DB_URL / SPM_DB_URL_ASYNC via platformEnv that point at
+the external Service (e.g. spm-db-rw). The external setup MUST publish
+its primary at a Service named whatever the chart's other components
+expect (default: `spm-db.<ns>`).
+*/ -}}
+{{- if .Values.spmDb.enabled | default true }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -66,3 +75,4 @@ spec:
         resources:
           requests:
             storage: {{ .Values.spmDb.storage }}
+{{- end }}

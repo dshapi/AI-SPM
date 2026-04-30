@@ -99,6 +99,39 @@ function _relativeTime(isoString) {
   return `${Math.floor(m / 60)}h ago`
 }
 
+// Map a raw agent_id to a human-readable label.
+//
+// The backend stores agent_id as one of:
+//   - a UUID for custom user-uploaded agents (e.g. "f7d7b3eb-...-401")
+//   - a stable short string for built-ins ("sim-agent", "chat-agent",
+//     "agent-{uuid}-runtime")
+//
+// Showing the raw UUID in the sessions sidebar means every custom agent
+// session reads as a meaningless 32-char hex string. Format it as
+// "custom agent-<short>" so the operator can scan the list at a glance.
+function _formatAgentLabel(agentId) {
+  if (!agentId) return '—'
+
+  // Built-in / orchestrator-issued IDs — show verbatim.
+  if (agentId === 'sim-agent' || agentId === 'chat-agent') return agentId
+
+  // Runtime ConfigMap-style agent: "agent-{uuid}-runtime" → "custom agent-{8}"
+  const runtimeMatch = agentId.match(
+    /^agent-([0-9a-f]{8})[0-9a-f-]+-runtime$/i,
+  )
+  if (runtimeMatch) return `custom agent-${runtimeMatch[1]}`
+
+  // Bare UUID (chat / spm-api path) → "custom agent-{first 8 chars}"
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(agentId)) {
+    return `custom agent-${agentId.slice(0, 8)}`
+  }
+
+  // Anything else (named agents, future formats) — pass through unchanged.
+  return agentId
+}
+
+
 function _adaptSession(s) {
   // Prefer explicit backend tier; fall back to score-derived tier so sessions
   // with high scores but missing risk_tier are still classified correctly
@@ -107,7 +140,7 @@ function _adaptSession(s) {
   const riskScore = Math.round((s.risk_score ?? 0) * 100)
   return {
     id:           s.session_id,
-    agent:        s.agent_id,
+    agent:        _formatAgentLabel(s.agent_id),
     agentType:    'Agent',
     risk:         riskTier,
     riskScore,
@@ -144,7 +177,7 @@ function _eventType(eventType, payload) {
   return 'prompt'
 }
 
-function _eventTitle(eventType) {
+function _eventTitle(eventType, payload) {
   const titles = {
     'prompt.received':   'Prompt received',
     'risk.calculated':   'Risk scored',
@@ -160,11 +193,49 @@ function _eventTitle(eventType) {
     'memory.request':    'Memory read',
     'memory.result':     'Memory returned',
   }
-  return titles[eventType] ?? eventType
+  if (titles[eventType]) return titles[eventType]
+
+  // Chat runtime — split AgentChatMessage by role so the row reads
+  // "User prompt" or "Agent reply" rather than the raw type string.
+  if (eventType === 'AgentChatMessage') {
+    const role = (payload?.role ?? '').toLowerCase()
+    return role === 'agent' || role === 'assistant'
+      ? 'Agent reply'
+      : 'User prompt'
+  }
+  if (eventType === 'AgentLLMCall')  return 'LLM call'
+  if (eventType === 'AgentToolCall') return 'Tool call'
+
+  return eventType
 }
 
 function _eventDescription(event) {
   const p = event.payload ?? event
+  const eventType = event.event_type ?? event.type
+
+  // ── Chat runtime — render the prompt / reply text or tool/LLM details
+  // first, since these are the most informative descriptions for the
+  // rows the operator actually cares about. Falls through to the
+  // generic guards below for non-chat events.
+  if (eventType === 'AgentChatMessage' && typeof p.text === 'string' && p.text) {
+    const truncated = p.text.length > 140 ? p.text.slice(0, 140) + '…' : p.text
+    return truncated
+  }
+  if (eventType === 'AgentLLMCall') {
+    const model = p.model ?? '?'
+    const ti = p.prompt_tokens, to_ = p.completion_tokens
+    if (ti != null || to_ != null) {
+      return `${model}  (${ti ?? '—'} in / ${to_ ?? '—'} out)`
+    }
+    return String(model)
+  }
+  if (eventType === 'AgentToolCall') {
+    const tool   = p.tool ?? p.tool_name ?? '?'
+    const dur    = p.duration_ms
+    const status = p.ok === false ? 'failed' : 'ok'
+    return `${tool} — ${status}${dur != null ? ` (${dur}ms)` : ''}`
+  }
+
   // String guards — some events ship structured objects in these fields
   // (e.g. simulation.completed has payload.summary = {result, categories,
   // duration_ms}). Rendering the raw object would crash React with
@@ -180,6 +251,12 @@ function _eventDescription(event) {
   if (typeof p.decision === 'string')          return `Decision: ${p.decision}`
   if (typeof p.tool_name === 'string')         return `Tool: ${p.tool_name}`
   if (typeof p.score === 'number')             return `Risk score: ${Math.round(p.score * 100)}`
+  // Last-resort fallback: prompt text on any event type that has a
+  // payload.text. Better than rendering the raw type string for chat-
+  // adjacent events that don't otherwise match.
+  if (typeof p.text === 'string' && p.text) {
+    return p.text.length > 140 ? p.text.slice(0, 140) + '…' : p.text
+  }
   return event.event_type ?? '—'
 }
 
@@ -211,7 +288,7 @@ function _adaptEvent(raw, sessionId) {
     type:        _eventType(eventType, payload),
     session:     raw.session_id ?? sessionId,
     agent:       raw.source_service ?? '—',
-    title:       _eventTitle(eventType),
+    title:       _eventTitle(eventType, payload),
     description: _eventDescription(raw),
     tool:        payload.tool_name ?? null,
     userEmail,
@@ -228,12 +305,26 @@ function _enrichSession(session, rawEvents) {
   const lastPolicy = [...rawEvents].reverse().find(e =>
     (e.event_type ?? '').startsWith('policy.')
   )
-  const lastPrompt = [...rawEvents].reverse().find(e =>
-    (e.event_type ?? '').startsWith('prompt.')
-  )
-  const lastTool = [...rawEvents].reverse().find(e =>
-    (e.event_type ?? '').startsWith('tool.')
-  )
+  // Most recent USER prompt — matches both legacy `prompt.*` events
+  // (simulator pipeline) and chat-runtime `AgentChatMessage` events
+  // with role=user. Without the AgentChatMessage branch, the right-
+  // hand Control panel's LAST PROMPT box stays empty for chat sessions
+  // even though the actual prompt is right there in the event stream.
+  const lastPrompt = [...rawEvents].reverse().find(e => {
+    const t = e.event_type ?? ''
+    if (t.startsWith('prompt.')) return true
+    if (t === 'AgentChatMessage') {
+      const role = (e.payload?.role ?? '').toLowerCase()
+      return role === 'user' || role === ''
+    }
+    return false
+  })
+  // Tool events from both pipelines (legacy `tool.*` + chat-runtime
+  // `AgentToolCall`).
+  const lastTool = [...rawEvents].reverse().find(e => {
+    const t = e.event_type ?? ''
+    return t.startsWith('tool.') || t === 'AgentToolCall'
+  })
   const lastRisk = [...rawEvents].reverse().find(e =>
     (e.event_type ?? '').startsWith('risk.')
   )
@@ -275,8 +366,18 @@ function _enrichSession(session, rawEvents) {
       reason: _str(reasonValue, '—'),
     },
     lastPrompt:   promptValue == null ? null : _str(promptValue, null),
+    // Tool call rendering — handles BOTH legacy `tool.*` events
+    // (payload.tool_name + tool_args) and chat-runtime AgentToolCall
+    // events (payload.tool + args). Without the second branch, the
+    // right-hand Control panel's LAST TOOL field stays empty for chat
+    // sessions that triggered a web_fetch.
     lastToolCall: lastTool
-      ? `${lastTool.payload?.tool_name ?? ''}${lastTool.payload?.tool_args ? ': ' + JSON.stringify(lastTool.payload.tool_args) : ''}`
+      ? (() => {
+          const p = lastTool.payload ?? {}
+          const name = p.tool_name ?? p.tool ?? ''
+          const args = p.tool_args ?? p.args
+          return `${name}${args ? ': ' + JSON.stringify(args) : ''}`
+        })()
       : null,
   }
 }

@@ -33,15 +33,41 @@ export function lineageFromEvents(events) {
   const edges   = []
   let   toolIdx = 0
 
-  function addNode(id, type, label, sub, risk = 'Low', flagged = false) {
+  function addNode(id, type, label, sub, risk = 'Low', flagged = false, details = {}) {
     if (!nodeMap.has(id)) {
-      nodeMap.set(id, { id, type, label, sub, risk, flagged })
+      // `details` is a free-form object the side panel renders as
+      // labelled rows. Standard keys (rendered with friendly labels):
+      //   prompt, response, agentId, agentLabel, userId, userEmail,
+      //   model, tokensIn, tokensOut, tool, toolArgs, toolStatus,
+      //   durationMs, reason, policyVersion
+      nodeMap.set(id, { id, type, label, sub, risk, flagged, details })
     } else {
       const n = nodeMap.get(id)
       if (flagged) n.flagged = true
       if (_riskLevel(risk) > _riskLevel(n.risk)) n.risk = risk
       if (sub) n.sub = sub
+      // Merge new details on top of existing ones — later events
+      // for the same node id refine the picture (e.g. tool node
+      // gets `toolArgs` from the planned event, then `durationMs`
+      // and `toolStatus` from the completed event).
+      if (details && Object.keys(details).length) {
+        n.details = { ...(n.details || {}), ...details }
+      }
     }
+  }
+
+  // Format an agent_id into something humans can scan in the side panel.
+  // Mirrors _formatAgentLabel in Runtime.jsx — duplicated here because
+  // this module is pure (no React) and we don't want a circular import.
+  function _formatAgentLabel(agentId) {
+    if (!agentId) return null
+    if (agentId === 'sim-agent' || agentId === 'chat-agent') return agentId
+    const m = agentId.match(/^agent-([0-9a-f]{8})[0-9a-f-]+-runtime$/i)
+    if (m) return `custom agent-${m[1]}`
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(agentId)) {
+      return `custom agent-${agentId.slice(0, 8)}`
+    }
+    return agentId
   }
 
   function addEdge(from, to, type, label) {
@@ -56,10 +82,30 @@ export function lineageFromEvents(events) {
 
     switch (event.event_type) {
       case EVENT_TYPES.SESSION_STARTED:
-      case EVENT_TYPES.SESSION_CREATED:
-        addNode('prompt', 'prompt', 'User Prompt',
-          d.prompt ? `"${String(d.prompt).slice(0, 40)}…"` : 'Prompt received')
+      case EVENT_TYPES.SESSION_CREATED: {
+        // AgentChatMessage events (canonicalised into SESSION_STARTED for
+        // role=user) carry the prompt in `text`; legacy session events
+        // use `prompt`. Try both.
+        const promptText = d.text ?? d.prompt
+        const agentId    = d.agent_id ?? event.agent_id
+        const userId     = d.user_id  ?? event.user_id
+        addNode(
+          'prompt',
+          'prompt',
+          'User Prompt',
+          promptText ? `"${String(promptText).slice(0, 40)}…"` : 'Prompt received',
+          'Low',
+          false,
+          {
+            prompt:     promptText ?? null,
+            agentId:    agentId ?? null,
+            agentLabel: _formatAgentLabel(agentId),
+            userId:     userId ?? null,
+            traceId:    d.trace_id ?? event.correlation_id ?? null,
+          },
+        )
         break
+      }
 
       case EVENT_TYPES.CONTEXT_RETRIEVED: {
         const count = Array.isArray(d.retrieved_contexts)
@@ -74,7 +120,22 @@ export function lineageFromEvents(events) {
       case EVENT_TYPES.RISK_CALCULATED: {
         const score = d.posture_score ?? d.risk_score ?? 0
         const risk  = score >= 0.8 ? 'Critical' : score >= 0.5 ? 'High' : score >= 0.3 ? 'Medium' : 'Low'
-        addNode('model', 'model', 'LLM Processing', `Risk: ${Math.round(score * 100)}`, risk, score >= 0.8)
+        // AgentLLMCall events (canonicalised here) carry model/token
+        // usage in the payload. Capture them for the side panel.
+        addNode(
+          'model', 'model', 'LLM Processing',
+          `Risk: ${Math.round(score * 100)}`,
+          risk,
+          score >= 0.8,
+          {
+            model:     d.model ?? null,
+            tokensIn:  d.prompt_tokens ?? null,
+            tokensOut: d.completion_tokens ?? null,
+            riskScore: score,
+            agentId:   d.agent_id ?? null,
+            agentLabel: _formatAgentLabel(d.agent_id),
+          },
+        )
         if (nodeMap.has('context')) addEdge('context', 'model', 'data', 'context')
         else addEdge('prompt', 'model', 'data', 'prompt')
         break
@@ -83,10 +144,27 @@ export function lineageFromEvents(events) {
       case EVENT_TYPES.AGENT_TOOL_PLANNED:
       case EVENT_TYPES.TOOL_INVOKED:
       case EVENT_TYPES.TOOL_COMPLETED: {
-        const toolName = d.tool_name || `Tool ${toolIdx + 1}`
+        // AgentToolCall payload uses `tool` (no _name suffix) and carries
+        // args + duration_ms + ok. Legacy events use tool_name + status.
+        const toolName = d.tool_name || d.tool || `Tool ${toolIdx + 1}`
         const toolId   = `tool-${toolName.replace(/\s+/g, '-').toLowerCase()}`
         if (!nodeMap.has(toolId)) toolIdx++
-        addNode(toolId, 'tool', `Tool: ${toolName}`, d.status || 'invoked')
+        const status = d.status || (d.ok === false ? 'failed'
+                                  : d.ok === true  ? 'completed'
+                                  : 'invoked')
+        addNode(
+          toolId, 'tool', `Tool: ${toolName}`, status,
+          d.ok === false ? 'High' : 'Low',
+          d.ok === false,
+          {
+            tool:       toolName,
+            toolArgs:   d.args ?? d.tool_args ?? null,
+            toolStatus: status,
+            durationMs: d.duration_ms ?? null,
+            agentId:    d.agent_id ?? null,
+            agentLabel: _formatAgentLabel(d.agent_id),
+          },
+        )
         addEdge('model', toolId, 'tool', 'tool call')
         break
       }
@@ -134,8 +212,22 @@ export function lineageFromEvents(events) {
       case EVENT_TYPES.OUTPUT_GENERATED:
       case EVENT_TYPES.OUTPUT_SCANNED: {
         const sub = d.pii_redacted ? 'Redacted · ' : ''
-        addNode('output', 'output', 'Output',
-          `${sub}${d.response_latency_ms ? `${d.response_latency_ms}ms` : 'generated'}`)
+        // AgentChatMessage role=agent canonicalises to OUTPUT_GENERATED;
+        // the assistant's reply is in `text`.
+        const responseText = d.text ?? d.response ?? null
+        addNode(
+          'output', 'output', 'Output',
+          `${sub}${d.response_latency_ms ? `${d.response_latency_ms}ms` : 'generated'}`,
+          'Low',
+          false,
+          {
+            response:   responseText,
+            piiRedacted: !!d.pii_redacted,
+            latencyMs:  d.response_latency_ms ?? null,
+            agentId:    d.agent_id ?? null,
+            agentLabel: _formatAgentLabel(d.agent_id),
+          },
+        )
         // Prefer the most-downstream upstream node we have so the chain reads
         // policy → llm → output when both exist.
         const fromId = nodeMap.has('llm') ? 'llm'
