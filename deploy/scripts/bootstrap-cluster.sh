@@ -1406,6 +1406,14 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   # 22 Deployments to finish rolling out — most are likely Ready already
   # by the time data-init Jobs Complete.
   log "  Phase 4: platform (22 backend services)"
+  # Apply frontend tier NOW so its rollout overlaps with platform (UI
+  # only needs platform Services) AND so a later Flink failure can't
+  # skip it. Originally lived at Phase 7 (after compute-init); but
+  # `die` on Flink job failure meant UI was never deployed when Flink
+  # had issues.
+  log "  Phase 4.5: applying frontend tier early (UI needs only platform)"
+  apply_tier frontend
+
   log "    waiting for platform tier rollouts (22 Deployments, parallel)..."
   for d in api spm-api opa guard-model agent agent-orchestrator executor \
            freeze-controller garak-runner grafana memory-service output-guard \
@@ -1442,12 +1450,11 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     job/flink-pyjob-submitter \
     || die "flink-pyjob-submitter Job did not complete — check: kubectl -n aispm logs job/flink-pyjob-submitter"
 
-  # ── Phase 7: frontend ────────────────────────────────────────────────
-  # ui Deployment. Last because it depends on api / spm-api Services in
-  # the platform tier (already Ready by Phase 4 gate).
-  log "  Phase 7: frontend (ui)"
-  apply_tier frontend
-  log "    waiting for ui rollout..."
+  # ── Phase 7: frontend (already applied early in Phase 4.5) ──────────
+  # We applied the frontend tier at Phase 4.5 (right after platform) so
+  # a Flink failure in Phase 5/6 doesn't skip the UI. Just wait for the
+  # rollout to complete here.
+  log "  Phase 7: frontend (ui — already applied, waiting for rollout)"
   kubectl -n aispm rollout status deploy/ui --timeout=5m \
     || die "ui rollout did not complete"
 
