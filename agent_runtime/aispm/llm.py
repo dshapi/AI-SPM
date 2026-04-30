@@ -12,8 +12,9 @@ needs to speak OpenAI.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import httpx
 
@@ -134,3 +135,113 @@ async def complete(
         model= data.get("model") or body.get("model", ""),
         usage= dict(data.get("usage") or {}),
     )
+
+
+async def stream(
+    messages: List[Dict[str, str]],
+    *,
+    model:       Optional[str] = None,
+    max_tokens:  int  = 2048,
+    temperature: float = 0.7,
+) -> AsyncIterator[str]:
+    """Streaming OpenAI chat-completion call via the platform proxy.
+
+    Same shape as ``complete()`` but yields each delta_text as it
+    arrives from the upstream model, rather than buffering until the
+    full reply is ready. Use this in chat agents to get sub-second
+    time-to-first-token.
+
+    Parameters
+    ──────────
+    messages, model, max_tokens, temperature
+        Same as ``complete()``.
+
+    Yields
+    ──────
+    str
+        Each ``choices[0].delta.content`` chunk from the OpenAI-compat
+        stream, in arrival order. The empty string is filtered out
+        (some providers send keepalive frames with no content).
+
+    Raises
+    ──────
+    httpx.HTTPStatusError on non-2xx — surfaces the proxy's 401 (bad
+    LLM_API_KEY), 502 (upstream unavailable), 504 (upstream timeout).
+
+    Implementation note
+    ───────────────────
+    Hand-rolled SSE parsing — no extra dependency on httpx-sse. The
+    proxy emits standard OpenAI streaming format:
+
+        data: {"choices":[{"delta":{"content":"Hello"}, ...}]}\\n\\n
+        data: {"choices":[{"delta":{"content":" world"}, ...}]}\\n\\n
+        data: [DONE]\\n\\n
+
+    We line-buffer with httpx.aiter_lines(), strip the ``data: ``
+    prefix, sentinel out on ``[DONE]``, and json.loads the remainder.
+    Malformed lines (e.g. a comment ``: keepalive``) are silently
+    skipped — the proxy occasionally emits these.
+    """
+    if not _BASE_URL or not _API_KEY:
+        raise RuntimeError(
+            "aispm.llm.stream: LLM_BASE_URL / LLM_API_KEY env vars "
+            "are not set (agent was not spawned by the controller?)"
+        )
+
+    body: Dict[str, Any] = {
+        "messages":    list(messages),
+        "max_tokens":  max_tokens,
+        "temperature": temperature,
+        "stream":      True,
+    }
+    chosen = (model or _DEFAULT_MODEL).strip()
+    if chosen:
+        body["model"] = chosen
+    headers = {
+        "Authorization": f"Bearer {_API_KEY}",
+        "Accept":        "text/event-stream",
+    }
+
+    async with httpx.AsyncClient(timeout=_TIMEOUT_S) as c:
+        async with c.stream("POST",
+                            f"{_BASE_URL}/chat/completions",
+                            json=body, headers=headers) as r:
+            # On 4xx/5xx the body holds the proxy's diagnostic; we have
+            # to read it before raising so the detail surfaces. httpx's
+            # streaming context defers body load, hence the explicit
+            # aread() below.
+            if r.status_code >= 400:
+                await r.aread()
+                _raise_for_status_with_detail(r)
+                return                                          # unreachable
+
+            async for line in r.aiter_lines():
+                if not line:                                    # keepalive
+                    continue
+                if line.startswith(":"):                        # SSE comment
+                    continue
+                if not line.startswith("data:"):
+                    log.debug("stream: unexpected non-data line=%r", line)
+                    continue
+
+                payload = line[len("data:"):].strip()
+                if payload == "[DONE]":
+                    return
+                try:
+                    obj = json.loads(payload)
+                except json.JSONDecodeError:
+                    log.debug("stream: malformed json line=%r", payload)
+                    continue
+
+                # OpenAI-compat shape: choices[0].delta.content
+                # Defensive: some providers omit choices on the first
+                # frame (sending only the role), or send a delta with
+                # no content. We yield only non-empty content strings.
+                try:
+                    choice = obj["choices"][0]
+                except (KeyError, IndexError):
+                    continue
+                delta = choice.get("delta") or {}
+                text  = delta.get("content")
+                if text:
+                    yield text

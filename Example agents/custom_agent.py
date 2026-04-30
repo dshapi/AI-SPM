@@ -92,15 +92,35 @@ async def handle(msg) -> None:
     aispm.log("custom: llm call", trace=msg.id,
               history_turns=len(history), total_msgs=len(messages))
 
+    # Streaming reply path — each token from the LLM is published to
+    # chat.out as a `delta` record the moment it arrives, and spm-api
+    # forwards it to the UI as one SSE token. The user sees output
+    # within ~200ms of pressing Send instead of waiting for the full
+    # reply to buffer.
+    #
+    # The `done` marker is emitted automatically when the `async with`
+    # block exits — even if the LLM call raises. trace_id from the
+    # inbound ChatMessage is plumbed through so audit/lineage stitches
+    # the reply back to the user's turn.
     try:
-        resp = await aispm.llm.complete(messages=messages)
-        text = resp.text or "(empty reply)"
+        async with aispm.chat.stream(msg.session_id,
+                                      trace_id=msg.trace_id) as out:
+            async for chunk in aispm.llm.stream(messages=messages):
+                await out.write(chunk)
     except Exception as e:                                           # noqa: BLE001
         aispm.log("custom: llm failed", trace=msg.id, error=str(e))
-        text = f"(agent error: {e})"
+        # The stream context above already emitted the `done` marker
+        # with finish_reason="error" via __aexit__, so spm-api closes
+        # the SSE cleanly. We just need to let the user see the cause —
+        # send one more reply with the error string.
+        await aispm.chat.reply(
+            msg.session_id,
+            f"(agent error: {e})",
+            trace_id=msg.trace_id,
+        )
+        return
 
-    await aispm.chat.reply(msg.session_id, text)
-    aispm.log("custom: replied", trace=msg.id, chars=len(text))
+    aispm.log("custom: replied", trace=msg.id)
 
 
 async def main() -> None:

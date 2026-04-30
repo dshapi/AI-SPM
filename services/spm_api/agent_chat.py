@@ -54,6 +54,7 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -256,6 +257,62 @@ def _redact(text: str) -> str:
 
 # ─── Lineage emission ──────────────────────────────────────────────────────
 
+# Module-level lineage producer cache.
+#
+# History: the previous implementation tried to import a `_kafka_producer`
+# attribute from the spm-api `app` module on every emit. That attribute
+# never existed in production (someone removed it without updating
+# `_emit_chat_event`), so the import-from-app branch silently fell
+# through to `_kafka_producer = None` for the lifetime of the pod and
+# every chat lineage emit was a no-op. Symptom: agent_sessions /
+# session_events stayed empty in the orchestrator's DB even though
+# chats worked end-to-end and the Runtime page showed nothing for
+# chat agents.
+#
+# New approach: own the producer lifecycle here. Build it lazily on
+# first emit; cache the successful one; on construction failure cache
+# `None` with a short cool-off so we don't spam logs when Kafka is
+# briefly unavailable. Sync kafka-python — `safe_send` already uses
+# the sync API and we don't want to add an async producer just for
+# this one emit site.
+_lineage_producer_cache:    Any   = None
+_lineage_producer_failed_at: float = 0.0
+_LINEAGE_PRODUCER_COOLDOWN_S = 5.0
+
+
+def _get_lineage_producer():
+    """Return a sync kafka-python producer or None.
+
+    Caches successful producers; on init failure, suppresses retries
+    for ``_LINEAGE_PRODUCER_COOLDOWN_S`` seconds so a Kafka outage
+    doesn't fill the log with reconnection attempts on every chat
+    turn. Self-heals when Kafka comes back: the next emit after the
+    cool-off retries the construction.
+    """
+    global _lineage_producer_cache, _lineage_producer_failed_at
+
+    cached = _lineage_producer_cache
+    # `kafka.KafkaProducer` exposes `_closed` when shut down. If the
+    # cached producer is healthy, reuse it.
+    if cached is not None and not getattr(cached, "_closed", False):
+        return cached
+
+    now = time.monotonic()
+    if now - _lineage_producer_failed_at < _LINEAGE_PRODUCER_COOLDOWN_S:
+        return None
+
+    try:
+        from platform_shared.kafka_utils import build_producer   # type: ignore
+        _lineage_producer_cache = build_producer()
+        log.info("lineage emit: kafka producer initialized")
+        return _lineage_producer_cache
+    except Exception as exc:                                     # noqa: BLE001
+        _lineage_producer_failed_at = now
+        _lineage_producer_cache     = None
+        log.warning("lineage emit: kafka producer init failed: %s", exc)
+        return None
+
+
 def _emit_chat_event(
     *, agent_id: str, tenant_id: str, session_id: str,
     user_id: str, role: str, text: str, trace_id: str,
@@ -269,10 +326,19 @@ def _emit_chat_event(
         )
         from platform_shared.kafka_utils import safe_send    # type: ignore
         from platform_shared.topics import GlobalTopics      # type: ignore
-        try:
-            from app import _kafka_producer                  # type: ignore
-        except (ImportError, ModuleNotFoundError):
-            _kafka_producer = None  # type: ignore
+
+        producer = _get_lineage_producer()
+        if producer is None:
+            # Logged once per cool-off window (5s) — not per turn —
+            # because _get_lineage_producer suppresses retries until
+            # the cool-off expires. A persistent skip means Kafka is
+            # unreachable; one warning per cool-off is enough signal.
+            log.warning(
+                "lineage emit skipped — kafka producer unavailable; "
+                "session=%s role=%s",
+                session_id, role,
+            )
+            return
 
         evt = AgentChatMessageEvent(
             agent_id=agent_id, tenant_id=tenant_id,
@@ -289,9 +355,7 @@ def _emit_chat_event(
             tenant_id      = tenant_id,
             source         = "spm-api-agent-chat",
         )
-        producer = _kafka_producer() if callable(_kafka_producer) else _kafka_producer
-        if producer is not None:
-            safe_send(producer, GlobalTopics.LINEAGE_EVENTS, envelope)
+        safe_send(producer, GlobalTopics.LINEAGE_EVENTS, envelope)
     except Exception as e:                              # noqa: BLE001
         log.warning("lineage emit failed: %s", e)
 
@@ -503,7 +567,20 @@ async def _round_trip(
         enable_auto_commit=True,
     )
     await producer.start(); await consumer.start()
-    reply_text: Optional[str] = None
+    # ── Real-streaming consume loop ─────────────────────────────────────────
+    # Wire protocol on chat.out (set by aispm.chat._StreamWriter):
+    #   {"type": "delta", "session_id", "trace_id", "text": "<chunk>", "index": N}
+    #   …
+    #   {"type": "done",  "session_id", "trace_id", "full_text", "finish_reason"}
+    #
+    # We forward each delta to the SSE stream as it arrives, accumulate the
+    # full reply for output-guard, and break on the terminal `done` marker.
+    # The previous fake-streaming reveal (buffer-then-chunk-with-30ms-delay)
+    # is gone — every token now reflects real LLM progress, so TTFT drops
+    # from ~LLM_seconds to ~one-broker-roundtrip.
+    reply_text:  str  = ""
+    got_done:    bool = False
+    finish_reason: str = ""
     try:
         await producer.send_and_wait(
             topics.chat_in,
@@ -528,22 +605,63 @@ async def _round_trip(
                 yield ": ping\n\n"
                 continue
             v = m.value or {}
-            if v.get("session_id") == session_id_str and v.get("text"):
-                reply_text = str(v["text"])
+            if v.get("session_id") != session_id_str:
+                continue                        # other session on shared topic
+
+            msg_type = v.get("type")
+            if msg_type == "delta":
+                delta = str(v.get("text", ""))
+                if delta:
+                    reply_text += delta
+                    # UI's useAgentChat hook listens for type:"token" —
+                    # keep that wire name even though the agent emits
+                    # them as `delta`. Renaming the SSE type would
+                    # cascade into the UI; we don't want that on a
+                    # backend-streaming PR.
+                    yield _sse({"type": "token", "text": delta})
+            elif msg_type == "done":
+                # full_text on the done marker is authoritative — handles
+                # the edge case where the agent's accumulator and our
+                # delta sum drift (shouldn't happen with single-partition
+                # ordering, but cheap insurance).
+                full_text = v.get("full_text")
+                if isinstance(full_text, str) and full_text:
+                    reply_text = full_text
+                finish_reason = str(v.get("finish_reason", "stop"))
+                got_done = True
                 break
+            else:
+                log.debug(
+                    "chat: unknown chat.out frame type=%r session=%s",
+                    msg_type, session_id_str,
+                )
     finally:
         try: await producer.stop()
         except Exception: pass
         try: await consumer.stop()
         except Exception: pass
 
-    if reply_text is None:
+    if not got_done:
         yield _sse({"type": "error",
                      "text": f"Agent did not respond within "
                              f"{CHAT_REPLY_TIMEOUT_S:.0f}s."})
         return
+    if finish_reason == "error":
+        yield _sse({"type": "error",
+                     "text": "Agent crashed mid-reply — see agent pod logs."})
+        return
 
     # 5. output-guard — regex + OPA. Block / redact / allow.
+    #
+    # Note on streaming + output-guard ordering: deltas have ALREADY been
+    # forwarded to the UI by this point. If the guard says "block" or
+    # "redact" we surface a follow-up SSE event so the UI can render an
+    # error/replacement state over the streamed text. This is a known
+    # trade-off of real streaming vs. fake — accepted because the dev
+    # output-guard is regex-based and the leak window is sub-second.
+    # Production agents that handle truly sensitive content should pin
+    # CHAT_OUTPUT_GUARD_BUFFERED=1 (future flag) to revert to buffer-
+    # then-stream behaviour.
     contains_secret, contains_pii = _scan_output(reply_text)
     decision = await _call_output_policy(
         contains_secret=contains_secret,
@@ -555,6 +673,10 @@ async def _round_trip(
         return
     if decision == "redact":
         reply_text = _redact(reply_text)
+        # Tell the UI to replace its streamed token state with the
+        # redacted final text. The hook can swap the message body
+        # before showing the `done` event below.
+        yield _sse({"type": "redacted", "text": reply_text})
 
     # 6. Persist agent turn + emit lineage.
     try:
@@ -567,40 +689,6 @@ async def _round_trip(
         user_id=user_id, role="agent", text=reply_text, trace_id=trace_id,
     )
 
-    # ── Pseudo-streaming reveal ───────────────────────────────────────────
-    # The agent + LLM finished generating the whole reply already. To give
-    # the UI a streaming feel without rebuilding the LLM call path for true
-    # token-streaming, chunk the final text and emit per-chunk deltas with
-    # a small inter-chunk delay. UI renders progressively; total wall-time
-    # is unchanged, but time-to-first-paint goes from ~LLM_seconds to ~0ms.
-    #
-    # Tunables — small word-aware chunks feel natural at typical reading
-    # speed. CHAT_STREAM_DELAY_MS=0 disables the reveal entirely.
-    chunk_size  = max(1, int(os.environ.get("CHAT_STREAM_CHUNK_CHARS", "12")))
-    delay_s     = max(0.0, float(os.environ.get("CHAT_STREAM_DELAY_MS", "30")) / 1000.0)
-    if delay_s == 0 or len(reply_text) <= chunk_size:
-        yield _sse({"type": "done", "text": reply_text})
-        return
-
-    # Word-aware split — never break a word mid-character. Walk the text,
-    # emit when we cross chunk_size at the next whitespace boundary.
-    cursor = 0
-    while cursor < len(reply_text):
-        end = min(cursor + chunk_size, len(reply_text))
-        # Extend forward to the next word boundary so deltas land at
-        # natural breaks rather than mid-token.
-        if end < len(reply_text) and not reply_text[end].isspace():
-            ws = reply_text.find(" ", end)
-            if ws != -1 and ws - cursor < chunk_size * 2:
-                end = ws + 1
-        chunk = reply_text[cursor:end]
-        cursor = end
-        # UI's useAgentChat hook listens for type:"token"; keep the
-        # name consistent with that contract.
-        yield _sse({"type": "token", "text": chunk})
-        if cursor < len(reply_text):
-            await asyncio.sleep(delay_s)
-
-    # Final done event — include the full text so clients that ignored
+    # 7. Final done event — include the full text so clients that ignored
     # deltas (or want to verify) get the canonical reply.
     yield _sse({"type": "done", "text": reply_text})

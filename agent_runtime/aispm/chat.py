@@ -157,6 +157,9 @@ def _to_chat_message(v: Dict[str, Any]) -> ChatMessage:
         user_id=    str(v.get("user_id", "")),
         text=       str(v.get("text", "")),
         ts=         ts,
+        # Optional on the wire — spm-api emits it but tests/replays may
+        # not. Defaults to "" so the writer falls back to session_id.
+        trace_id=   str(v.get("trace_id", "")),
     )
 
 
@@ -187,58 +190,162 @@ async def _get_producer():
         return _producer
 
 
-async def reply(session_id: str, text: str) -> None:
-    """Send one complete agent reply to the given session.
+# ─── reply() / stream() — emit one agent reply to chat.out ─────────────────
+#
+# Wire protocol on cpm.{tenant}.agents.{agent_id}.chat.out:
+#
+#   {"type": "delta", "session_id": "...", "trace_id": "...",
+#    "text":  "<chunk>", "index": N}
+#   …
+#   {"type": "done",  "session_id": "...", "trace_id": "...",
+#    "full_text": "<concatenated reply>",
+#    "finish_reason": "stop" | "error"}
+#
+# spm-api consumes both and forwards each `delta` as one SSE token to
+# the UI; on `done` it persists the assistant turn in agent_chat_messages
+# and closes the SSE stream. There is no fall-back to a single-record
+# legacy shape — the SDK and the consumer ship together.
 
-    Per spec § 8 V1 only supports full-message replies; ``stream()``
-    arrives in V1.5 once the backend wires per-token SSE through.
 
-    Partition key is ``session_id`` so all messages for one
-    conversation land on the same partition — preserving order.
+class _StreamWriter:
+    """Async context manager that emits delta records as the agent
+    produces them and a final ``done`` marker on exit.
+
+    Usage
+    ─────
+    The canonical streaming pattern is::
+
+        async with aispm.chat.stream(msg.session_id,
+                                     trace_id=msg.trace_id) as s:
+            async for chunk in aispm.llm.stream(messages):
+                await s.write(chunk)
+
+    Single-shot replies (no LLM streaming, just produce one full reply)
+    use the ``reply()`` helper below, which wraps this writer.
+
+    Why a context manager
+    ─────────────────────
+    The ``done`` marker is mandatory — without it spm-api's SSE
+    consumer can't tell when the stream is finished and the chat
+    request hangs in the UI. By emitting the ``done`` from
+    ``__aexit__`` we guarantee delivery on every code path (normal
+    return, exception, cancellation), with ``finish_reason`` set
+    accordingly so the UI can render an error state if the agent
+    crashed mid-stream.
+    """
+
+    __slots__ = (
+        "_session_id", "_trace_id", "_buf", "_idx", "_producer",
+    )
+
+    def __init__(self, session_id: str, trace_id: str) -> None:
+        self._session_id = session_id
+        # Fall back to session_id when the customer didn't propagate
+        # the trace from the inbound ChatMessage. Better than nothing
+        # for downstream lineage; the dedicated trace_id is preferred.
+        self._trace_id   = trace_id or session_id
+        self._buf:        List[str] = []
+        self._idx        = 0
+        self._producer   = None  # set in __aenter__
+
+    async def __aenter__(self) -> "_StreamWriter":
+        self._producer = await _get_producer()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> bool:
+        # Always emit the `done` marker, even on exception, so the SSE
+        # consumer in spm-api closes the stream and the UI doesn't
+        # spin forever. The send_and_wait() also flushes any pending
+        # delta sends queued via send() during write() calls.
+        full_text = "".join(self._buf)
+        finish    = "stop" if exc is None else "error"
+        try:
+            await self._producer.send_and_wait(
+                _topic_out(),
+                value={
+                    "type":          "done",
+                    "session_id":    self._session_id,
+                    "trace_id":      self._trace_id,
+                    "full_text":     full_text,
+                    "finish_reason": finish,
+                    "ts":            datetime.now(timezone.utc).isoformat(),
+                },
+                key=self._session_id.encode(),
+            )
+        except Exception as send_exc:                            # noqa: BLE001
+            log.warning(
+                "aispm.chat: failed to emit done marker session=%s err=%s",
+                self._session_id, send_exc,
+            )
+        # Don't suppress the original exception — let it propagate so
+        # the agent's main loop sees a real error.
+        return False
+
+    async def write(self, chunk: str) -> None:
+        """Emit one delta. Empty strings are silently dropped (some LLM
+        proxies emit keepalive frames with no content).
+
+        Uses ``producer.send`` (not ``send_and_wait``) so each delta
+        doesn't pay a round-trip — aiokafka batches under the hood and
+        the trailing ``send_and_wait`` in ``__aexit__`` flushes
+        everything in one go.
+        """
+        if not chunk:
+            return
+        await self._producer.send(
+            _topic_out(),
+            value={
+                "type":       "delta",
+                "session_id": self._session_id,
+                "trace_id":   self._trace_id,
+                "text":       chunk,
+                "index":      self._idx,
+                "ts":         datetime.now(timezone.utc).isoformat(),
+            },
+            key=self._session_id.encode(),
+        )
+        self._buf.append(chunk)
+        self._idx += 1
+
+
+def stream(session_id: str, *, trace_id: str = "") -> _StreamWriter:
+    """Open a streaming reply context for the given session.
+
+    Returns a ``_StreamWriter`` you can use with ``async with`` —
+    each ``await s.write(chunk)`` produces one ``delta`` record, and
+    the ``done`` marker is emitted automatically when the context
+    exits. ``trace_id`` plumbs the platform's correlation id through
+    so the audit/lineage layers stitch the conversation together;
+    falls back to ``session_id`` if not provided.
     """
     if not _BOOTSTRAP or not _AGENT_ID:
         raise RuntimeError(
-            "aispm.chat.reply: KAFKA_BOOTSTRAP_SERVERS / AGENT_ID "
+            "aispm.chat.stream: KAFKA_BOOTSTRAP_SERVERS / AGENT_ID "
             "not set (agent was not spawned by the controller?)"
         )
-
-    producer = await _get_producer()
-    payload = {
-        "session_id": session_id,
-        "text":       text,
-        "ts":         datetime.now(timezone.utc).isoformat(),
-    }
-    await producer.send_and_wait(
-        _topic_out(),
-        value=payload,
-        key=session_id.encode(),
-    )
+    return _StreamWriter(session_id, trace_id=trace_id)
 
 
-# ─── stream() — V1.5 placeholder ───────────────────────────────────────────
+async def reply(
+    session_id: str,
+    text:       str,
+    *,
+    trace_id:   str = "",
+) -> None:
+    """Send one complete agent reply to the given session.
 
-class _StreamWriterStub:
-    """Returned by ``stream()`` in V1; raises on first ``write()`` so
-    customers using the SDK contract before V1.5 lands fail loudly
-    instead of silently dropping tokens."""
+    Convenience wrapper around ``stream()`` for agents that don't
+    stream from the LLM. Emits the entire ``text`` as a single delta
+    followed by the mandatory ``done`` marker, so the wire protocol
+    on chat.out is identical regardless of whether the agent
+    streamed or buffered.
 
-    async def write(self, _chunk: str) -> None:
-        raise NotImplementedError(
-            "aispm.chat.stream() is V1.5 — the backend SSE wiring "
-            "isn't ready yet. Use aispm.chat.reply() for now."
-        )
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-def stream(session_id: str) -> "_StreamWriterStub":
-    """Stub for spec § 8 token-by-token streaming. Surface kept stable
-    so customer code doesn't break when V1.5 lands."""
-    return _StreamWriterStub()
+    Partition key is ``session_id`` so every record for a
+    conversation lands on the same partition — preserving order.
+    """
+    async with stream(session_id, trace_id=trace_id) as s:
+        if text:
+            await s.write(text)
 
 
 # ─── history() — last N turns of a session ─────────────────────────────────

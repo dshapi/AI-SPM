@@ -24,12 +24,21 @@ class ChatMessage:
     ``id`` is the message UUID, ``session_id`` is the conversation
     partition key (so per-session ordering is preserved across
     consumer-group rebalances).
+
+    ``trace_id`` lets the customer agent stitch its reply back into
+    the platform's audit/lineage record. Pass it to
+    ``aispm.chat.stream(session_id, trace_id=msg.trace_id)`` so the
+    delta records on ``chat.out`` carry the same trace as the
+    incoming user message. Defaults to "" for replays / fixtures
+    that don't include a trace; in that case the writer falls back
+    to ``session_id`` as the trace identifier.
     """
     id:         str
     session_id: str
     user_id:    str
     text:       str
     ts:         datetime
+    trace_id:   str = ""
 
 
 @dataclass

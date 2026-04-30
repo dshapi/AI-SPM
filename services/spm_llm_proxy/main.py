@@ -23,11 +23,13 @@ emission to the lineage pipeline, per-tenant rate limits.
 """
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi.responses import StreamingResponse
 
 from .router import resolve_llm_integration
 
@@ -214,6 +216,111 @@ def _emit_llm_event(*, agent_id, tenant_id, model, prompt_tokens, completion_tok
         log.debug("llm-proxy: lineage emit failed", exc_info=True)
 
 
+async def _stream_openai_compat(
+    *,
+    url:          str,
+    body:         Dict[str, Any],
+    agent_id:     Optional[str],
+    tenant_id:    Optional[str],
+    chosen_model: str,
+    trace_id:     str,
+) -> AsyncIterator[bytes]:
+    """Stream from an OpenAI-compatible upstream (Ollama, vLLM, etc.) and
+    yield raw SSE bytes back to the caller.
+
+    The upstream emits the canonical
+    ``data: {choices[0].delta.content}\\n\\n`` frames + a terminal
+    ``data: [DONE]\\n\\n``; we forward each line verbatim with the
+    SSE record separator restored (``aiter_lines`` strips trailing
+    newlines).
+
+    Side effect: opportunistically parses each frame to accumulate
+    usage stats + completion text so we can emit one
+    ``llm.completed`` lineage event when the stream finishes.
+    """
+    completion_text:    str = ""
+    prompt_tokens:      int = 0
+    completion_tokens:  int = 0
+    ok:                 bool = True
+    error_detail:       Optional[str] = None
+
+    try:
+        async with httpx.AsyncClient(timeout=120) as c:
+            async with c.stream("POST", url, json=body) as r:
+                if r.status_code != 200:
+                    # Read the (now-buffered) error body and surface a
+                    # single SSE error frame so the client doesn't hang.
+                    await r.aread()
+                    err_text = (r.text or "").strip()[:400]
+                    log.warning(
+                        "llm-proxy: ollama stream returned %d: %s",
+                        r.status_code, err_text,
+                    )
+                    ok = False
+                    error_detail = (
+                        f"Upstream LLM (ollama) returned "
+                        f"{r.status_code}: {err_text}"
+                    )
+                    err_envelope = {
+                        "error": {
+                            "message": error_detail,
+                            "type":    "upstream_error",
+                            "code":    r.status_code,
+                        }
+                    }
+                    yield (f"data: {json.dumps(err_envelope)}\n\n").encode()
+                    yield b"data: [DONE]\n\n"
+                    return
+
+                async for line in r.aiter_lines():
+                    if not line:
+                        continue
+                    # Forward verbatim — the upstream already speaks
+                    # the OpenAI SSE shape our SDK expects.
+                    yield (line + "\n\n").encode()
+
+                    # Bookkeeping for the audit event. Best-effort —
+                    # malformed frames just don't contribute.
+                    if not line.startswith("data:"):
+                        continue
+                    payload_str = line[len("data:"):].strip()
+                    if payload_str == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        continue
+                    usage = obj.get("usage") or {}
+                    if usage:
+                        prompt_tokens     = usage.get("prompt_tokens",
+                                                       prompt_tokens)
+                        completion_tokens = usage.get("completion_tokens",
+                                                       completion_tokens)
+                    choices = obj.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        content = delta.get("content")
+                        if content:
+                            completion_text += content
+    except httpx.HTTPError as exc:
+        ok = False
+        error_detail = f"transport error: {exc!s}"
+        log.warning("llm-proxy: stream transport error: %s", exc)
+        yield (
+            f"data: {json.dumps({'error': {'message': error_detail}})}\n\n"
+        ).encode()
+        yield b"data: [DONE]\n\n"
+
+    # Emit the lineage event once on stream completion (success OR
+    # failure) so the audit log records one row per chat turn.
+    _emit_llm_event(
+        agent_id=agent_id, tenant_id=tenant_id, model=chosen_model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens or len(completion_text.split()),
+        ok=ok, trace_id=trace_id,
+    )
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(
     payload: Dict[str, Any],
@@ -322,17 +429,38 @@ async def chat_completions(
         if base.endswith("/v1"):
             # OpenAI-compatible mode — forward verbatim.
             url  = f"{base}/chat/completions"
+            stream_requested = bool(payload.get("stream"))
             body = {
                 "model":       chosen_model,
                 "messages":    payload.get("messages") or [],
-                "stream":      False,
+                # We honour the caller's stream flag; the proxy used to
+                # hardcode False, which buffered the upstream and broke
+                # the agent-runtime SDK's aispm.llm.stream() path.
+                "stream":      stream_requested,
             }
             if "temperature" in payload:
                 body["temperature"] = payload["temperature"]
             if "max_tokens" in payload:
                 body["max_tokens"] = payload["max_tokens"]
-            log.info("llm-proxy: ollama (openai-compat) POST %s model=%s",
-                     url, chosen_model)
+            log.info("llm-proxy: ollama (openai-compat) POST %s model=%s "
+                     "stream=%s",
+                     url, chosen_model, stream_requested)
+
+            if stream_requested:
+                # Stream upstream → forward SSE bytes verbatim. Ollama's
+                # OpenAI-compat endpoint already emits the standard
+                # `data: {choices[0].delta.content}\n\n` shape, so we
+                # don't have to translate. We also accumulate the
+                # delta text for the audit-event emission at the end.
+                return StreamingResponse(
+                    _stream_openai_compat(
+                        url=url, body=body,
+                        agent_id=agent_id, tenant_id=tenant_id,
+                        chosen_model=chosen_model, trace_id=trace_id,
+                    ),
+                    media_type="text/event-stream",
+                )
+
             async with httpx.AsyncClient(timeout=120) as c:
                 r = await c.post(url, json=body)
             if r.status_code != 200:

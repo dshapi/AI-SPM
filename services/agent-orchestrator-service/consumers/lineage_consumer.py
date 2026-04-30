@@ -104,83 +104,155 @@ class LineageEventConsumer:
                     body.session_id, body.event_type, exc,
                 )
 
+    # ── Connection lifecycle ──────────────────────────────────────────────────
+
+    async def _connect(self) -> None:
+        """
+        Open the AIOKafkaConsumer and join the group.  Raises on failure.
+
+        The consumer is created and torn down per-attempt so a half-open
+        client (e.g. broker came back but the existing consumer's TCP
+        socket is dead) doesn't poison the next attempt.
+        """
+        from aiokafka import AIOKafkaConsumer
+        consumer = AIOKafkaConsumer(
+            self._topic,
+            bootstrap_servers       = self._bootstrap,
+            group_id                = self._group_id,
+            value_deserializer      = lambda m: json.loads(m.decode("utf-8")),
+            # earliest so a fresh deployment can drain events buffered while
+            # the orchestrator was offline; commits ensure no duplicate work.
+            auto_offset_reset       = "earliest",
+            enable_auto_commit      = True,
+            auto_commit_interval_ms = 1000,
+            session_timeout_ms      = 30_000,
+            heartbeat_interval_ms   = 10_000,
+        )
+        await consumer.start()
+        self._consumer  = consumer
+        self._available = True
+
+    async def _teardown_consumer(self) -> None:
+        """Drop the current consumer (if any).  Idempotent."""
+        self._available = False
+        if self._consumer is not None:
+            try:
+                await self._consumer.stop()
+            except Exception:                                  # noqa: BLE001
+                pass
+            self._consumer = None
+
     # ── Run loop ──────────────────────────────────────────────────────────────
 
-    async def _run(self) -> None:
+    async def _drain(self) -> None:
+        """
+        Drain messages until the consumer raises or stop_event fires.
+
+        Per-message errors are caught and logged so one bad envelope can't
+        break the loop.  A connection-level error (broker restart, network
+        blip) is allowed to propagate to the supervisor for reconnect.
+        """
         assert self._consumer is not None
-        try:
-            async for msg in self._consumer:
-                if self._stop_event.is_set():
-                    break
-                value = msg.value
-                if not isinstance(value, dict) or "session_id" not in value or "event_type" not in value:
-                    logger.warning("lineage_consumer dropping malformed envelope=%r", value)
-                    continue
+        async for msg in self._consumer:
+            if self._stop_event.is_set():
+                break
+            value = msg.value
+            if not isinstance(value, dict) \
+                    or "session_id" not in value \
+                    or "event_type" not in value:
+                logger.warning(
+                    "lineage_consumer dropping malformed envelope=%r", value,
+                )
+                continue
+            try:
+                await self._persist(value)
+            except Exception as exc:                            # noqa: BLE001
+                logger.warning(
+                    "lineage_consumer_msg_err topic=%s offset=%s err=%s",
+                    msg.topic, msg.offset, exc,
+                )
+
+    async def _supervised_run(self) -> None:
+        """
+        Outer supervisor loop: connect → drain → on failure, sleep + retry.
+
+        This replaces the previous one-shot `start()` behaviour where a
+        broker-unreachable error at app boot permanently demoted the
+        consumer to LOG-ONLY mode and silently dropped every chat-lineage
+        event for the lifetime of the pod.  Symptom of that bug: chats
+        succeed but the Runtime page stays empty because session rows
+        never land in agent_sessions.
+
+        Backoff is exponential, capped at 60s.  Reset on each successful
+        connection so a long-lived consumer that briefly hiccups doesn't
+        get progressively slower to recover.
+        """
+        backoff = 1.0
+        while not self._stop_event.is_set():
+            try:
+                await self._connect()
+                logger.info(
+                    "lineage_consumer_connected topic=%s group=%s bootstrap=%s",
+                    self._topic, self._group_id, self._bootstrap,
+                )
+                backoff = 1.0
+                await self._drain()
+                # Clean exit only happens when stop_event is set; loop
+                # condition will pick that up and we'll fall through.
+            except asyncio.CancelledError:
+                logger.info("lineage_consumer_supervisor_cancelled")
+                raise
+            except Exception as exc:                           # noqa: BLE001
+                logger.warning(
+                    "lineage_consumer connect/drain failed (%s) — "
+                    "retrying in %.1fs", exc, backoff,
+                )
+                await self._teardown_consumer()
+                # Sleep cooperatively so stop() can wake us promptly.
                 try:
-                    await self._persist(value)
-                except Exception as exc:
-                    logger.warning(
-                        "lineage_consumer_msg_err topic=%s offset=%s err=%s",
-                        msg.topic, msg.offset, exc,
+                    await asyncio.wait_for(
+                        self._stop_event.wait(), timeout=backoff,
                     )
-        except asyncio.CancelledError:
-            logger.info("lineage_consumer_task_cancelled")
-            raise
-        except Exception as exc:
-            logger.exception("lineage_consumer_unexpected_err err=%s", exc)
+                    return                                      # stop signalled
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 60.0)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        try:
-            from aiokafka import AIOKafkaConsumer
-            self._consumer = AIOKafkaConsumer(
-                self._topic,
-                bootstrap_servers       = self._bootstrap,
-                group_id                = self._group_id,
-                value_deserializer      = lambda m: json.loads(m.decode("utf-8")),
-                # earliest so a fresh deployment can drain events buffered while
-                # the orchestrator was offline; commits ensure no duplicate work.
-                auto_offset_reset       = "earliest",
-                enable_auto_commit      = True,
-                auto_commit_interval_ms = 1000,
-                session_timeout_ms      = 30_000,
-                heartbeat_interval_ms   = 10_000,
-            )
-            await self._consumer.start()
-            self._available = True
-            self._stop_event.clear()
-            self._task = asyncio.create_task(self._run(), name="lineage-kafka-consumer")
-            logger.info(
-                "lineage_consumer_started topic=%s group=%s bootstrap=%s",
-                self._topic, self._group_id, self._bootstrap,
-            )
-        except Exception as exc:
-            logger.warning(
-                "lineage_consumer Kafka unavailable (%s) — LOG-ONLY mode", exc,
-            )
-            self._consumer = None
-            self._available = False
+        """
+        Start the supervisor task.  Returns immediately — the actual Kafka
+        connection happens in the background, so a missing broker at boot
+        no longer blocks app startup OR permanently disables persistence.
+
+        Same external contract as before (caller awaits `start()`); the
+        difference is that a startup-time Kafka outage is now recoverable.
+        """
+        self._stop_event.clear()
+        self._task = asyncio.create_task(
+            self._supervised_run(),
+            name="lineage-kafka-consumer-supervisor",
+        )
+        logger.info(
+            "lineage_consumer_supervisor_started topic=%s group=%s "
+            "bootstrap=%s", self._topic, self._group_id, self._bootstrap,
+        )
 
     async def stop(self) -> None:
         logger.info("lineage_consumer_stopping")
         self._stop_event.set()
 
-        # Cancel the consume task so the `async for` returns promptly.
+        # Cancel the supervisor; it'll tear down the consumer as it exits.
         if self._task is not None:
             self._task.cancel()
             try:
                 await self._task
-            except (asyncio.CancelledError, Exception):
+            except (asyncio.CancelledError, Exception):         # noqa: BLE001
                 pass
             self._task = None
 
-        if self._consumer is not None:
-            try:
-                await self._consumer.stop()
-            except Exception as exc:
-                logger.warning("lineage_consumer_stop_err err=%s", exc)
-            self._consumer = None
-
-        self._available = False
+        # Belt-and-suspenders teardown in case the supervisor exited
+        # abnormally and left a consumer dangling.
+        await self._teardown_consumer()
         logger.info("lineage_consumer_stopped")
