@@ -22,6 +22,13 @@ metadata:
 spec:
   serviceName: kafka
   replicas: {{ .Values.kafka.replicas }}
+  # KRaft requires all controller-quorum members to be running simultaneously
+  # to elect a leader. The default OrderedReady policy waits for kafka-0
+  # Ready before starting kafka-1, but kafka-0 can't become Ready without
+  # kafka-1 / kafka-2 reachable for the controller quorum — classic
+  # bootstrap deadlock. Parallel lets all brokers start at once and
+  # discover each other.
+  podManagementPolicy: Parallel
   selector:
     matchLabels:
       app: kafka
@@ -39,6 +46,21 @@ spec:
         # SSL); we don't gain anything by wrapping it in Istio mTLS.
         sidecar.istio.io/inject: "false"
     spec:
+      # ── Spread brokers across nodes ───────────────────────────────────────
+      # On a multi-node cluster (k3s with 3 servers) we want each Kafka
+      # broker to land on a different node so a node loss only takes one
+      # broker down — replication factor 3 keeps topics serving from the
+      # remaining two. We use `preferred` (not `required`) so single-node
+      # dev clusters (kafka.replicas: 1) still schedule successfully when
+      # there's only one node available.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels: { app: kafka }
+                topologyKey: kubernetes.io/hostname
       containers:
         - name: kafka
           image: {{ .Values.kafka.image }}:{{ .Values.kafka.tag }}

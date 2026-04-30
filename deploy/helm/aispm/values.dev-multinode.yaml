@@ -1,0 +1,122 @@
+# deploy/helm/aispm/values.dev-multinode.yaml
+# ─────────────────────────────────────────────────────────────────────────
+# Override layer for the multi-node kind cluster on Docker Desktop.
+# Apply on top of values.dev.yaml so the dev defaults (PERMISSIVE mTLS,
+# tightened guard threshold, Tetragon enabled, etc.) are inherited and
+# only the HA-relevant fields change.
+#
+#   helm template aispm deploy/helm/aispm \
+#     -f deploy/helm/aispm/values.dev.yaml \
+#     -f deploy/helm/aispm/values.dev-multinode.yaml
+#
+# Architecture (every layer survives 1 node loss, no SPOF):
+#
+#   Block storage:    Longhorn (RWO replicated, full POSIX, kernel RBD).
+#                     Used by Kafka, MinIO, CNPG Postgres, Bitnami Redis.
+#   Object storage:   MinIO distributed across 3 pods. Used by Flink for
+#                     HA + checkpoints via the s3-fs-hadoop plugin.
+#   Postgres:         CloudNativePG operator → 3-instance Cluster with
+#                     streaming replication. Service `spm-db-rw` follows
+#                     the current primary on failover.
+#   Redis:            Bitnami chart in replication+sentinel mode (1
+#                     master + 3 replicas + 3 sentinels). Service `redis`
+#                     is Sentinel-aware.
+#   Kafka:            3-broker KRaft quorum, anti-affinity across nodes,
+#                     replication-factor=3 + min-isr=2.
+#   Flink:            2 JobManagers + 2 TaskManagers, all stateful data
+#                     in MinIO via s3:// — pods can run anywhere.
+#
+# Prereq scripts (run BEFORE bootstrap-cluster.sh):
+#
+#   ./deploy/scripts/kind-cluster.sh init        # 3-node kind cluster
+#   ./deploy/scripts/kind-storage.sh up          # Longhorn + MinIO + bucket
+#   ./deploy/scripts/kind-databases-ha.sh up     # CNPG + Redis Sentinel
+#   ./deploy/scripts/orb-k3s-registry.sh push    # push aispm-* images
+#                                                # (orb-k3s-registry name
+#                                                # kept from earlier; kind
+#                                                # uses localhost:5001 — see
+#                                                # script for details)
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Kafka — full KRaft quorum across 3 nodes ────────────────────────────
+kafka:
+  replicas: 3
+  minInsyncReplicas: 2
+  storageClass: standard
+
+# ── Postgres + Redis: HA via external operators (NOT chart-builtin) ─────
+# kind-databases-ha.sh installs CloudNativePG (3-instance Postgres with
+# streaming replication, Service spm-db-rw follows the primary) and
+# Bitnami Redis (replication + sentinel, Service `redis` is sentinel-
+# aware). The chart's built-in single-pod StatefulSets are skipped.
+spmDb:
+  enabled: false
+redis:
+  enabled: false
+
+# Override the connection URLs that AISPM services read from
+# platform-secrets / platform-env. These point at the HA endpoints
+# created by kind-databases-ha.sh.
+platformEnv:
+  SPM_DB_URL:       "postgresql://spm_rw:spmpass@spm-db-rw.aispm.svc.cluster.local:5432/spm"
+  SPM_DB_URL_ASYNC: "postgresql+asyncpg://spm_rw:spmpass@spm-db-rw.aispm.svc.cluster.local:5432/spm"
+  REDIS_URL:        "redis://redis.aispm.svc.cluster.local:6379"
+  # Sentinel discovery endpoint — services that prefer Sentinel-native
+  # client libraries (redis-py with Sentinel mode, etc.) should use this
+  # to find the current master automatically. Apps that just speak plain
+  # redis can keep using REDIS_URL above.
+  REDIS_SENTINEL_URL:    "redis://redis.aispm.svc.cluster.local:26379"
+  REDIS_SENTINEL_MASTER: "mymaster"
+
+# ── Per-image registry overrides (Mac Docker → kind nodes) ──────────────
+# kind nodes pull from the local registry on the host at localhost:5001
+# (Docker Desktop hijacks 5000). The kind-cluster.sh init wires this up
+# as a containerd mirror on every node.
+images:
+  api:               { repository: localhost:5001/aispm-api,                  tag: latest }
+  guardModel:        { repository: localhost:5001/aispm-guard-model,          tag: latest }
+  garakRunner:       { repository: localhost:5001/aispm-garak-runner,         tag: latest }
+  retrievalGw:       { repository: localhost:5001/aispm-retrieval-gateway,    tag: latest }
+  processor:         { repository: localhost:5001/aispm-processor,            tag: latest }
+  policyDecider:     { repository: localhost:5001/aispm-policy-decider,       tag: latest }
+  agent:             { repository: localhost:5001/aispm-agent,                tag: latest }
+  memoryService:     { repository: localhost:5001/aispm-memory-service,       tag: latest }
+  executor:          { repository: localhost:5001/aispm-executor,             tag: latest }
+  toolParser:        { repository: localhost:5001/aispm-tool-parser,          tag: latest }
+  outputGuard:       { repository: localhost:5001/aispm-output-guard,         tag: latest }
+  freezeCtrl:        { repository: localhost:5001/aispm-freeze-controller,    tag: latest }
+  policySimulator:   { repository: localhost:5001/aispm-policy-simulator,     tag: latest }
+  spmApi:            { repository: localhost:5001/aispm-spm-api,              tag: latest }
+  spmMcp:            { repository: localhost:5001/aispm-spm-mcp,              tag: latest }
+  spmLlmProxy:       { repository: localhost:5001/aispm-spm-llm-proxy,        tag: latest }
+  spmAggregator:     { repository: localhost:5001/aispm-spm-aggregator,       tag: latest }
+  agentOrchestrator: { repository: localhost:5001/aispm-agent-orchestrator,   tag: latest }
+  threatHunter:      { repository: localhost:5001/aispm-threat-hunting-agent, tag: latest }
+  ui:                { repository: localhost:5001/aispm-ui,                   tag: latest }
+  startupOrch:       { repository: localhost:5001/aispm-startup-orchestrator, tag: latest }
+  flinkJob:          { repository: localhost:5001/aispm-flink-pyjob,          tag: latest }
+  agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,        tag: latest }
+
+# ── Falco — disabled (chart-pinned 0.42.x has container-plugin schema
+#    bug; Tetragon already enforces runtime security policies).
+falco:
+  enabled: false
+
+# ── Flink — 2-JM HA via MinIO/S3 (no shared filesystem) ─────────────────
+# Both JMs and TMs can run on any node because all shared state (HA blob
+# store, checkpoints) lives in MinIO via s3://. The s3:// prefix makes
+# flink-pvc.yaml + flink-jobmanager-statefulset.yaml skip rendering the
+# unused flink-ha + flink-checkpoints RWX PVCs and their mounts.
+flink:
+  checkpointsDir: s3://flink/checkpoints
+  savepointsDir:  s3://flink/savepoints
+  haStorageDir:   s3://flink/ha
+  s3:
+    endpoint:        http://minio.minio.svc.cluster.local:9000
+    accessKey:       minioadmin
+    secretKey:       minioadmin
+    pathStyleAccess: true
+  jobmanager:
+    replicas: 2
+  taskmanager:
+    replicas: 2

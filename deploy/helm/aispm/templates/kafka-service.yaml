@@ -7,6 +7,13 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   clusterIP: None
+  # Publish DNS records for pods even before they pass readiness probes.
+  # KRaft brokers rely on these records (kafka-0.kafka..., kafka-1.kafka...)
+  # to find each other for the controller-quorum election BEFORE any of
+  # them can become Ready — without this, the kube-dns endpoint slice
+  # stays empty until a broker is Ready, which can never happen because
+  # readiness depends on the quorum forming. Bootstrap deadlock.
+  publishNotReadyAddresses: true
   selector:
     app: kafka
   ports:

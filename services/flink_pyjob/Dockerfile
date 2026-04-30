@@ -49,6 +49,20 @@ ARG FLINK_KAFKA_CONNECTOR_VERSION=3.0.2-1.18
 RUN curl -fsSL -o /opt/flink/lib/flink-sql-connector-kafka.jar \
         "https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-kafka/${FLINK_KAFKA_CONNECTOR_VERSION}/flink-sql-connector-kafka-${FLINK_KAFKA_CONNECTOR_VERSION}.jar"
 
+# ── S3 filesystem plugin (Hadoop variant) ────────────────────────────────────
+# Flink ships the s3-fs-hadoop jar in /opt/flink/opt/ but does not enable
+# it by default — to use s3://, s3a:// URIs the jar must live in its own
+# subdirectory under /opt/flink/plugins/. Required for HA/checkpoint
+# storage on MinIO (or any S3-compatible object store) — without this,
+# `state.checkpoints.dir: s3://...` fails at JM startup with
+# "Could not find a file system implementation for scheme 's3'".
+#
+# We use the Hadoop variant (not Presto) because it supports more S3
+# features (notably full directory semantics) and works against MinIO's
+# erasure-coded backend. Both are bundled in the Flink base image.
+RUN mkdir -p /opt/flink/plugins/s3-fs-hadoop \
+ && cp /opt/flink/opt/flink-s3-fs-hadoop-*.jar /opt/flink/plugins/s3-fs-hadoop/
+
 WORKDIR /opt/flink-pyjob
 
 COPY services/flink_pyjob/requirements.txt /opt/flink-pyjob/requirements.txt

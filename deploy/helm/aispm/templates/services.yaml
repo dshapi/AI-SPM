@@ -1,6 +1,7 @@
 # deploy/helm/aispm/templates/services.yaml
 # Aggregated ClusterIP services for all stateless services.
 # StatefulSets (spm-db, kafka, redis) have their own headless service files.
+{{- if .Values.redis.enabled | default true }}
 ---
 apiVersion: v1
 kind: Service
@@ -11,6 +12,7 @@ spec:
   selector: { app: redis }
   ports:
     - port: 6379
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

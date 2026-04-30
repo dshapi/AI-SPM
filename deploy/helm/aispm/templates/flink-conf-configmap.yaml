@@ -50,29 +50,46 @@ data:
     # ── Default parallelism — overridden by the job at submit time ──────────────
     parallelism.default: 3
     
-    # ── State backend: RocksDB with incremental checkpoints to local FS ──────────
-    # Single-host deployment — JM and TM both bind-mount the same host dir
-    # (./DataVolumes/flink-checkpoints) at /flink/checkpoints. No external
-    # blob store required. For multi-host K8s, swap file:// for s3:// here
-    # and add the s3-fs-presto plugin.
+    # ── State backend: RocksDB with incremental checkpoints ──────────────────────
+    # Storage destinations are parameterized via values so dev (single-node,
+    # local-path RWO + RWX share) and multi-node (S3-compatible MinIO) can
+    # share one chart. file:///flink/* paths are PVCs mounted into the JM/TM
+    # containers; s3://... uses the flink-s3-fs-hadoop plugin (built into
+    # the image at /opt/flink/plugins/s3-fs-hadoop/) and the s3.* settings
+    # below.
     state.backend.type: rocksdb
     state.backend.incremental: true
-    state.checkpoints.dir: file:///flink/checkpoints
-    state.savepoints.dir: file:///flink/savepoints
+    state.checkpoints.dir: {{ .Values.flink.checkpointsDir | default "file:///flink/checkpoints" }}
+    state.savepoints.dir: {{ .Values.flink.savepointsDir | default "file:///flink/savepoints" }}
     execution.checkpointing.interval: 60s
     execution.checkpointing.mode: EXACTLY_ONCE
     execution.checkpointing.timeout: 5min
     execution.checkpointing.min-pause: 10s
     execution.checkpointing.max-concurrent-checkpoints: 1
     execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
-    
+
     # ── High availability (k8s-native) ───────────────────────────────────────────
     # Without this, JobManager restarts wipe in-memory job state — any client
     # holding a job ID (browser tab, integration probe) gets 404 forever.
+    # storageDir holds JobGraph blobs and is shared across JMs — must be
+    # readable by all JM replicas. Set to s3://... when running multi-JM
+    # without RWX volumes.
     high-availability.type: kubernetes
-    high-availability.storageDir: file:///flink/ha
+    high-availability.storageDir: {{ .Values.flink.haStorageDir | default "file:///flink/ha" }}
     kubernetes.cluster-id: aispm-flink
     kubernetes.namespace: {{ .Values.global.namespace }}
+    {{- if .Values.flink.s3 }}
+
+    # ── S3 (MinIO or any S3-compatible) settings ────────────────────────────────
+    # Read by the flink-s3-fs-hadoop plugin. Path-style access required for
+    # MinIO; AWS supports virtual-hosted style by default. Credentials are
+    # in plain text here — fine for in-cluster MinIO with default minioadmin
+    # creds, but lift to a Secret + envsubst in a values.prod overlay.
+    s3.endpoint: {{ .Values.flink.s3.endpoint }}
+    s3.path.style.access: {{ .Values.flink.s3.pathStyleAccess | default true }}
+    s3.access-key: {{ .Values.flink.s3.accessKey }}
+    s3.secret-key: {{ .Values.flink.s3.secretKey }}
+    {{- end }}
 
     # ── Restart strategy ─────────────────────────────────────────────────────────
     restart-strategy.type: exponential-delay
