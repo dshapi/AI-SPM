@@ -12,13 +12,19 @@ _redis_client: redis_lib.Redis | None = None
 
 
 def _get_redis() -> redis_lib.Redis:
+    """Lazily-cached Redis client used by the rate limiter.
+
+    Body delegates to platform_shared.redis.get_redis_client() so this
+    code path uses Sentinel-aware master discovery when REDIS_SENTINEL_HOSTS
+    is set (HA prod) and falls back to direct REDIS_HOST:REDIS_PORT
+    otherwise (single-node dev). Replaces the previous direct
+    `redis_lib.Redis(host=...)` construction that pinned every caller
+    to the haproxy-based redis-master Service.
+    """
     global _redis_client
     if _redis_client is None:
-        s = get_settings()
-        kwargs: dict = {"host": s.redis_host, "port": s.redis_port, "decode_responses": True}
-        if s.redis_password:
-            kwargs["password"] = s.redis_password
-        _redis_client = redis_lib.Redis(**kwargs)
+        from platform_shared.redis import get_redis_client
+        _redis_client = get_redis_client(decode_responses=True)
     return _redis_client
 
 

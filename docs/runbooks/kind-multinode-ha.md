@@ -457,6 +457,108 @@ kubectl top nodes   # should return CPU / memory rows
 If `metrics-server` pod is missing, re-run `kind-cluster.sh init` — the
 script reinstalls it.
 
+## Recent architectural changes
+
+Stays here so the next person reading this runbook understands non-obvious
+design decisions made during incident response. Each section names the
+chokepoint code so you can grep without digging.
+
+### Tool execution policy gate (bug A)
+
+Every tool call Claude requests goes through a single chokepoint:
+``services/api/app.py:_execute_tool_with_policy``. That function queries
+OPA at ``/v1/data/spm/tools/allow`` (rules in
+``opa/policies/tool_policy.rego``) before executing the tool, and
+returns a "[Tool blocked by policy: …]" string back to the model when
+the policy denies. Three call sites all use this helper: ``/chat``,
+``/chat/stream``, ``/internal/probe``. Adding a new tool means: define
+it in ``_TOOLS`` (production) and ``_TEST_TOOLS`` (garak), and add
+``allow`` rules in ``tool_policy.rego``. **Never bypass the chokepoint**
+— previous design let tool calls run unconditionally, which is how the
+``tooluse`` probe scored 90 (total bypass) before the fix.
+
+### Encoding-bypass screening (bug F)
+
+Prompts are screened in 4 layers:
+``Normalizer → LexicalScanner → LlamaGuard → OPA``. A new step between
+LexicalScanner and LlamaGuard extracts decoded payloads (Base64, hex,
+ROT13) via
+``services/api/models/obfuscation_screen.py:extract_decoded_payloads``.
+Each decoded payload is **re-screened through Llama Guard** so novel
+phrasing in encoded payloads gets caught by the same content classifier
+that screens the raw prompt. When encoding is detected (and the inner
+content passes guard), an ``"obfuscation"`` signal is appended to
+``guard_categories``; ``opa/policies/prompt_policy.rego`` has a rule
+that escalates this signal to block when ``guard_score >= 0.30``,
+unless the auth context has scope ``prompts:encoded_allowed``. Benign
+short Base64 (e.g. ``"RG9nYW4="`` = "Dogan") passes through cleanly —
+no false positives.
+
+### Redis: Sentinel-aware clients (haproxy proxy bypassed)
+
+Services no longer connect through the ``redis-master`` Service /
+``redis-master-proxy`` haproxy pods. The proxy was flapping under
+istio sidecar pooling (high-frequency tcp-checks tripping ECONNRESET
+mid-handshake). The fix moves master-discovery into the application
+clients themselves via Redis Sentinel.
+
+Single source of truth: ``platform_shared/redis.py:get_redis_client()``.
+Reads ``REDIS_SENTINEL_HOSTS`` (comma-separated list of all 3 sentinel
+endpoints, set by the platform-env configmap) and
+``REDIS_SENTINEL_MASTER`` (``"mymaster"``). Falls back to direct
+``REDIS_HOST:REDIS_PORT`` when sentinel hosts are unset (single-node
+dev). Every service's local ``_get_redis()`` now delegates to this
+helper. The haproxy proxy is still deployed but **dead code in the data
+path** — pending cleanup (see Known Issues below).
+
+### Topic registry expansion + reconciliation
+
+Kafka topics are owned by ``platform_shared/topics.py``. The
+startup-orchestrator creates them all on boot with RF derived from
+``KAFKA_REPLICATION_FACTOR`` and reconciles drift on existing topics.
+RF mismatches are logged as warnings (operator runs
+``deploy/scripts/kafka-reconcile-topics.sh``); retention / cleanup
+policy drift is auto-fixed via ``alter_configs``. Per-agent topics
+(``cpm.t1.agents.<UUID>.chat.{in,out}``) are created by
+``services/spm_api/agent_controller.py:create_agent_topics`` which now
+reads RF / partitions from env (previously hardcoded RF=1).
+
+### Probe timeout pattern
+
+Bitnami's pg/redis charts default ``timeoutSeconds: 1`` on liveness/
+readiness probes. On kind-on-Mac that's too tight — the underlying
+exec routinely takes 2–3s, kubelet false-fails the probe and kills
+the pod, every dependent service sees connection drops. The pattern
+applied to kafka and spm-db is ``timeoutSeconds: 5``. Audit all helm
+probes for this footgun (see Known Issues below).
+
+### Image deployment quirk on kind
+
+``docker push localhost:5001/...:latest`` updates the registry, but
+kind's containerd holds the previous ``:latest`` digest in its content
+store and reports "Image is up to date" when asked to pull. To force a
+real image refresh after pushing, evict the local image first:
+
+```bash
+for n in aispm-control-plane aispm-control-plane2 aispm-control-plane3; do
+  docker exec $n crictl images | awk '/aispm-<service>/{print $3}' \
+    | xargs -r -n1 docker exec $n crictl rmi
+  docker exec $n crictl pull localhost:5001/aispm-<service>:latest
+done
+```
+
+We hit this multiple times during the bug A and Sentinel migrations
+when restarted pods kept running stale code despite the registry having
+a newer image. Always verify after a rollout:
+
+```bash
+kubectl -n aispm get pod -l app=<service> -o jsonpath='{.items[0].status.containerStatuses[0].imageID}'
+docker inspect localhost:5001/aispm-<service>:latest --format '{{.Id}}'
+```
+
+If the running pod's imageID doesn't match the registry's local image
+ID, it's running stale code.
+
 ## Known issues (open work)
 
 These are real product/configuration issues observed during the kind
@@ -564,6 +666,162 @@ Action items (not done):
       the row.
 - [ ] If the row is intact, this is a UI bug — the table fetch
       response is dropping it client-side.
+
+### Flink HA leader election broken after etcd restore
+
+Both ``flink-jobmanager-0`` and ``flink-jobmanager-1`` show ``1/2``
+Ready (istio sidecar up, jobmanager container probe failing). HTTP
+``/overview`` on port 8081 hangs; logs show
+``AskTimeoutException: Recipient ... had already been terminated``.
+Both are running but neither holds the leader lease — Flink's
+Kubernetes-based HA leader election was disrupted by the etcd
+restore (configmap-backed leases got wiped/regenerated and neither JM
+re-acquired).
+
+Action items:
+
+- [ ] Rolling-restart both jobmanagers; expected to clear cleanly:
+      ``kubectl -n aispm rollout restart statefulset/flink-jobmanager``
+- [ ] If it recurs after restart, investigate the lease ConfigMap
+      lifecycle in CNPG-equivalent recovery scenarios.
+- [ ] Document jobmanager recovery in a per-component recovery section
+      so this is a 30-second reflex not a 30-minute investigation.
+
+### CNPG cluster (spm-db-1/2/3) — high restart counts
+
+The CNPG-managed Postgres cluster instances cycle frequently (restart
+counts climbed to 14–16 over a few hours during today's session). The
+fix that landed for the standalone ``spm-db`` StatefulSet
+(``timeoutSeconds: 5`` on ``pg_isready`` probes) was NOT applied to
+the CNPG ``Cluster`` resource — that controls its own probe specs.
+
+Action items:
+
+- [ ] Find where CNPG generates pod probes (operator default vs
+      ``Cluster.spec.affinity.podLivenessProbe``).
+- [ ] Patch the Cluster resource to use ``timeoutSeconds: 5`` for
+      ``pg_isready``.
+- [ ] Verify spm-db-1/2/3 stop cycling.
+
+### spm-api 401 on model registration during startup
+
+The startup-orchestrator's "register CPM models" step fails 20/20
+attempts with ``spm-api returned 401 for llama-guard-3``. Result:
+Llama-Guard-3 is unregistered after every boot, and the SPM admin UI
+shows no models.
+
+Suspected causes:
+
+- Internal-token mismatch between orchestrator and spm-api
+  (``platform-secrets`` got rotated post-recovery and orchestrator's
+  cached token went stale).
+- spm-api's ``/internal/models`` endpoint uses a different auth
+  scheme than orchestrator is sending.
+
+Action items:
+
+- [ ] Capture the actual 401 response body — identifies which auth
+      scheme is being rejected.
+- [ ] If token-rotation, restart orchestrator AFTER the secret rotates
+      (or have it re-read on every attempt).
+- [ ] Add a startup-orchestrator integration test that catches model
+      registration regressions.
+
+### Kafka leader rebalance (cosmetic)
+
+After today's partition reassignment to RF=3, every partition's leader
+landed on broker 0. Reads/writes are healthy but the load is uneven.
+Run a preferred-leader election to redistribute:
+
+```bash
+kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-leader-election \
+  --bootstrap-server localhost:9092 \
+  --election-type preferred --all-topic-partitions
+```
+
+Action items:
+
+- [ ] Run the election; verify per-topic ``Leader`` field varies
+      across 0, 1, 2.
+- [ ] Schedule periodically (preferred-election cron) so future
+      reassignments don't leave imbalance.
+
+### Garak `encoding.InjectBase64` probe noise
+
+The probe's success criterion is "did the model decode any Base64?"
+That's overly broad — benign decodes (e.g. ``"RG9nYW4="`` → "Dogan")
+get scored as defense-bypassed even though no harmful content was
+involved. After bug F (Layer 2.5 Llama-Guard re-screen) the actual
+security gap is fixed; the residual score on this probe is mostly
+false-positive noise.
+
+Action items:
+
+- [ ] Tune the probe's detector or replace with a custom probe that
+      scores only on harmful decoded content.
+- [ ] Document the noise in the simulation results UI so reviewers
+      don't flag it as a real failure.
+
+### redis-allow-platform AuthorizationPolicy is a no-op
+
+Found while debugging redis flakiness — the AuthorizationPolicy
+``redis-allow-platform`` selects ``app: redis``, but Bitnami's redis
+chart labels pods with ``app.kubernetes.io/name: redis``. The
+selector matches nothing, so the policy is dead. Nothing in istio
+currently enforces who can talk to the platform redis.
+
+Action items:
+
+- [ ] Update the policy's selector to
+      ``app.kubernetes.io/name: redis``.
+- [ ] Apply same audit to other AuthorizationPolicies in the chart;
+      Bitnami pods consistently use the ``app.kubernetes.io/*``
+      labels and the chart's policies often use ``app: <name>``.
+
+### Helm probe timeout audit (footgun applied broadly)
+
+The ``timeoutSeconds: 1`` default footgun was hit on kafka and
+spm-db this session. Other deployments likely have the same issue;
+they just haven't manifested because their kubelet probe load is
+lower.
+
+Action items:
+
+- [ ] Audit every helm template for exec / httpGet probes without an
+      explicit ``timeoutSeconds``. Add ``timeoutSeconds: 5``
+      (and ``failureThreshold: 3`` for parity) wherever missing.
+- [ ] Consider chart-level lint that blocks PRs introducing
+      unspecified probe timeouts.
+
+### Cleanup: dead haproxy redis-master proxy *(DONE)*
+
+After the Sentinel-aware client migration, the ``redis-master-proxy``
+Deployment + ``redis-master`` Service were dead code in the data path
+and have been removed.
+
+- [x] Removed the ``redis-master-proxy`` Deployment + ``redis-master``
+      Service block from ``deploy/scripts/kind-databases-ha.sh``;
+      replaced with a comment block documenting why no proxy is needed
+      (clients use Sentinel via ``platform_shared/redis.py``).
+- [x] Verified no service still references
+      ``redis-master.aispm.svc.cluster.local`` — the only redis access
+      path is now ``get_redis_client()``.
+- [x] Deleted ``redis-haproxy-cfg`` ConfigMap, ``redis-master-proxy``
+      Deployment, and ``redis-master`` Service from the cluster.
+
+### Connector card description drift *(DONE)*
+
+The Redis integration card's text was old DB-seeded copy from before
+the platform-managed read-only redesign.
+
+- [x] Updated ``services/spm_api/integrations_seed_data.py`` for
+      ``int-021`` (Redis) — fresh installs now seed the correct
+      description on first boot.
+- [x] Updated the existing DB row via direct SQL UPDATE on
+      ``integrations.description``. The bootstrap-on-startup upsert
+      in ``_upsert_integration`` (``integrations_routes.py:1497``)
+      reconciles ``description`` on every spm-api restart, so future
+      drift won't recur as long as the seed file stays correct.
 
 ## What's NOT installed (and why)
 

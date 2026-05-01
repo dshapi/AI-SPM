@@ -172,6 +172,7 @@ from connector_probes import (  # noqa: E402  (after-docstring import is deliber
     probe_openai_compatible,
     probe_postgres,
     probe_redis,
+    probe_platform_redis,
     probe_s3_stub,
     probe_servicenow,
     probe_slack,
@@ -586,24 +587,47 @@ CONNECTOR_TYPES: Dict[str, ConnectorType] = {
     "redis": {
         "key": "redis", "label": "Redis", "category": "Data / Storage",
         "vendor": "Redis Ltd.", "icon_hint": "zap",
-        "description": "Redis key-value store. Probes PING via redis-py async.",
+        "description": (
+            "Platform Redis cluster (HA, sentinel-managed). Auto-configured "
+            "from cluster env — host/port/password are not editable. The "
+            "Test connection button issues a Sentinel-aware PING."
+        ),
+        # Platform-managed integration: the UI should render every field
+        # below as read-only, sourcing values from the cluster's
+        # platform-env configmap (REDIS_SENTINEL_HOSTS / REDIS_SENTINEL_MASTER).
+        # Operators see the live config + can run Test connection but
+        # can't point this card at an external Redis. For external Redis
+        # integrations, add a separate registry entry with platform_managed=False.
+        "platform_managed": True,
         "fields": [
-            # Defaults point at the in-compose redis service.
+            # All fields are display-only. Defaults are pulled from env
+            # at render time; the UI passes platform_managed=true to its
+            # form component to disable inputs and skip validation.
             {"key": "host", "label": "Host", "type": "string",
-             "group": "Connection", "required": True,
-             "default": "redis", "placeholder": "redis.prod.internal"},
+             "group": "Connection", "required": True, "readonly": True,
+             "default": "redis (sentinel-resolved master)"},
             {"key": "port", "label": "Port", "type": "integer",
-             "group": "Connection", "required": True, "default": 6379},
+             "group": "Connection", "required": True, "readonly": True,
+             "default": 6379},
+            {"key": "sentinel_master", "label": "Sentinel Master Name",
+             "type": "string", "group": "Connection", "required": True,
+             "readonly": True, "default": "mymaster"},
             {"key": "db", "label": "Database Number", "type": "integer",
-             "group": "Advanced", "required": False, "default": 0,
+             "group": "Advanced", "required": False, "readonly": True,
+             "default": 0,
              "hint": "Redis logical DB index (0–15 typical)."},
             {"key": "tls", "label": "Use TLS", "type": "boolean",
-             "group": "Advanced", "required": False, "default": False},
+             "group": "Advanced", "required": False, "readonly": True,
+             "default": False},
             {"key": "password", "label": "Password", "type": "password",
-             "group": "Credentials", "required": False, "secret": True,
-             "hint": "Blank for an unauthenticated Redis (common in dev)."},
+             "group": "Credentials", "required": False, "readonly": True,
+             "secret": True,
+             "hint": "Managed via platform-secrets; not exposed here."},
         ],
-        "probe": probe_redis,
+        # Use the platform-redis probe (Sentinel-aware) instead of the
+        # generic probe_redis so the Test connection button reflects the
+        # actual master health, bypassing the haproxy redis-master proxy.
+        "probe": probe_platform_redis,
     },
 
     # ══════════════════════════════════════════════════════════════════════════

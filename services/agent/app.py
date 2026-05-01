@@ -20,10 +20,8 @@ settings = get_settings()
 
 
 def _get_redis() -> redis.Redis:
-    kwargs = {"host": settings.redis_host, "port": settings.redis_port, "decode_responses": True}
-    if settings.redis_password:
-        kwargs["password"] = settings.redis_password
-    return redis.Redis(**kwargs)
+    from platform_shared.redis import get_redis_client
+    return get_redis_client(decode_responses=True)
 
 
 class Agent(ConsumerService):

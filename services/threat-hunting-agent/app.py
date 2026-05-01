@@ -82,13 +82,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Postgres connection factory configured: %s", settings.spm_db_url)
 
     # -- Redis -------------------------------------------------------------------
-    r_client = redis_lib.Redis(
-        host=settings.redis_host,
-        port=settings.redis_port,
-        decode_responses=False,
-    )
+    # Sentinel-aware via shared helper. decode_responses=False because the
+    # threat-hunting tools read pickle blobs out of Redis directly.
+    from platform_shared.redis import get_redis_client
+    r_client = get_redis_client(decode_responses=False)
     set_redis_client(r_client)
-    logger.info("Redis client configured: %s:%d", settings.redis_host, settings.redis_port)
+    logger.info("Redis client configured (sentinel-aware)")
 
     # -- OPA ---------------------------------------------------------------------
     class _SimpleOpaClient:

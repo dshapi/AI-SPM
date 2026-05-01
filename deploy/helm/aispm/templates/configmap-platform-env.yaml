@@ -27,6 +27,14 @@ data:
   # min.insync.replicas — values-driven so prod can keep ISR=2 with RF=3
   # while dev stays at 1.
   KAFKA_MIN_INSYNC_REPLICAS: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
+  # Sentinel-aware Redis client config — replaces the haproxy-based
+  # redis-master proxy that flapped under istio sidecar pooling. Each
+  # redis-node pod runs a sentinel sidecar at port 26379. Listing all
+  # 3 gives clients multiple discovery endpoints (any one being up is
+  # enough to find the master). Master name is the Bitnami chart default.
+  # Code path: platform_shared/redis.py:get_redis_client().
+  REDIS_SENTINEL_HOSTS: "{{- range $i, $_ := until (int .Values.redis.replicas | default 3) }}{{ if $i }},{{ end }}redis-node-{{ $i }}.redis-headless.{{ $.Values.global.namespace }}.svc.cluster.local:26379{{- end }}"
+  REDIS_SENTINEL_MASTER: {{ .Values.redis.sentinelMasterName | default "mymaster" | quote }}
   JWT_PRIVATE_KEY_PATH: /keys/private.pem
   JWT_PUBLIC_KEY_PATH: /keys/public.pem
   KEYS_DIR: /keys

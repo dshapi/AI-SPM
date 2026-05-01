@@ -958,7 +958,7 @@ def build_seed() -> List[Dict[str, Any]]:
             "category": "Data / Storage", "status": "Healthy", "auth_method": "API Key",
             "owner": "mike.torres", "owner_display": "Mike Torres",
             "environment": "Production", "enabled": True,
-            "description": "Redis key-value store. Pre-configured to point at the AI-SPM platform's own Redis so the Test button (PING) is green out-of-the-box — swap for your real cluster in Configure.",
+            "description": "Platform Redis cluster (HA, sentinel-managed). Auto-configured from cluster env — host, port, master name and password are not editable. The Test button issues a Sentinel-aware PING through platform_shared/redis.py rather than the legacy haproxy proxy.",
             "vendor": "Redis Ltd.",
             "tags": ["redis", "cache", "pub-sub"],
             "config": {

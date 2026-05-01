@@ -115,25 +115,22 @@ def _get_redis():
                  exc)
         _redis_unavailable = True
         return None
-    host = os.getenv("REDIS_HOST", "redis")
-    port = int(os.getenv("REDIS_PORT", "6379") or "6379")
-    password = os.getenv("REDIS_PASSWORD") or None
+    # Build via shared helper so this caller benefits from Sentinel-aware
+    # master discovery when REDIS_SENTINEL_HOSTS is set. Falls back to
+    # direct REDIS_HOST:REDIS_PORT for single-node dev. We override the
+    # default 5s socket timeout with the tighter 1s the credentials cache
+    # uses — credential lookups are blocking and a slow Redis must not
+    # add user-visible latency. Cache fail-closed (latch) on first error.
     try:
-        client = redis_lib.Redis(
-            host=host,
-            port=port,
-            password=password,
-            decode_responses=True,
-            socket_timeout=1.0,
-            socket_connect_timeout=1.0,
-        )
+        from platform_shared.redis import get_redis_client
+        client = get_redis_client(decode_responses=True, socket_timeout=1.0)
         # Cheap liveness probe so first real request doesn't take the
         # full timeout when Redis is unreachable.
         client.ping()
     except Exception as exc:
         log.warning(
-            "credentials: redis at %s:%s unreachable (%s); cache disabled",
-            host, port, exc,
+            "credentials: redis unreachable (%s); cache disabled",
+            exc,
         )
         _redis_unavailable = True
         return None

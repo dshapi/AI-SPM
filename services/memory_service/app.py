@@ -49,10 +49,8 @@ _TTL_MAP = {
 
 
 def _get_redis() -> redis.Redis:
-    kwargs = {"host": settings.redis_host, "port": settings.redis_port, "decode_responses": True}
-    if settings.redis_password:
-        kwargs["password"] = settings.redis_password
-    return redis.Redis(**kwargs)
+    from platform_shared.redis import get_redis_client
+    return get_redis_client(decode_responses=True)
 
 
 def _store_key(tenant_id: str, user_id: str, namespace: str, key: str) -> str:

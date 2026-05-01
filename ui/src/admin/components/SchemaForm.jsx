@@ -104,6 +104,10 @@ const inputCls = cn(
   'border border-gray-200 rounded-lg',
   'focus:outline-none focus:ring-2 focus:ring-blue-500/30 focus:border-blue-400',
   'placeholder:text-gray-300',
+  // Readonly fields (e.g. platform-managed integrations like Redis) get
+  // greyed out so the operator can see the values but can't edit them.
+  'read-only:bg-gray-100 read-only:text-gray-500 read-only:cursor-not-allowed',
+  'disabled:bg-gray-100 disabled:text-gray-500 disabled:cursor-not-allowed',
 )
 const selectCls = cn(
   'w-full h-9 px-2 text-[12.5px] text-gray-800 bg-white',
@@ -155,6 +159,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           placeholder={secretPlaceholder || ''}
           className={inputCls}
           data-testid={`field-${field.key}`}
+          readOnly={!!field.readonly}
         />
       )
       break
@@ -177,6 +182,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           placeholder={field.placeholder || ''}
           className={inputCls}
           data-testid={`field-${field.key}`}
+          readOnly={!!field.readonly}
         />
       )
       break
@@ -187,6 +193,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           onChange={e => onFieldChange(field.key, e.target.value)}
           className={selectCls}
           data-testid={`field-${field.key}`}
+          disabled={!!field.readonly}
         >
           {!field.required && <option value="">— Not set —</option>}
           {(field.options || []).map(opt => (
@@ -242,6 +249,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           placeholder={secretPlaceholder || field.placeholder || ''}
           className={cn(inputCls, 'h-auto py-2 font-mono text-[11px] leading-snug resize-y')}
           data-testid={`field-${field.key}`}
+          readOnly={!!field.readonly}
         />
       )
       break
@@ -252,8 +260,9 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
             type="checkbox"
             checked={!!v}
             onChange={e => onFieldChange(field.key, e.target.checked)}
-            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500/30"
+            className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500/30 disabled:cursor-not-allowed disabled:opacity-60"
             data-testid={`field-${field.key}`}
+            disabled={!!field.readonly}
           />
           <span>{field.placeholder || 'Enabled'}</span>
         </label>
@@ -268,6 +277,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           placeholder={field.placeholder || ''}
           className={inputCls}
           data-testid={`field-${field.key}`}
+          readOnly={!!field.readonly}
         />
       )
       break
@@ -281,6 +291,7 @@ function FieldRow({ field, value, onFieldChange, existingCredentials, mode,
           placeholder={field.placeholder || ''}
           className={inputCls}
           data-testid={`field-${field.key}`}
+          readOnly={!!field.readonly}
         />
       )
       break

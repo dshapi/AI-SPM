@@ -438,9 +438,12 @@ def configure_kafka_acls() -> None:
 
 def seed_redis_defaults() -> redis.Redis:
     log.info("── Step 5: Seeding Redis defaults ──")
-    kwargs: dict = {"host": REDIS_HOST, "port": REDIS_PORT, "decode_responses": True}
-    if REDIS_PASSWORD:
-        kwargs["password"] = REDIS_PASSWORD
+    # Use platform_shared.redis so this picks up Sentinel-aware master
+    # discovery when REDIS_SENTINEL_HOSTS is set (HA prod), and falls
+    # back to direct REDIS_HOST:REDIS_PORT otherwise. Replaces the
+    # earlier kwargs-then-redis.Redis() construction which pinned the
+    # orchestrator to the haproxy redis-master Service.
+    from platform_shared.redis import get_redis_client
 
     # Wait for Redis with explicit connection tracking.
     # NOTE: redis.Redis() does NOT connect on construction — it only connects
@@ -450,11 +453,11 @@ def seed_redis_defaults() -> redis.Redis:
     connected = False
     for attempt in range(20):
         try:
-            candidate = redis.Redis(**kwargs)
+            candidate = get_redis_client(decode_responses=True)
             candidate.ping()
             r = candidate
             connected = True
-            log.info("  ✓ Redis reachable at %s:%d", REDIS_HOST, REDIS_PORT)
+            log.info("  ✓ Redis reachable (sentinel-aware client)")
             break
         except Exception as e:
             log.info(

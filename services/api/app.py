@@ -374,12 +374,8 @@ def get_producer():
 def _get_gate_redis():
     global _redis_gate_client
     if _redis_gate_client is None:
-        _redis_gate_client = redis_lib.Redis(
-            host=settings.redis_host,
-            port=settings.redis_port,
-            password=settings.redis_password or None,
-            decode_responses=True,
-        )
+        from platform_shared.redis import get_redis_client
+        _redis_gate_client = get_redis_client(decode_responses=True)
     return _redis_gate_client
 
 

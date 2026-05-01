@@ -582,6 +582,59 @@ async def probe_redis(config: Dict[str, Any], creds: Dict[str, Any]) -> ProbeRes
             pass
 
 
+async def probe_platform_redis(
+    config: Dict[str, Any] | None = None,
+    creds: Dict[str, Any] | None = None,
+) -> ProbeResult:
+    """Probe THIS deployment's Redis (Sentinel-aware), not a user-supplied one.
+
+    Companion to :func:`probe_redis` which probes external/user-configured
+    Redis instances (their AWS ElastiCache, etc.). The platform-Redis
+    integration card in the admin UI is auto-populated from cluster env
+    and its host/port/password fields are greyed out — operators can't
+    change what their own platform points at. The card's "Test
+    connection" button calls this function instead of :func:`probe_redis`
+    so the probe goes through Sentinel rather than the haproxy
+    redis-master proxy (which flapped under istio sidecar pooling).
+
+    Accepts ``config`` / ``creds`` to match the registry's uniform probe
+    signature (the dispatcher calls every probe as ``probe(cfg, creds)``)
+    but ignores them — the platform Redis is fully determined by the
+    cluster's env, and the UI fields are read-only.
+
+    Returns the same ``ProbeResult`` shape as :func:`probe_redis` so the
+    caller doesn't need a separate code path on the success side.
+    """
+    del config, creds  # explicitly unused — see docstring
+    started = time.monotonic()
+    try:
+        from platform_shared.redis import get_redis_client
+    except ImportError as e:
+        return False, f"platform_shared.redis import failed: {e}", None
+
+    # The shared helper returns a synchronous client; we run its ping in
+    # a thread so the FastAPI event loop stays unblocked. Same pattern
+    # FastAPI uses internally for sync deps in async routes.
+    import asyncio
+    try:
+        client = get_redis_client(
+            decode_responses=True,
+            socket_timeout=_DB_PROBE_TIMEOUT_S,
+        )
+        pong = await asyncio.wait_for(
+            asyncio.to_thread(client.ping),
+            timeout=_DB_PROBE_TIMEOUT_S,
+        )
+        latency = _ms(started)
+        if pong:
+            return True, "Platform Redis PONG (sentinel-aware)", latency
+        return False, "Platform Redis PING returned falsy", latency
+    except asyncio.TimeoutError:
+        return False, f"Platform Redis PING timed out after {_DB_PROBE_TIMEOUT_S:.0f}s", None
+    except Exception as e:  # noqa: BLE001
+        return False, f"Platform Redis probe failed: {e}", None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Tier 2 — credentials-present stubs
 # ═══════════════════════════════════════════════════════════════════════════════
