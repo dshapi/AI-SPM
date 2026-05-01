@@ -97,43 +97,51 @@ If you're on arm64 Linux, swap linux-amd64 → linux-arm64 in the mkcert URL.
 
 ## **Step 1 — Install K8S (Kind) cluster**
 
-```bash
-git clone https://github.com/dshapi/AI-SPM.git #clone the repo
-cd AI-SPM
+clone the repo.
 
-./deploy/scripts/kind-cluster.sh init   # initial 3 node K8S cluster setup
+## Bring-up (clean cluster)
+
+Run from `/Users/danyshapiro/PycharmProjects/AISPM`. Each step is idempotent.
+
+```bash
 export KUBECONFIG=$HOME/.kube/kind-aispm.yaml
-kubectl get nodes -o wide
 
-./deploy/scripts/kind-storage.sh up     #storage
+./deploy/scripts/kind-cluster.sh init           # cluster + registry + metrics-server
+./deploy/scripts/kind-storage.sh up             # MinIO + flink bucket
+./deploy/scripts/kind-databases-ha.sh up        # CNPG + Bitnami Redis Sentinel
 
-./deploy/scripts/kind-databases-ha.sh up #This installs CloudNativePG + 3-instance Postgres 
-                                         # cluster with streaming replication, plus 
-                                         # Bitnami Redis (1 master + 3 replicas + 3 sentinels
+# Push AISPM service images to the local registry the kind nodes pull from:
+docker compose build
+docker images --format '{{.Repository}}' | grep '^aispm-' | sort -u | while read img; do
+  docker tag "${img}:latest" "localhost:5001/${img}:latest"
+  docker push "localhost:5001/${img}:latest"
+done
 
-
-```
-
-## **Step 2 — Run the bootstrap script**
-
-```bash
+# Alias for chart templates that hardcode `local-path`:
+cat <<'EOF' | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+EOF
 
 SKIP_FALCO=1 SKIP_KYVERNO=1 \
   VALUES_EXTRA=deploy/helm/aispm/values.dev-multinode.yaml \
   ./deploy/scripts/bootstrap-cluster.sh
-
 ```
 
-The script will guide you through entering your API keys and then bring the full platform up automatically.
-
-## **Step 3 — Open the platform**
+End-to-end on a fresh machine: about 20 minutes. Subsequent runs that
+only re-deploy the AISPM chart take about 5 minutes.
 
 Once the bootstrap completes, navigate to:
 
-| What | URL                        |
-|---|----------------------------|
-| **Chat UI** | http://aispm.local      |
-| **Admin Portal** | http://aispm.local/admin/  |
+| What | URL                              |
+|---|----------------------------------|
+| **Chat UI** | https://aispm.local:30443        |
+| **Admin Portal** | https://aispm.local:30443/admin/ |
 
 Click **Sign In** on either page — a demo JWT is minted automatically, no account needed.
 
