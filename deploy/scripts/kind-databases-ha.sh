@@ -197,15 +197,51 @@ _install_redis_ha() {
 
   _log "  ✓ Redis HA Ready (1 master + 3 replicas + 3 sentinels)"
 
-  # ── redis-sentinel-proxy (transparent master discovery) ──────────────
+  # ── HAProxy → current Redis master (transparent failover) ───────────
   # Bitnami's `redis` Service in sentinel mode round-robins to all pods
-  # — writes hit replicas and fail with "ReadOnly". Without this proxy,
-  # apps would need a Sentinel-aware Redis client (redis.sentinel.Sentinel
-  # in redis-py). The proxy keeps a Sentinel-discovered master endpoint
-  # and forwards 6379 → current master, so plain redis://redis-master:6379
-  # URLs work transparently and survive failover.
-  _log "deploying redis-sentinel-proxy for transparent master routing"
+  # — writes hit replicas and fail with "ReadOnly". Without app-side
+  # Sentinel-aware client code (redis.sentinel.Sentinel in redis-py),
+  # we need a proxy that knows where the master is. We tried two
+  # third-party redis-sentinel-proxy images and both have been pulled
+  # from Docker Hub. HAProxy is the rock-solid alternative: it sends
+  # `INFO replication` to each Redis pod and only forwards traffic to
+  # the one whose response contains `role:master`. Failover takes
+  # ~1 second after sentinels promote a new master.
+  _log "deploying HAProxy redis-master proxy (probes role:master, transparent failover)"
   cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-haproxy-cfg
+  namespace: ${REDIS_NAMESPACE}
+data:
+  haproxy.cfg: |
+    global
+      daemon
+      maxconn 4096
+    defaults
+      mode tcp
+      timeout connect 5s
+      timeout client 5m
+      timeout server 5m
+    frontend stats
+      mode http
+      bind *:8404
+      stats enable
+      stats uri /stats
+    listen redis-master
+      bind 0.0.0.0:6379
+      option tcp-check
+      tcp-check send PING\r\n
+      tcp-check expect string +PONG
+      tcp-check send info\ replication\r\n
+      tcp-check expect string role:master
+      tcp-check send QUIT\r\n
+      tcp-check expect string +OK
+      server r0 redis-node-0.redis-headless.${REDIS_NAMESPACE}.svc.cluster.local:6379 check inter 1s
+      server r1 redis-node-1.redis-headless.${REDIS_NAMESPACE}.svc.cluster.local:6379 check inter 1s
+      server r2 redis-node-2.redis-headless.${REDIS_NAMESPACE}.svc.cluster.local:6379 check inter 1s
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -227,20 +263,20 @@ spec:
                 labelSelector: { matchLabels: { app: redis-master-proxy } }
                 topologyKey: kubernetes.io/hostname
       containers:
-        - name: proxy
-          image: spotahome/redis-sentinel-proxy:0.0.4
-          args:
-            - -master
-            - mymaster
-            - -sentinel
-            - redis.${REDIS_NAMESPACE}.svc.cluster.local:26379
-            - -listen
-            - :6379
+        - name: haproxy
+          image: haproxy:2.9-alpine
           ports:
             - { containerPort: 6379, name: redis }
+            - { containerPort: 8404, name: stats }
+          volumeMounts:
+            - { name: cfg, mountPath: /usr/local/etc/haproxy }
           resources:
-            requests: { cpu: "20m", memory: "16Mi" }
-            limits:   { cpu: "100m", memory: "64Mi" }
+            requests: { cpu: "20m", memory: "32Mi" }
+            limits:   { cpu: "200m", memory: "128Mi" }
+      volumes:
+        - name: cfg
+          configMap:
+            name: redis-haproxy-cfg
 ---
 apiVersion: v1
 kind: Service
