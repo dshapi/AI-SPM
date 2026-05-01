@@ -26,8 +26,12 @@ metadata:
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # 600s — Garak full kill chain runs through here over a WebSocket
+    # and routinely exceeds nginx's 60s default. Anything < ~10 min
+    # cuts off long simulations with "Simulation timeout — no terminal
+    # event received from the backend".
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     nginx.ingress.kubernetes.io/use-regex: "true"
     {{- end }}
@@ -61,8 +65,12 @@ metadata:
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # 600s — Garak full kill chain runs through here over a WebSocket
+    # and routinely exceeds nginx's 60s default. Anything < ~10 min
+    # cuts off long simulations with "Simulation timeout — no terminal
+    # event received from the backend".
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     nginx.ingress.kubernetes.io/use-regex: "true"
     # /api/spm/foo → spm-api:8092/foo
@@ -106,8 +114,12 @@ metadata:
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
     {{- if eq .Values.ingress.className "nginx" }}
-    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
-    nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # 600s — Garak full kill chain runs through here over a WebSocket
+    # and routinely exceeds nginx's 60s default. Anything < ~10 min
+    # cuts off long simulations with "Simulation timeout — no terminal
+    # event received from the backend".
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
     {{- end }}
 spec:

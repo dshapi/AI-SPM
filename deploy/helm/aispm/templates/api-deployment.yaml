@@ -34,14 +34,25 @@ spec:
             - name: jwt-keys
               mountPath: /keys
               readOnly: true
+          # Probe tuning: api gets briefly slow under Garak / chat load
+          # (waiting on guard-model / spm-llm-proxy / Postgres). The
+          # default 1s timeout + 3-failure threshold killed the pod
+          # mid-simulation, breaking the WebSocket that streams
+          # terminal events back to the UI ("Simulation timeout — no
+          # terminal event received"). 5s timeout + 6 failures gives
+          # ~120s tolerance under load before the pod is restarted.
           readinessProbe:
             httpGet: { path: /health, port: 8080 }
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
           livenessProbe:
             httpGet: { path: /health, port: 8080 }
             initialDelaySeconds: 30
-            periodSeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
       volumes:
         - name: jwt-keys
           secret:
