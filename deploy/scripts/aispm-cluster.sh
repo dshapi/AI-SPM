@@ -36,6 +36,16 @@
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
+# macOS cron inherits a minimal PATH (/usr/bin:/bin) that does not
+# include the typical install paths for docker (/usr/local/bin or
+# Apple-Silicon homebrew /opt/homebrew/bin) or kubectl. When this
+# script runs from cron without a PATH set, every `docker` call
+# returns 127 ("command not found") and the inherited error path
+# would misleadingly report "container does not exist". Prefix the
+# common locations explicitly so the script behaves the same whether
+# launched from an interactive shell or cron.
+export PATH="/opt/homebrew/bin:/usr/local/bin:${PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+
 CLUSTER_NAME="${CLUSTER_NAME:-aispm}"
 SNAPSHOT_DIR="${SNAPSHOT_DIR:-${HOME}/.aispm/snapshots}"
 KEEP_SNAPSHOTS="${KEEP_SNAPSHOTS:-50}"
@@ -57,6 +67,15 @@ _all_containers() {
 }
 
 _assert_containers_exist() {
+  # Surface a clear error when docker itself isn't reachable BEFORE
+  # falling through to the per-container inspect loop — otherwise a
+  # missing docker on PATH (common in cron) is misreported as a
+  # missing container, sending operators down the wrong rabbit hole.
+  command -v docker >/dev/null 2>&1 \
+    || _die "docker not found on PATH (PATH=$PATH). If running from cron, set PATH at the top of the crontab or use the absolute path to this script."
+  docker info >/dev/null 2>&1 \
+    || _die "docker daemon is not responding. Is Docker Desktop running?"
+
   local c
   for c in $(_all_containers); do
     docker inspect -f '{{.State.Status}}' "$c" >/dev/null 2>&1 \

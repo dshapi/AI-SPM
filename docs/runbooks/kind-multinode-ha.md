@@ -198,6 +198,17 @@ ls -lt ~/.aispm/snapshots/ | head
 tail ~/.aispm/snapshots.log
 ```
 
+**macOS cron PATH gotcha** — cron inherits a minimal PATH
+(`/usr/bin:/bin`) that does NOT include `/usr/local/bin` or
+`/opt/homebrew/bin` where `docker`/`kubectl` live. The
+`aispm-cluster.sh` script now self-sets PATH at the top, so the
+recommended crontab entry works as-is. If snapshots.log shows
+errors like "Container aispm-control-plane does not exist" despite
+the cluster running, that's the symptom — pull the latest version
+of `aispm-cluster.sh` (which exports PATH explicitly and gives
+clearer "docker not found on PATH" / "docker daemon not responding"
+error messages instead of the misleading container-missing one).
+
 ### What does NOT survive
 
 - `aispm-cluster.sh pause` does not survive Docker Quit or Mac reboot
@@ -779,37 +790,54 @@ Fix: read from env with the correct in-cluster default.
       ``base_url=http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1``,
       no more DNS-failure traces.
 
-### threat-hunting-agent collectors: column "session_id" does not exist
+### threat-hunting-agent collectors: column "session_id" does not exist *(DONE)*
 
-Separate bug found in the same logs as the LLM URL issue.
-Multiple collectors (``runtime_collector``,
+Five collectors (``runtime_collector._check_enforcement_block_clusters``,
+``runtime_collector._check_session_storm``,
 ``prompt_secrets_collector``, ``data_leakage_collector``,
-``tool_misuse_collector``) fail every cycle with:
+``tool_misuse_collector._check_rapid_chaining``) failed every cycle
+with ``column "session_id" does not exist`` on the ``audit_export``
+table.
 
+Root cause: the cluster was bootstrapped from
+``spm/db/migrations/001_initial.sql`` which predates ``session_id``
+and creates ``audit_export`` without it. The Alembic migration
+``002_add_session_id_to_audit_export.py`` exists and would add
+the column + index, but **was never executed** on this cluster
+because the bootstrap path used raw SQL instead of Alembic. The
+SQLAlchemy model in ``spm/db/models.py`` already declares the
+column (line 163), and the ``spm_aggregator`` writer already passes
+``session_id`` in its INSERT (with a graceful fallback that strips
+the column on legacy schemas). Schema-vs-model drift, nothing more.
+
+Fix: ran the migration's logic as direct SQL on the live cluster:
+
+```sql
+DO $$
+BEGIN
+    ALTER TABLE audit_export ADD COLUMN session_id VARCHAR(64);
+EXCEPTION
+    WHEN duplicate_column THEN NULL;
+END
+$$;
+CREATE INDEX IF NOT EXISTS idx_audit_export_session_id
+    ON audit_export (session_id);
 ```
-column "session_id" does not exist
-LINE 2: ... SELECT session_id, ...
-```
 
-Their queries reference a ``session_id`` column on tables that
-either renamed it or never had it. The agent is otherwise running
-fine (LLM connects, scan_runner cycles complete) but its findings
-output is empty because every collector errors out before
-producing rows.
+Existing rows have ``session_id=NULL`` (fine — collectors that
+``GROUP BY session_id`` just return zero rows from those rows; no
+backfill needed). New rows from spm-aggregator populate it.
 
-Action items:
-
-- [ ] Identify which table(s) the failing collectors query (likely
-      ``session_events`` or ``audit_events`` in spm-db). Find the
-      actual schema with ``\d <table>`` from psql.
-- [ ] Compare to the SELECT clauses in the collector code; the
-      column was probably renamed (``session_id`` → ``session``
-      or moved into a JSONB ``metadata`` column).
-- [ ] Update the collectors' queries to match the live schema, or
-      add a migration that restores the missing column if it was
-      genuinely lost.
-- [ ] Add a smoke test: each collector should return at least one
-      row when fed a known-good event, otherwise fail the test.
+- [x] Column + index added to live cluster.
+- [x] Verified collectors no longer emit
+      ``column "session_id" does not exist`` warnings.
+- [ ] Reconcile the bootstrap path: either make
+      ``001_initial.sql`` include session_id, or always run Alembic
+      after the raw SQL on fresh installs. Current state means
+      every fresh install hits this same bug. Add an action item
+      under "Helm probe-timeout audit" to also audit
+      ``001_initial.sql`` vs the Alembic chain for missing
+      migrations.
 
 ### Flink HA leader election broken after etcd restore *(DONE)*
 
