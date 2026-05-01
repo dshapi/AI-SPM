@@ -60,7 +60,15 @@ redis:
 platformEnv:
   SPM_DB_URL:       "postgresql://spm_rw:spmpass@spm-db-rw.aispm.svc.cluster.local:5432/spm"
   SPM_DB_URL_ASYNC: "postgresql+asyncpg://spm_rw:spmpass@spm-db-rw.aispm.svc.cluster.local:5432/spm"
-  REDIS_URL:        "redis://redis.aispm.svc.cluster.local:6379"
+  # redis-master is an HAProxy-based proxy (deployed by kind-databases-ha.sh)
+  # that probes each Redis pod with `INFO replication` and only forwards
+  # traffic to the one with `role:master`. Apps use plain redis URLs and
+  # survive automatic failover.
+  REDIS_URL:        "redis://redis-master.aispm.svc.cluster.local:6379"
+  # Some services use REDIS_HOST + REDIS_PORT instead of REDIS_URL.
+  # Point those at the master proxy too.
+  REDIS_HOST:       "redis-master.aispm.svc.cluster.local"
+  REDIS_PORT:       "6379"
   # Sentinel discovery endpoint — services that prefer Sentinel-native
   # client libraries (redis-py with Sentinel mode, etc.) should use this
   # to find the current master automatically. Apps that just speak plain

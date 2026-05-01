@@ -196,6 +196,65 @@ _install_redis_ha() {
     --wait --timeout=10m
 
   _log "  ✓ Redis HA Ready (1 master + 3 replicas + 3 sentinels)"
+
+  # ── redis-sentinel-proxy (transparent master discovery) ──────────────
+  # Bitnami's `redis` Service in sentinel mode round-robins to all pods
+  # — writes hit replicas and fail with "ReadOnly". Without this proxy,
+  # apps would need a Sentinel-aware Redis client (redis.sentinel.Sentinel
+  # in redis-py). The proxy keeps a Sentinel-discovered master endpoint
+  # and forwards 6379 → current master, so plain redis://redis-master:6379
+  # URLs work transparently and survive failover.
+  _log "deploying redis-sentinel-proxy for transparent master routing"
+  cat <<EOF | kubectl apply -f -
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-master-proxy
+  namespace: ${REDIS_NAMESPACE}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: { app: redis-master-proxy }
+  template:
+    metadata:
+      labels: { app: redis-master-proxy }
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector: { matchLabels: { app: redis-master-proxy } }
+                topologyKey: kubernetes.io/hostname
+      containers:
+        - name: proxy
+          image: spotahome/redis-sentinel-proxy:0.0.4
+          args:
+            - -master
+            - mymaster
+            - -sentinel
+            - redis.${REDIS_NAMESPACE}.svc.cluster.local:26379
+            - -listen
+            - :6379
+          ports:
+            - { containerPort: 6379, name: redis }
+          resources:
+            requests: { cpu: "20m", memory: "16Mi" }
+            limits:   { cpu: "100m", memory: "64Mi" }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: ${REDIS_NAMESPACE}
+spec:
+  selector: { app: redis-master-proxy }
+  ports:
+    - { name: redis, port: 6379, targetPort: 6379 }
+EOF
+
+  _log "  waiting for redis-master-proxy..."
+  kubectl -n "$REDIS_NAMESPACE" rollout status deploy/redis-master-proxy --timeout=120s
 }
 
 # ── Subcommands ─────────────────────────────────────────────────────────
