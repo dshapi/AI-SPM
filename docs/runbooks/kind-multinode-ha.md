@@ -809,6 +809,40 @@ and have been removed.
 - [x] Deleted ``redis-haproxy-cfg`` ConfigMap, ``redis-master-proxy``
       Deployment, and ``redis-master`` Service from the cluster.
 
+### Policy editor: accept Rego, not Python
+
+The admin-UI policy editor currently lets users author policies in
+Python (or a Python-flavored DSL). That's a layer of indirection on
+top of what OPA actually evaluates — all enforcement runs against
+``.rego`` files in ``opa/policies/``. Users edit Python, something
+translates / executes it, OPA never sees the user's intent in its
+native form. Means: drift between editor preview and live behavior,
+rules that don't compose with our other ``allow``/``has_signal``
+helpers, and a worse experience for anyone who knows Rego.
+
+Direction: switch the editor to a Rego authoring surface (Monaco with
+``rego`` syntax mode, in-browser ``opa eval`` for live preview,
+server-side validation by uploading to OPA before save). The editor
+should also show the existing platform rules read-only as references
+(prompt_policy.rego, tool_policy.rego, output_policy.rego) so users
+extend rather than reinvent.
+
+Action items:
+
+- [ ] Audit current editor: where is "Python" rendered? Find the
+      compiler / executor and document the indirection.
+- [ ] Add ``rego`` Monaco language mode to the UI editor.
+- [ ] Server-side: validate rego on save via
+      ``opa parse`` / ``opa eval`` before accepting; reject syntax
+      errors with line/column-pointed messages.
+- [ ] Migration: keep Python authoring read-only for existing
+      user-authored policies (or auto-translate when round-trip is
+      faithful); new policies are Rego-only.
+- [ ] Surface the platform-shipped policies as inline references in
+      the editor so users see the existing helpers
+      (``has_signal``, ``has_scope``, ``has_behavioral``) and the
+      ``allow := { decision, reason, action }`` shape.
+
 ### Connector card description drift *(DONE)*
 
 The Redis integration card's text was old DB-seeded copy from before
