@@ -31,9 +31,11 @@ chunks, or in MinIO via Flink's s3-fs-hadoop plugin.
 | `~/.kube/kind-aispm.yaml`                       | kubeconfig for the cluster                    |
 | `/tmp/kind-vols/control-plane-{1,2,3}`          | Per-node host extraMounts (PVC backing dir)   |
 | `deploy/scripts/kind-cluster.sh`                | Cluster lifecycle (init / up / down / status / destroy) |
+| `deploy/scripts/aispm-cluster.sh`               | Day-to-day lifecycle (pause / resume / snapshot / restore) |
 | `deploy/scripts/kind-storage.sh`                | MinIO install + flink bucket                  |
 | `deploy/scripts/kind-databases-ha.sh`           | CNPG operator + Postgres Cluster + Bitnami Redis |
 | `deploy/helm/aispm/values.dev-multinode.yaml`   | Chart overrides for this cluster              |
+| `~/.aispm/snapshots/etcd-*.db`                  | etcd snapshots (cron, every 10 min)           |
 
 ## Bring-up (clean cluster)
 
@@ -88,6 +90,10 @@ and `/tmp/kind-vols`. The Docker images you built (`aispm-*`) are kept.
 kubectl get nodes
 kubectl top nodes
 
+# Everything across all namespaces (shows aispm + istio + kube-system together)
+kubectl get pods -A
+kubectl get pods -A | grep -vE 'Running|Completed'
+
 # AISPM workloads
 kubectl -n aispm get pods
 kubectl -n aispm get pods | grep -vE 'Running|Completed'
@@ -112,6 +118,97 @@ docker tag aispm-api:latest localhost:5001/aispm-api:latest
 docker push localhost:5001/aispm-api:latest
 kubectl -n aispm rollout restart deployment/api
 ```
+
+## Persistence across Docker restarts
+
+This cluster is durable across normal day-to-day workflow, but Docker
+Desktop's full Quit/Restart cycle is hostile to a 3-node etcd because
+container IPs reshuffle and peer TLS certs (whose SANs include the
+old IPs) stop validating. The lifecycle helper script
+`deploy/scripts/aispm-cluster.sh` plus a snapshot cron protects against
+this.
+
+### End of day (Docker stays running)
+
+Pause everything and resume next morning. State, leader leases, peer
+TLS connections — all preserved verbatim. Survives Mac sleep/wake.
+
+```bash
+./deploy/scripts/aispm-cluster.sh pause
+# ... walk away ...
+./deploy/scripts/aispm-cluster.sh resume
+kubectl get nodes      # should respond immediately
+```
+
+### Quitting Docker / rebooting Mac
+
+Take a fresh snapshot first so post-reboot recovery uses the most
+recent state, then quit Docker normally. On return, restore.
+
+```bash
+./deploy/scripts/aispm-cluster.sh snapshot
+# ... quit Docker, reboot, whatever ...
+./deploy/scripts/aispm-cluster.sh restore $(ls -1t ~/.aispm/snapshots/etcd-*.db | head -1)
+```
+
+The restore takes ~2 minutes:
+
+- discovers each control-plane node's current IP
+- moves all 3 etcd manifests aside (kubelet stops the pods)
+- wipes `/var/lib/etcd` on each node
+- restores the snapshot to fresh data dirs with current IPs in
+  `--initial-cluster` and `--initial-advertise-peer-urls`
+- regenerates etcd peer + server certs against the current node IPs
+  via `kubeadm init phase certs etcd-{server,peer}`
+- patches each etcd.yaml with the current IPs and puts it back
+- waits for kube-apiserver to recover behind the LB
+
+After restore, you almost always need a follow-up:
+
+```bash
+# kube-proxy iptables and CNI may have stale routes
+kubectl -n kube-system rollout restart daemonset kube-proxy kindnet
+
+# istiod CA service path may need a refresh too
+kubectl -n istio-system rollout restart deploy istiod
+kubectl -n istio-system rollout status deploy istiod --timeout=2m
+
+# Then bounce app pods so sidecars re-warm certs from refreshed istiod
+kubectl -n aispm rollout restart deploy
+kubectl -n aispm rollout restart statefulset
+```
+
+### Cron snapshot safety net
+
+The cron entry installed in `crontab -e` snapshots etcd every 10 min
+to `~/.aispm/snapshots/`. This catches unexpected shutdowns (crash,
+power loss, forgotten manual snapshot). The script keeps the most
+recent 50 snapshots and rotates older ones.
+
+```bash
+*/10 * * * * /Users/danyshapiro/PycharmProjects/AISPM/deploy/scripts/aispm-cluster.sh snapshot >> ~/.aispm/snapshots.log 2>&1
+```
+
+macOS requires `cron` (`/usr/sbin/cron`) to be in **System Settings →
+Privacy & Security → Full Disk Access** for the schedule to actually
+fire. Verify after the next 10-min mark:
+
+```bash
+ls -lt ~/.aispm/snapshots/ | head
+tail ~/.aispm/snapshots.log
+```
+
+### What does NOT survive
+
+- `aispm-cluster.sh pause` does not survive Docker Quit or Mac reboot
+  (pause state lives in the running Docker VM). Use snapshot/restore
+  for those cases.
+- Postgres replicas (`spm-db-1/2/3`) recover via WAL streaming after
+  Postgres-0 comes back. Expect ~1–2 min of `1/2 CrashLoopBackOff`
+  while replicas wait for the primary's sidecar to be reachable.
+- istio sidecars (every `0/2` pod) only recover after istiod's
+  ClusterIP path is reachable. The post-restore checklist above takes
+  care of this.
 
 ## Failover tests
 
@@ -220,18 +317,43 @@ replica on a different node.
 
 ### kubectl returns `EOF` or `connection refused`
 
-Docker Desktop restart sometimes stops the kind external load balancer.
+Two distinct failures share this symptom. Diagnose before acting.
+
+**(a) Stale kubeconfig endpoint after Docker restart.** kind picks a
+random host port for the API server LB on each cluster create. After
+Docker Desktop restart, the LB container's host port may differ from
+what your kubeconfig expects. The `networking.apiServerPort: 6443` pin
+in `kind-cluster.sh` prevents this on new clusters; if the cluster
+predates that change, refresh the kubeconfig:
 
 ```bash
-docker ps -a --filter label=io.x-k8s.kind.cluster=aispm
-docker start aispm-external-load-balancer
+kind export kubeconfig --name aispm
+kubectl get nodes
 ```
 
-If etcd peer certs are out of sync after a long Docker Desktop outage
-(symptom: `etcd-aispm-control-plane` CrashLoopBackOff with "bad
-certificate" errors), the fastest path is `./deploy/scripts/kind-cluster.sh
-destroy && init`. State on application-level replicas is reseeded on
-re-bootstrap.
+**(b) etcd peer-TLS rejecting peers — the real Docker-restart killer.**
+Symptom in `docker exec aispm-control-plane crictl logs <etcd>`:
+
+```
+"rejected connection on peer endpoint" ... "remote error: tls: bad certificate"
+```
+
+Root cause: kind nodes get fresh container IPs from Docker's bridge
+network on every cold start. The kubeadm-issued etcd peer certs have
+SANs pinned to the original IPs, AND each node's etcd manifest has
+`--initial-cluster` / `--initial-advertise-peer-urls` pinned to the
+original IPs. When Docker reshuffles, the live IP at every node has
+the wrong cert and the wrong peer-URL config.
+
+The recovery procedure that **does not** require destroy+rebootstrap
+is `aispm-cluster.sh restore` — see "Persistence across Docker restarts"
+above. It rebuilds etcd from the latest snapshot with current IPs and
+regenerates the peer certs against those IPs. Total time ~2 min.
+
+The old guidance ("destroy && init") still works as a last resort if
+no snapshots exist or the restore script fails for unrelated reasons,
+but you'll lose application state in K8s objects (PVs survive — they
+are host-mounted).
 
 ### Image pull errors after `kind-cluster.sh destroy`
 
@@ -286,6 +408,44 @@ it's been re-applied:
 ```bash
 kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-
 ```
+
+### Sidecars in CrashLoopBackOff after a restore (every aispm pod is `0/2`)
+
+After an etcd restore, kube-proxy's iptables and the CNI's routes can
+hold stale entries that point ClusterIPs at no longer-correct pod IPs.
+istio sidecars then can't reach `istiod.istio-system:15012` and fail
+to obtain workload certs (logs: `i/o timeout` on the istiod ClusterIP).
+Without sidecars, every meshed app pod stays `0/2`.
+
+```bash
+kubectl -n kube-system rollout restart daemonset kube-proxy kindnet
+kubectl -n kube-system rollout status daemonset kube-proxy --timeout=2m
+kubectl -n istio-system get endpoints istiod    # should list istiod pod IP
+kubectl -n istio-system rollout restart deploy istiod
+kubectl -n istio-system rollout status deploy istiod --timeout=2m
+kubectl -n aispm rollout restart deploy
+kubectl -n aispm rollout restart statefulset
+```
+
+After this, pods first transition `0/2` → `1/2` (sidecar healthy, app
+still failing for its own reasons), then `2/2` as Postgres replicas
+finish WAL streaming and downstream services can connect.
+
+### Static pod won't restart after manifest edit
+
+Symptom: you moved an `/etc/kubernetes/manifests/*.yaml` aside, then
+back, but no new pod container is created. Kubelet's pod cache fell
+out of sync with the manifest hash. Restart kubelet inside each kind
+node:
+
+```bash
+for n in aispm-control-plane aispm-control-plane2 aispm-control-plane3; do
+  docker exec "$n" systemctl restart kubelet
+done
+```
+
+Within ~20 s kubelet re-reads `/etc/kubernetes/manifests/` and creates
+fresh static pods.
 
 ### Lens shows no metrics
 

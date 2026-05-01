@@ -57,11 +57,23 @@ spec:
               command: ["pg_isready", "-U", "{{ .Values.spmDb.user }}", "-d", "{{ .Values.spmDb.database }}"]
             initialDelaySeconds: 15
             periodSeconds: 10
+            # k8s default timeoutSeconds is 1, which is too tight for
+            # pg_isready on kind/Docker Desktop — under modest load it
+            # routinely takes 2-3s to exec, connect to the postgres
+            # socket, send the startup message, and parse the response.
+            # Liveness then false-fails, kubelet kills postgres, all
+            # connections drop, every dependent service 500s until the
+            # pod recovers ~30s later. Same pattern that was already
+            # fixed on kafka — see kafka-statefulset.yaml.
+            timeoutSeconds: 5
+            failureThreshold: 3
           readinessProbe:
             exec:
               command: ["pg_isready", "-U", "{{ .Values.spmDb.user }}", "-d", "{{ .Values.spmDb.database }}"]
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 3
       volumes:
         - name: init-sql
           configMap:

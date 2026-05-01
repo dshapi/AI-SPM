@@ -114,6 +114,16 @@ spec:
               value: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
             - name: KAFKA_NUM_PARTITIONS
               value: "3"
+            # Default RF for AUTO-created topics. Without this, Kafka uses
+            # the upstream default of 1, which silently produces topics
+            # that violate KAFKA_MIN_INSYNC_REPLICAS=2 on a 3-broker
+            # cluster (every produce then fails NotEnoughReplicasException).
+            # Auto-create stays enabled — the platform has implicit
+            # producers — but defaults are now correct.
+            - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+              value: {{ .Values.kafka.replicas | quote }}
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
             - name: CLUSTER_ID
               value: {{ .Values.kafka.clusterId | quote }}
           readinessProbe:

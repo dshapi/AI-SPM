@@ -41,13 +41,22 @@ _WS_WAIT_TIMEOUT_S: float = float(os.environ.get("WS_WAIT_TIMEOUT_S", "10.0"))
 # (dead PSS, stuck probe, etc.) we force-emit `simulation.error` so the
 # frontend never waits forever on its own watchdog alone.
 #
-# Sizing note: a typical Garak run fires 3–4 probes sequentially, each of
-# which has its own 60s per-probe ceiling in the runner (garak_runner.py and
-# services/garak/main.py).  The previous 45s default tripped almost every
-# multi-probe run with "Garak simulation cancelled (hard timeout)" before the
-# second probe finished.  120s leaves headroom for 2 full probes plus slack;
-# operators who want shorter feedback loops can still override via env.
-_SIM_HARD_TIMEOUT_S: float = float(os.environ.get("SIM_HARD_TIMEOUT_S", "120.0"))
+# Sizing model: the budget is derived from the per-probe budget that the
+# garak runner already enforces (PROBE_TIMEOUT_S, default 300s) times the
+# number of probes a typical run can request, plus a small fixed overhead
+# for setup/teardown and event publication. Both PROBE_TIMEOUT_S and
+# SIM_MAX_PROBES are env-overridable so operators can dial the budget
+# tighter for short feedback loops or wider for long-running campaigns.
+#
+# Defaults: 300s × 6 probes + 60s = 1860s (≈ 31 min). Plenty for a Full
+# Kill Chain run while still cancelling truly stuck simulations.
+_PROBE_TIMEOUT_S:     float = float(os.environ.get("PROBE_TIMEOUT_S",   "300.0"))
+_SIM_MAX_PROBES:      int   = int(os.environ.get("SIM_MAX_PROBES",      "6"))
+_SIM_HARD_OVERHEAD_S: float = float(os.environ.get("SIM_HARD_OVERHEAD_S", "60.0"))
+_SIM_HARD_TIMEOUT_S:  float = float(os.environ.get(
+    "SIM_HARD_TIMEOUT_S",
+    str(_PROBE_TIMEOUT_S * _SIM_MAX_PROBES + _SIM_HARD_OVERHEAD_S),
+))
 
 from platform_shared.policy_explainer import PolicyExplainer as _PolicyExplainer
 _explainer = _PolicyExplainer()
@@ -209,8 +218,10 @@ async def _run_single_prompt(session_id: str, prompt: str, attack_type: str,
         a local `terminal_sent` flag.
       * The whole coroutine is wrapped by `_run_with_hard_timeout` which
         cancels and emits `simulation.error` if runtime exceeds
-        `SIM_HARD_TIMEOUT_S` (default 45s).  This prevents zombie background
-        tasks from holding open a session forever.
+        `SIM_HARD_TIMEOUT_S`.  This prevents zombie background tasks from
+        holding open a session forever.  The default is derived from
+        PROBE_TIMEOUT_S × SIM_MAX_PROBES + SIM_HARD_OVERHEAD_S — see the
+        config block at the top of this file.
     """
     t0 = datetime.datetime.utcnow()
     terminal_sent = False   # set to True once completed/error is emitted

@@ -73,6 +73,13 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: ${CLUSTER_NAME}
 
+# Pin the API-server LB port so the kubeconfig endpoint survives
+# Docker Desktop restarts (otherwise kind picks a random host port
+# each time and 'kubectl' breaks until 'kind export kubeconfig').
+networking:
+  apiServerAddress: 127.0.0.1
+  apiServerPort: 6443
+
 # Wire the local registry into containerd on every node so pulls of
 # localhost:${REGISTRY_PORT}/* succeed without authentication.
 containerdConfigPatches:

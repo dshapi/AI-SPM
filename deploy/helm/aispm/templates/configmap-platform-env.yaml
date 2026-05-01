@@ -21,6 +21,9 @@ data:
   # Replication factor for user-created topics — bounded by broker count.
   # 1 broker → RF=1; 3 brokers → RF=3.
   KAFKA_REPLICATION_FACTOR: {{ .Values.kafka.replicas | quote }}
+  # NOTE: KAFKA_NUM_PARTITIONS already defined via .Values.platformEnv —
+  # added there because spm-api needs it for create_agent_topics().
+  # Don't redefine here or the configmap gets duplicate keys.
   # min.insync.replicas — values-driven so prod can keep ISR=2 with RF=3
   # while dev stays at 1.
   KAFKA_MIN_INSYNC_REPLICAS: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}

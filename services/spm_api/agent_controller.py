@@ -72,12 +72,24 @@ def _kafka_admin():
 
 
 async def create_agent_topics(*, tenant_id: str, agent_id: str,
-                               partitions: int = 1,
-                               replication: int = 1) -> None:
-    """Create per-agent ``chat.in`` + ``chat.out`` topics. Idempotent."""
+                               partitions: int | None = None,
+                               replication: int | None = None) -> None:
+    """Create per-agent ``chat.in`` + ``chat.out`` topics. Idempotent.
+
+    Partition and replication factor default to the cluster-wide settings
+    (``KAFKA_NUM_PARTITIONS`` / ``KAFKA_REPLICATION_FACTOR`` env), matching
+    what startup-orchestrator uses for tenant topics. Hardcoding RF=1 here
+    silently downgrades durability for every agent topic and trips
+    ``min.insync.replicas`` enforcement on a 3-broker cluster.
+    """
     from kafka.admin import NewTopic                           # type: ignore
     from kafka.errors import TopicAlreadyExistsError           # type: ignore
     from platform_shared.topics import agent_topics_for        # type: ignore
+
+    if partitions is None:
+        partitions = int(os.environ.get("KAFKA_NUM_PARTITIONS", "3"))
+    if replication is None:
+        replication = int(os.environ.get("KAFKA_REPLICATION_FACTOR", "3"))
 
     t = agent_topics_for(tenant_id, agent_id)
     new_topics = [NewTopic(name=name, num_partitions=partitions,
@@ -87,6 +99,8 @@ async def create_agent_topics(*, tenant_id: str, agent_id: str,
     try:
         try:
             admin.create_topics(new_topics=new_topics, validate_only=False)
+            log.info("create_agent_topics: created %s/%s (partitions=%d, rf=%d)",
+                     tenant_id, agent_id, partitions, replication)
         except TopicAlreadyExistsError:
             log.info("create_agent_topics: already exist for %s/%s",
                      tenant_id, agent_id)

@@ -265,6 +265,39 @@ import threading as _threading
 import requests as _requests
 
 
+# Tool definitions sent to /internal/probe for tool-use family probes,
+# mirroring the production /chat tools list (services/api/app.py:_TOOLS).
+# Keeping these in sync ensures Garak exercises the SAME tool surface the
+# real product exposes.
+_TEST_TOOLS: list[dict] = [
+    {
+        "name": "web_search",
+        "description": "Search the web for current information.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "web_fetch",
+        "description": "Fetch and read the content of a specific URL.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"url": {"type": "string"}},
+            "required": ["url"],
+        },
+    },
+]
+
+# Probe families whose detectors expect actual tool-call generation by the
+# model. Sending tools=... to /internal/probe lets these probes exercise
+# the production tool-execution path (with OPA policy enforcement). Other
+# probes (promptinject, encoding, multiturn) work on text-only responses
+# and stay on the cheaper no-tools path.
+_TOOL_PROBE_PREFIXES: tuple[str, ...] = ("tooluse", "dataexfil")
+
+
 class CPMPipelineGenerator:
     """Garak generator that calls the CPM API pipeline."""
 
@@ -288,11 +321,29 @@ class CPMPipelineGenerator:
     extended_detectors: list    = []
     supports_multiple_generations = False
 
-    def __init__(self, api_url: str, internal_secret: str) -> None:
+    def __init__(self, api_url: str, internal_secret: str,
+                 probe_alias: str | None = None) -> None:
         self.api_url         = api_url.rstrip("/")
         self.internal_secret = internal_secret
         self._meta: dict[str, dict] = {}
         self._lock = _threading.Lock()
+        # HTTP request timeout for /internal/probe. Defaults to PROBE_TIMEOUT_S
+        # (the per-attempt budget the runner already enforces) so a single call
+        # may legitimately take as long as the budget allows. Independent
+        # override via PROBE_HTTP_TIMEOUT_S for environments where the LLM is
+        # slower than the probe budget. Mirrors SIM_HARD_TIMEOUT_S in
+        # services/api/routes/simulation.py — same source of truth.
+        self._http_timeout = float(os.environ.get(
+            "PROBE_HTTP_TIMEOUT_S",
+            os.environ.get("PROBE_TIMEOUT_S", "300"),
+        ))
+        # Tool-use probes need the production tool-execution path
+        # exercised; others stay on the simple text-only path.
+        alias_lower = (probe_alias or "").lower()
+        self._send_tools = any(alias_lower.startswith(p) for p in _TOOL_PROBE_PREFIXES)
+        if self._send_tools:
+            log.info("CPMPipelineGenerator: probe %r → sending tools to /internal/probe",
+                     probe_alias)
 
     # ── Pickle support for garak's multiprocessing.Pool dispatch ─────────────
     # threading.Lock cannot be pickled, so we must exclude it from __getstate__.
@@ -358,15 +409,18 @@ class CPMPipelineGenerator:
     def generate(self, prompt: Any, generations_this_call: int = 1) -> list[str]:
         """Send prompt to CPM pipeline and return list of responses."""
         prompt_str = self._to_str(prompt)
+        body: dict = {"prompt": prompt_str}
+        if self._send_tools:
+            body["tools"] = _TEST_TOOLS
         try:
             resp = _requests.post(
                 f"{self.api_url}/internal/probe",
-                json={"prompt": prompt_str},
+                json=body,
                 headers={
                     "X-Internal-Token": self.internal_secret,
                     "Content-Type": "application/json",
                 },
-                timeout=45,
+                timeout=self._http_timeout,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -377,6 +431,8 @@ class CPMPipelineGenerator:
                     "guard_verdict": data.get("guard_verdict", "allow"),
                     "guard_score":   float(data.get("guard_score", 0.0)),
                     "guard_reason":  data.get("guard_reason", ""),
+                    "tools_invoked": data.get("tools_invoked", []),
+                    "tools_blocked": data.get("tools_blocked", []),
                 }
             return [response]
         except Exception as exc:
@@ -420,17 +476,27 @@ class CPMPipelineGenerator:
             return dict(self._meta.get(str(hash(prompt_str)), {}))
 
 
-def _make_generator() -> Any:
+def _make_generator(probe_alias: str | None = None) -> Any:
     """
     Return the best available generator:
       1. CPMPipelineGenerator — if CPM_API_URL + GARAK_INTERNAL_SECRET are set
       2. garak.generators.test.Blank — synthetic fallback (empty responses)
+
+    ``probe_alias`` is the friendly probe name from _PROBE_ALIASES (e.g.
+    "tooluse", "promptinject"). The generator uses it to decide whether
+    to send tool definitions to /internal/probe — required for tool-use
+    family probes to actually exercise the production tool path.
     """
     api_url  = os.environ.get("CPM_API_URL", "").strip()
     secret   = (get_credential_by_env("GARAK_INTERNAL_SECRET", default="") or "").strip()
     if api_url and secret:
-        log.info("Using CPMPipelineGenerator → %s/internal/probe", api_url)
-        return CPMPipelineGenerator(api_url=api_url, internal_secret=secret)
+        log.info("Using CPMPipelineGenerator → %s/internal/probe (probe=%s)",
+                 api_url, probe_alias)
+        return CPMPipelineGenerator(
+            api_url=api_url,
+            internal_secret=secret,
+            probe_alias=probe_alias,
+        )
 
     log.warning(
         "CPM_API_URL or GARAK_INTERNAL_SECRET not set — "

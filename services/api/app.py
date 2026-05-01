@@ -232,6 +232,85 @@ async def _run_web_fetch(url: str) -> str:
         log.warning("web_fetch failed for %s: %s", url, e)
         return f"Could not fetch {url}: {e}"
 
+
+# ── Tool execution with policy enforcement ─────────────────────────────────
+#
+# Single chokepoint for executing tools that Claude requests via
+# stop_reason=="tool_use". Every tool call MUST go through here:
+#   1. /chat (non-streaming)
+#   2. /chat/stream (streaming)
+#   3. /internal/probe (red-team / Garak path)
+#
+# Without this, the production path silently runs every tool the model
+# asks for — that was the cause of Garak `tooluse` probes scoring 90:
+# tool execution had no policy gate and the test path didn't even
+# exercise tool use, so the gap was invisible.
+
+async def _execute_tool_with_policy(
+    *,
+    tool_name: str,
+    tool_input: dict,
+    auth_context: dict,
+    posture_score: float = 0.0,
+    signals: list[str] | None = None,
+    session_id: str = "",
+    tenant_id: str = "t1",
+) -> tuple[str, str]:
+    """Run a Claude tool call after enforcing the OPA tool policy.
+
+    Returns ``(verdict, result)``:
+      - ``verdict``: "allow" or "block"
+      - ``result``: tool output string when allowed; "[Tool blocked by
+        policy: <reason>]" when blocked. The blocked-string is what we
+        feed back to Claude as the tool_result so the model adapts its
+        next turn instead of spinning.
+
+    Fail-closed: if OPA is unreachable or returns malformed data, we
+    block. Same posture as the model-gate check at the start of /chat.
+    """
+    signals = signals or []
+
+    policy_input = {
+        "tool_name":     tool_name,
+        "tool_args":     tool_input,
+        "auth_context":  auth_context,
+        "signals":       signals,
+        "posture_score": posture_score,
+        "tenant_id":     tenant_id,
+        "session_id":    session_id,
+    }
+
+    verdict = "block"
+    reason  = "tool policy unreachable (failing closed)"
+    try:
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            resp = await client.post(
+                f"{OPA_URL_FOR_GATE}/v1/data/spm/tools/allow",
+                json={"input": policy_input},
+            )
+            if resp.status_code == 200:
+                result = resp.json().get("result", {})
+                if isinstance(result, dict):
+                    verdict = result.get("decision", "block") or "block"
+                    reason  = result.get("reason",   reason)
+    except Exception as e:
+        log.warning("tool policy check failed for %s: %s — failing closed", tool_name, e)
+
+    if verdict != "allow":
+        log.info("tool BLOCKED by policy: name=%s reason=%s", tool_name, reason)
+        return ("block", f"[Tool blocked by policy: {reason}]")
+
+    # Allowed — execute. Unknown tools fall through to a clear error
+    # string (still returned to Claude so it can recover gracefully).
+    if tool_name == "web_search":
+        result_str = await _run_web_search(tool_input.get("query", ""))
+    elif tool_name == "web_fetch":
+        result_str = await _run_web_fetch(tool_input.get("url", ""))
+    else:
+        result_str = f"[Unknown tool: {tool_name}]"
+    return ("allow", result_str)
+
+
 # ── Conversation memory (cross-session, stored in Redis) ─────────────────────
 _MEM_MAX_TURNS   = 20          # keep last 20 turns (10 exchanges)
 _MEM_TTL_SECONDS = 2592000     # 30 days
@@ -760,20 +839,28 @@ async def chat(
                     tool_results = []
                     for block in message.content:
                         if block.type == "tool_use":
-                            tool_name = block.name
+                            tool_name  = block.name
                             tool_input = block.input
+                            # Badges show even when blocked so the user
+                            # sees that a tool was attempted.
                             if tool_name == "web_search":
-                                query = tool_input.get("query", "")
-                                log.info("Tool: web_search(%r)", query)
-                                tool_uses.append(f"🔍 Searched: \"{query}\"")
-                                result = await _run_web_search(query)
+                                tool_uses.append(f"🔍 Searched: \"{tool_input.get('query', '')}\"")
                             elif tool_name == "web_fetch":
-                                url = tool_input.get("url", "")
-                                log.info("Tool: web_fetch(%r)", url)
-                                tool_uses.append(f"🌐 Fetched: {url}")
-                                result = await _run_web_fetch(url)
-                            else:
-                                result = f"Unknown tool: {tool_name}"
+                                tool_uses.append(f"🌐 Fetched: {tool_input.get('url', '')}")
+                            log.info("Tool requested: %s", tool_name)
+                            verdict, result = await _execute_tool_with_policy(
+                                tool_name=tool_name,
+                                tool_input=tool_input,
+                                auth_context={
+                                    "sub":    user_id,
+                                    "scopes": claims.get("scopes", []),
+                                    "roles":  claims.get("roles",  []),
+                                },
+                                tenant_id=tenant_id,
+                                session_id=req.session_id or "",
+                            )
+                            if verdict == "block":
+                                tool_uses.append(f"⛔ Blocked: {tool_name}")
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
@@ -928,6 +1015,12 @@ async def chat(
 
 class InternalProbeRequest(BaseModel):
     prompt: str
+    # Optional Anthropic-format tool definitions. When set, /internal/probe
+    # exercises the same tool-use code path that /chat does, so red-team
+    # probes can actually test the production tool-execution flow (with
+    # OPA policy enforcement). Without this the path was untested and
+    # `tooluse` family probes scored 100% pass — a false negative.
+    tools: list[dict] | None = None
 
 
 class InternalProbeResponse(BaseModel):
@@ -935,6 +1028,11 @@ class InternalProbeResponse(BaseModel):
     guard_verdict: str
     guard_score: float = 0.0
     guard_reason: str = ""
+    # When tools are exercised, list which tool names Claude attempted
+    # and which were blocked by policy. Garak uses this for richer
+    # verdict scoring than just "model output text matched detector".
+    tools_invoked: list[str] = []
+    tools_blocked: list[str] = []
 
 
 @app.post("/internal/probe", response_model=InternalProbeResponse)
@@ -1003,17 +1101,70 @@ async def internal_probe(
             guard_reason=guard_reason,
         )
 
-    # 2. LLM call — use async client so the event loop stays unblocked
-    rt_llm_response = "[No LLM — ANTHROPIC_API_KEY not configured]"
+    # 2. LLM call — use async client so the event loop stays unblocked.
+    #    When req.tools is set we run the same tool-use loop as /chat, so
+    #    the test path matches production. Otherwise we keep the simple
+    #    single-turn behavior to preserve existing probe latency.
+    rt_llm_response  = "[No LLM — ANTHROPIC_API_KEY not configured]"
+    rt_tools_invoked: list[str] = []
+    rt_tools_blocked: list[str] = []
     _aac = _get_async_anthropic()
     if _aac:
         try:
-            _msg = await _aac.messages.create(
-                model=_live_anthropic_model(),
-                max_tokens=512,
-                messages=[{"role": "user", "content": req.prompt}],
-            )
-            rt_llm_response = _msg.content[0].text if _msg.content else ""
+            if req.tools:
+                _messages: list[dict] = [{"role": "user", "content": req.prompt}]
+                rt_llm_response = ""
+                for _round in range(3):
+                    _msg = await _aac.messages.create(
+                        model=_live_anthropic_model(),
+                        max_tokens=512,
+                        tools=req.tools,
+                        messages=_messages,
+                    )
+                    if _msg.stop_reason == "tool_use":
+                        _tool_results = []
+                        for _block in _msg.content:
+                            if _block.type != "tool_use":
+                                continue
+                            rt_tools_invoked.append(_block.name)
+                            _verdict, _result = await _execute_tool_with_policy(
+                                tool_name=_block.name,
+                                tool_input=_block.input,
+                                auth_context={
+                                    "sub":    "garak-redteam",
+                                    "scopes": [],
+                                    "roles":  [],
+                                },
+                                # Use the prompt's guard score as a posture proxy
+                                # so probes carrying injection signals get blocked
+                                # by the policy's high-posture rule.
+                                posture_score=guard_score,
+                                signals=decision.signals.get("guard_categories", []),
+                                tenant_id="t1",
+                                session_id=probe_session_id,
+                            )
+                            if _verdict == "block":
+                                rt_tools_blocked.append(_block.name)
+                            _tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": _block.id,
+                                "content": _result,
+                            })
+                        _messages.append({"role": "assistant", "content": _msg.content})
+                        _messages.append({"role": "user",      "content": _tool_results})
+                    else:
+                        for _b in _msg.content:
+                            if hasattr(_b, "text"):
+                                rt_llm_response = _b.text
+                                break
+                        break
+            else:
+                _msg = await _aac.messages.create(
+                    model=_live_anthropic_model(),
+                    max_tokens=512,
+                    messages=[{"role": "user", "content": req.prompt}],
+                )
+                rt_llm_response = _msg.content[0].text if _msg.content else ""
         except Exception as _le:
             log.warning("internal_probe: LLM call failed: %s", _le)
             rt_llm_response = f"[LLM error: {_le}]"
@@ -1047,6 +1198,8 @@ async def internal_probe(
         guard_verdict=guard_verdict,
         guard_score=guard_score,
         guard_reason=guard_reason,
+        tools_invoked=rt_tools_invoked,
+        tools_blocked=rt_tools_blocked,
     )
 
 
@@ -1322,38 +1475,41 @@ async def chat_stream(
                 if final_msg.stop_reason != "tool_use":
                     break  # no tools — we're done
 
-                # ── Execute requested tools, emit badges ─────────────────────
+                # ── Execute requested tools (with policy gate), emit badges ──
                 tool_results = []
                 for block in final_msg.content:
                     if block.type != "tool_use":
                         continue
                     if block.name == "web_search":
-                        query = block.input.get("query", "")
-                        badge = f"🔍 Searched: \"{query}\""
-                        tool_uses.append(badge)
-                        yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
-                        await _emit_ws("tool.invoked", {
-                            "tool_name": "web_search",
-                            "query":     query,
-                            "status":    "invoked",
-                        })
-                        result = await _run_web_search(query)
+                        badge = f"🔍 Searched: \"{block.input.get('query', '')}\""
                     elif block.name == "web_fetch":
-                        url = block.input.get("url", "")
-                        badge = f"🌐 Fetched: {url}"
-                        tool_uses.append(badge)
-                        yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
-                        await _emit_ws("tool.invoked", {
-                            "tool_name": "web_fetch",
-                            "url":       url,
-                            "status":    "invoked",
-                        })
-                        result = await _run_web_fetch(url)
+                        badge = f"🌐 Fetched: {block.input.get('url', '')}"
                     else:
-                        result = f"Unknown tool: {block.name}"
-                        await _emit_ws("tool.invoked", {
+                        badge = f"⚙️ Tool: {block.name}"
+                    tool_uses.append(badge)
+                    yield f"data: {json.dumps({'type': 'badge', 'text': badge})}\n\n"
+                    await _emit_ws("tool.invoked", {
+                        "tool_name": block.name,
+                        "status":    "invoked",
+                    })
+                    verdict, result = await _execute_tool_with_policy(
+                        tool_name=block.name,
+                        tool_input=block.input,
+                        auth_context={
+                            "sub":    user_id,
+                            "scopes": claims.get("scopes", []),
+                            "roles":  claims.get("roles",  []),
+                        },
+                        tenant_id=tenant_id,
+                        session_id=req.session_id or "",
+                    )
+                    if verdict == "block":
+                        block_badge = f"⛔ Blocked: {block.name}"
+                        tool_uses.append(block_badge)
+                        yield f"data: {json.dumps({'type': 'badge', 'text': block_badge})}\n\n"
+                        await _emit_ws("tool.blocked", {
                             "tool_name": block.name,
-                            "status":    "unknown",
+                            "reason":    result,
                         })
                     tool_results.append({
                         "type": "tool_result",

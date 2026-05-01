@@ -26,6 +26,21 @@ class TenantTopics:
     approval_request: str
     approval_result: str
     simulation_events: str
+    # Session lifecycle topics — emitted by agent-orchestrator-service
+    # (services/agent-orchestrator-service/events/publisher.py). Must stay
+    # in sync with TOPIC_* constants there.
+    sessions_prompt_received: str
+    sessions_risk_calculated: str
+    sessions_policy_decision: str
+    sessions_created:         str
+    sessions_blocked:         str
+    sessions_completed:       str
+    sessions_llm_response:    str
+    sessions_output_scanned:  str
+    # Threat-finding topics — emitted by threat-hunting-agent and
+    # consumed by the findings UI/aggregator.
+    findings_created:         str
+    findings_status_changed:  str
 
     def all_topics(self) -> list[str]:
         return [
@@ -36,6 +51,11 @@ class TenantTopics:
             self.audit_shadow,
             self.approval_request, self.approval_result,
             self.simulation_events,
+            self.sessions_prompt_received, self.sessions_risk_calculated,
+            self.sessions_policy_decision, self.sessions_created,
+            self.sessions_blocked, self.sessions_completed,
+            self.sessions_llm_response, self.sessions_output_scanned,
+            self.findings_created, self.findings_status_changed,
         ]
 
 
@@ -58,6 +78,16 @@ def topics_for_tenant(tenant_id: str) -> TenantTopics:
         approval_request=f"{p}.approval_request",
         approval_result=f"{p}.approval_result",
         simulation_events=f"{p}.simulation.events",
+        sessions_prompt_received=f"{p}.sessions.prompt_received",
+        sessions_risk_calculated=f"{p}.sessions.risk_calculated",
+        sessions_policy_decision=f"{p}.sessions.policy_decision",
+        sessions_created        =f"{p}.sessions.created",
+        sessions_blocked        =f"{p}.sessions.blocked",
+        sessions_completed      =f"{p}.sessions.completed",
+        sessions_llm_response   =f"{p}.sessions.llm_response",
+        sessions_output_scanned =f"{p}.sessions.output_scanned",
+        findings_created        =f"{p}.findings.created",
+        findings_status_changed =f"{p}.findings.status_changed",
     )
 
 

@@ -62,7 +62,11 @@ KEYS_DIR = os.getenv("KEYS_DIR", "/keys")
 JWT_PRIVATE_KEY_PATH = os.getenv("JWT_PRIVATE_KEY_PATH", f"{KEYS_DIR}/private.pem")
 JWT_PUBLIC_KEY_PATH = os.getenv("JWT_PUBLIC_KEY_PATH", f"{KEYS_DIR}/public.pem")
 NUM_PARTITIONS = int(os.getenv("KAFKA_NUM_PARTITIONS", "3"))
-REPLICATION_FACTOR = int(os.getenv("KAFKA_REPLICATION_FACTOR", "1"))
+# Default 3 matches the runbook design (3-broker HA cluster).
+# Single-broker dev clusters MUST set KAFKA_REPLICATION_FACTOR=1 explicitly
+# in their values overrides. Defaulting to 1 was a footgun: it silently
+# produced topics that violated min.insync.replicas=2 on the prod cluster.
+REPLICATION_FACTOR = int(os.getenv("KAFKA_REPLICATION_FACTOR", "3"))
 ENABLE_ACLS = os.getenv("KAFKA_ENABLE_ACLS", "true").lower() == "true"
 ENVIRONMENT = os.getenv("ENVIRONMENT", "production")
 SERVICE_VERSION = os.getenv("SERVICE_VERSION", "3.0.0")
@@ -224,12 +228,14 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
     ]
 
     all_names = tenant_topic_names + global_topic_names
+    desired_configs: dict[str, dict[str, str]] = {}
     topics_to_create = []
     for name in all_names:
         config = {
             "cleanup.policy": "delete",
             "retention.ms":   str(_retention_for(name)),
         }
+        desired_configs[name] = config
         topics_to_create.append(
             NewTopic(
                 name=name,
@@ -244,7 +250,7 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
         admin.create_topics(new_topics=topics_to_create, validate_only=False)
         log.info("  ✓ %d topics created", len(topics_to_create))
     except TopicAlreadyExistsError:
-        log.info("  Topics already exist — idempotent, skipping")
+        log.info("  Topics already exist — running reconciliation pass")
     except KafkaError as e:
         # Individual topics may partially fail (e.g. some already exist and
         # the batch raises). Log as a warning — the orchestrator is designed
@@ -253,6 +259,95 @@ def create_kafka_topics(admin: KafkaAdminClient) -> None:
     except Exception as e:
         log.error("  ✗ Topic creation failed: %s", e)
         raise
+
+    # Reconcile drift on existing topics. RF mismatches require a
+    # partition reassignment which is risky to do automatically — we WARN
+    # so the operator notices and runs the migration script. Retention /
+    # cleanup-policy drift is safe to fix in place via alter_configs.
+    _reconcile_existing_topics(admin, desired_configs)
+
+
+def _reconcile_existing_topics(admin: KafkaAdminClient,
+                               desired_configs: dict[str, dict[str, str]]) -> None:
+    """Compare existing topics against the desired registry config.
+
+    For every topic in ``desired_configs``:
+      - If the partition replication factor differs from REPLICATION_FACTOR
+        we WARN. Auto-rewriting RF requires a partition reassignment plan
+        and is intentionally NOT done here — the operator runs
+        deploy/scripts/kafka-reconcile-topics.sh for that.
+      - If retention.ms / cleanup.policy differ from the desired values we
+        ALTER in place (safe operation, takes effect immediately).
+    """
+    from kafka.admin import ConfigResource, ConfigResourceType  # type: ignore
+
+    topic_names = list(desired_configs.keys())
+    try:
+        meta = admin.describe_topics(topic_names)
+    except Exception as exc:
+        log.warning("  reconcile: describe_topics failed (%s) — skipping", exc)
+        return
+
+    # Index metadata by topic name. kafka-python returns a list of dicts;
+    # each entry has 'topic', 'partitions' (list with 'replicas'), etc.
+    rf_drift: list[tuple[str, int, int]] = []
+    for entry in meta:
+        name = entry.get("topic")
+        if name not in desired_configs:
+            continue
+        partitions = entry.get("partitions") or []
+        if not partitions:
+            continue
+        # Use partition 0 as the canonical RF — kafka enforces uniform RF
+        # across partitions of a single topic.
+        actual_rf = len(partitions[0].get("replicas") or [])
+        if actual_rf != REPLICATION_FACTOR:
+            rf_drift.append((name, actual_rf, REPLICATION_FACTOR))
+
+    if rf_drift:
+        log.warning("  ⚠  %d topic(s) have wrong replication factor:", len(rf_drift))
+        for name, actual, desired in rf_drift:
+            log.warning("       %s  rf=%d (expected %d)", name, actual, desired)
+        log.warning("       Run deploy/scripts/kafka-reconcile-topics.sh to fix.")
+
+    # Now reconcile per-topic configs (retention, cleanup.policy).
+    try:
+        resources = [ConfigResource(ConfigResourceType.TOPIC, n) for n in topic_names]
+        described = admin.describe_configs(config_resources=resources)
+    except Exception as exc:
+        log.warning("  reconcile: describe_configs failed (%s) — skipping", exc)
+        return
+
+    altered = 0
+    altered_resources = []
+    for resp in described or []:
+        # describe_configs returns DescribeConfigsResponse objects in
+        # kafka-python; iterate its `resources` payload.
+        for entry in getattr(resp, "resources", []) or []:
+            # entry shape: (error_code, error_msg, resource_type, name, configs)
+            try:
+                _err_code, _err_msg, _rtype, name, configs = entry
+            except Exception:
+                continue
+            if name not in desired_configs:
+                continue
+            actual = {c[0]: c[1] for c in (configs or [])}
+            desired = desired_configs[name]
+            drift = {k: v for k, v in desired.items() if str(actual.get(k)) != str(v)}
+            if not drift:
+                continue
+            log.info("  reconcile: %s drift %s", name, drift)
+            altered_resources.append(
+                ConfigResource(ConfigResourceType.TOPIC, name, configs=desired)
+            )
+            altered += 1
+
+    if altered_resources:
+        try:
+            admin.alter_configs(config_resources=altered_resources)
+            log.info("  ✓ reconciled %d topic configs", altered)
+        except Exception as exc:
+            log.warning("  reconcile: alter_configs failed (%s)", exc)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
