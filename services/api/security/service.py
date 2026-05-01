@@ -166,11 +166,62 @@ class PromptSecurityService:
                 blocked_by=LAYER_LEXICAL,
             )
 
+        # ── Layer 2.5: Encoded-payload extraction ─────────────────────────
+        # Lexical's hardcoded phrase list catches known attacks but misses
+        # novel encodings that decode to harmful instructions. Extract any
+        # decoded content here so Layer 3 can re-screen it through Llama
+        # Guard (the right place for content judgment on novel phrasing).
+        # Empty when no encoded content is present — typical prompts pay
+        # no extra cost.
+        try:
+            from models.obfuscation_screen import extract_decoded_payloads
+            decoded_payloads = extract_decoded_payloads(normalized)
+        except Exception as exc:
+            log.warning("decoded-payload extraction failed (%s) — continuing", exc)
+            decoded_payloads = []
+        if decoded_payloads:
+            signals["decoded_payloads_count"] = len(decoded_payloads)
+
         # ── Layer 3: Llama Guard classification ───────────────────────────
         guard_verdict, guard_score, guard_categories = await self._guard.evaluate(normalized)
         signals["guard_verdict"]    = guard_verdict
         signals["guard_score"]      = guard_score
         signals["guard_categories"] = guard_categories
+
+        # Re-screen each decoded payload via Llama Guard. If guard flags
+        # any decoded payload as unsafe, escalate the prompt's verdict to
+        # block — this catches the encoding-bypass class where the raw
+        # prompt looks innocuous but contains an encoded malicious payload.
+        for decoded in decoded_payloads:
+            try:
+                d_verdict, d_score, d_cats = await self._guard.evaluate(decoded)
+            except Exception as exc:
+                log.warning("decoded-payload re-screen failed (%s) — failing closed",
+                            exc)
+                d_verdict, d_score, d_cats = "block", 1.0, ["unavailable"]
+            if d_verdict == "block":
+                log.info(
+                    "prompt blocked: decoded payload flagged by guard "
+                    "[cats=%s score=%.3f tenant=%s cid=%s]",
+                    d_cats, d_score, context.tenant_id, correlation_id,
+                )
+                signals["decoded_block_categories"] = d_cats
+                return PromptDecision.block(
+                    reason=REASON_GUARD_UNSAFE,
+                    categories=d_cats,
+                    explanation=self._mapper.map(REASON_GUARD_UNSAFE, d_cats),
+                    risk_score=max(guard_score, d_score, 0.7),
+                    signals=signals,
+                    correlation_id=correlation_id,
+                    blocked_by=LAYER_GUARD,
+                )
+        # All decoded payloads passed guard re-screen (or none existed).
+        # Mark "obfuscation" on the categories list so OPA can see that
+        # encoding was present even though Llama Guard cleared the content.
+        # OPA can choose to escalate based on tenant policy / posture.
+        if decoded_payloads and "obfuscation" not in guard_categories:
+            guard_categories = list(guard_categories) + ["obfuscation"]
+            signals["guard_categories"] = guard_categories
 
         # Write back onto context for downstream OPA / audit use
         context.guard_score      = guard_score

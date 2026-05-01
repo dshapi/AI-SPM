@@ -51,6 +51,28 @@ allow := {"decision":"allow","reason":"web search permitted","action":"allow_too
     input.posture_score < 0.50
 }
 
+# ── Production tool names (services/api/app.py:_TOOLS) ──────────────────────
+# The /chat path exposes web_search and web_fetch (underscore form). Keep
+# these rules in sync with the _TOOLS list in services/api/app.py and the
+# _TEST_TOOLS list in services/garak/main.py — all three must agree on
+# the canonical tool names.
+
+allow := {"decision":"allow","reason":"web_search permitted","action":"allow_tool_execution"} if {
+    input.tool_name == "web_search"
+    not has_signal("prompt_injection")
+    not has_signal("indirect_injection")
+    not has_signal("exfiltration")
+    input.posture_score < 0.50
+}
+
+allow := {"decision":"allow","reason":"web_fetch permitted","action":"allow_tool_execution"} if {
+    input.tool_name == "web_fetch"
+    not has_signal("prompt_injection")
+    not has_signal("indirect_injection")
+    not has_signal("exfiltration")
+    input.posture_score < 0.50
+}
+
 # Side-effect tools (require low posture + explicit scope + no injection)
 allow := {"decision":"allow","reason":"gmail send permitted","action":"allow_tool_execution"} if {
     input.tool_name == "gmail.send_email"

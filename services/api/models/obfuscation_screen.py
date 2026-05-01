@@ -206,3 +206,62 @@ def screen_obfuscation(text: str) -> Tuple[bool, Optional[str]]:
                 return True, "punctuation_injection"
 
     return False, None
+
+
+def extract_decoded_payloads(text: str) -> list[str]:
+    """
+    Extract decoded versions of any obfuscated payloads found in *text*.
+
+    Companion to :func:`screen_obfuscation` — same detection regexes, but
+    returns the decoded content (when decoding succeeds) regardless of
+    whether the surrounding screen decided to block. The caller uses this
+    to:
+      1. Emit the "obfuscation" signal so OPA can escalate.
+      2. Re-screen the decoded text through Llama Guard, which is the
+         right place to make a content judgment on novel phrasing the
+         hardcoded phrase list doesn't recognize.
+
+    Empty list when nothing decodable is found. Benign decodes (like
+    "Dogan" in RG9nYW4=) ARE included — the caller decides what to do
+    with them; this function just exposes what was decoded.
+    """
+    if not text or not text.strip():
+        return []
+
+    payloads: list[str] = []
+
+    # Base64
+    for m in _B64_RE.finditer(text):
+        candidate = m.group(0)
+        padded = candidate + "=" * (-len(candidate) % 4)
+        try:
+            decoded = base64.b64decode(padded, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+        decoded_text = decoded.decode("utf-8", errors="ignore").strip()
+        if decoded_text:
+            payloads.append(decoded_text)
+
+    # Hex
+    for m in _HEX_RE.finditer(text):
+        hex_str = re.sub(r"[ \-:]", "", m.group(0))
+        if len(hex_str) >= 16:
+            try:
+                decoded_text = bytes.fromhex(hex_str).decode("utf-8", errors="ignore").strip()
+                if decoded_text:
+                    payloads.append(decoded_text)
+            except ValueError:
+                pass
+
+    # ROT13 — only include if decode differs meaningfully from input
+    # (otherwise every plain-English prompt would pass through here).
+    rot13 = codecs.decode(text, "rot_13")
+    if rot13 != text and any(c.isalpha() for c in rot13):
+        # Only include ROT13 decode if it looks like real English (heuristic:
+        # contains at least one common short word). Avoids polluting the
+        # signal on plain prose where ROT13 of "hello" → "uryyb" is noise.
+        if re.search(r"\b(the|and|you|are|ignore|system|prompt|previous)\b",
+                     rot13, re.IGNORECASE):
+            payloads.append(rot13.strip())
+
+    return payloads

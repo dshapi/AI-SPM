@@ -13,6 +13,7 @@ import data.ai.security.tool_injection_guard
 
 has_signal(sig) if { sig in input.signals }
 has_behavioral(sig) if { sig in input.behavioral_signals }
+has_scope(scope) if { scope in input.auth_context.scopes }
 has_ttp(ttp) if { ttp in input.cep_ttps }
 
 # ── Single else-chained `allow` rule ─────────────────────────────────────────
@@ -72,6 +73,22 @@ allow := {
 } if {
     input.intent_drift >= 0.75
     has_signal("prompt_injection")
+} else := {
+    # Encoded payload was decoded and re-screened by Llama Guard. The
+    # guard cleared the inner content (or we wouldn't get here), but the
+    # PRESENCE of obfuscation is itself a risk signal: legitimate users
+    # rarely Base64-encode their prompts. We escalate to block when
+    # combined with any non-trivial guard score, leaving short benign
+    # decodes (like "Dogan") allowed since their score is ~0. Tenants
+    # that need to allow Base64 traffic can grant the
+    # `prompts:encoded_allowed` scope to bypass this rule.
+    "decision": "block",
+    "reason":   "obfuscation signal with elevated guard score",
+    "action":   "deny_execution",
+} if {
+    has_signal("obfuscation")
+    input.guard_score >= 0.30
+    not has_scope("prompts:encoded_allowed")
 } else := {
     "decision": "block",
     "reason":   "behavioral chain with sustained volume",
