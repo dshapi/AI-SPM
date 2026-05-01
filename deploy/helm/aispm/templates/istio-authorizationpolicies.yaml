@@ -242,6 +242,11 @@ spec:
             principals: [{{ $ingressSa | quote }}]
         - source:
             namespaces: ["istio-system"]
+        # ingress-nginx (kind / k3s setups where the public edge is the
+        # nginx LoadBalancer in front of istio-ingressgateway). Has no
+        # sidecar so no principal — namespace-only match.
+        - source:
+            namespaces: ["ingress-nginx"]
     # PERMISSIVE-mode ingress fallback. ingress-nginx strips the
     # /api prefix via rewrite-target, so the istio-proxy sees the
     # post-rewrite paths (e.g. /v1/chat instead of /api/v1/chat).
@@ -291,6 +296,10 @@ spec:
             principals: [{{ $ingressSa | quote }}]
         - source:
             namespaces: ["istio-system"]
+        # ingress-nginx (kind / external nginx edge). No sidecar →
+        # namespace-only match.
+        - source:
+            namespaces: ["ingress-nginx"]
     # PERMISSIVE-mode ingress fallback. UI is public — allow all
     # browser GETs.
     - to:

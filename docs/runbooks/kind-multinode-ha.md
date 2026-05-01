@@ -297,6 +297,114 @@ kubectl top nodes   # should return CPU / memory rows
 If `metrics-server` pod is missing, re-run `kind-cluster.sh init` — the
 script reinstalls it.
 
+## Known issues (open work)
+
+These are real product/configuration issues observed during the kind
+multi-node bring-up. They do not block the cluster from running but
+need follow-up before this setup is dependable for security testing.
+
+### Garak Simulation Lab — partial coverage
+
+Symptoms when running the **Full Kill Chain** profile from the UI:
+
+- Most probes complete with all attempts marked **ALLOWED**.
+- One probe (typically `dataexfil`) finishes with **ERROR / 1 attempt**
+  while others run their 10 attempts cleanly.
+- A re-run after auth fixes (see "AuthorizationPolicy" in
+  Troubleshooting) yields a more realistic 5 blocked / 6 passed across
+  the kill-chain probes — the chain *is* evaluating, but the verdict
+  distribution suggests the guard policies catch obvious attacks and
+  miss subtler ones.
+
+What we know:
+
+- The earlier "all ALLOWED" runs were Garak using its synthetic
+  **Blank** generator instead of the real AISPM target — a missing
+  `GARAK_INTERNAL_SECRET` in `platform-secrets`. Bootstrap should
+  auto-generate it; on this kind cluster it landed empty. Workaround
+  is in Troubleshooting.
+- The `dataexfil` probe ERROR is reproducible and may indicate a
+  specific upstream-API contract issue worth investigating
+  separately.
+
+Action items (not done):
+
+- [ ] Bootstrap should fail loudly if `GARAK_INTERNAL_SECRET` ends up
+      empty rather than letting the simulator silently fall back to
+      Blank.
+- [ ] Investigate why `dataexfil` errors while other probes complete.
+- [ ] Tune `GUARD_BLOCK_SCORE` and / or improve the guard prompt to
+      raise block rate on the subtler probes.
+
+### Custom agents do not block jailbreak attempts
+
+When you run a chat through a custom agent created via the Agents
+admin UI, jailbreak prompts that the platform-level guard chain
+*should* catch (prompt injection, ignore-previous-instructions, etc.)
+make it to the LLM and produce a response.
+
+Suspected causes (none confirmed yet):
+
+- Custom-agent runtime may bypass the guard chain entirely and call
+  the LLM proxy directly.
+- Or the per-agent policy attached to the custom agent doesn't include
+  the prompt-injection rule that the simulator-style flow has.
+
+Action items (not done):
+
+- [ ] Trace a single custom-agent request end-to-end — confirm
+      whether `guard-model` is invoked.
+- [ ] If not, fix the agent runtime to route through `guard-model` /
+      `output-guard` like the platform chat path does.
+- [ ] Add a regression test (Garak probe) that fails if a known
+      prompt-injection slips through a custom agent.
+
+### Simulator UI: "Simulation timeout — no terminal event received"
+
+After the Garak run finishes successfully on the backend (probes
+return verdicts in api logs), the UI sometimes shows a banner:
+"Simulation timeout — no terminal event received from the backend."
+
+The terminal event is delivered over the WebSocket
+`/ws/sessions/<session-id>`. Likely culprits:
+
+- ingress-nginx WebSocket idle timeout. Default is 60s; long Garak
+  runs exceed that without an in-band keepalive.
+- istio sidecar idle timeout closing the upstream WS before the
+  terminal event reaches the UI.
+- The api side never emits the terminal frame on this code path.
+
+Action items (not done):
+
+- [ ] Add `nginx.ingress.kubernetes.io/proxy-read-timeout: "600"` and
+      `proxy-send-timeout: "600"` to the AISPM Ingress to extend WS
+      lifetime past 60s.
+- [ ] Confirm api emits `{"type":"terminal", ...}` on simulation
+      completion — if not, fix the simulator service.
+- [ ] Add a server-side keepalive ping every 20s to keep ingress
+      proxies happy.
+
+### Custom agent disappears from the agents table
+
+After creating a custom agent and using it once, it sometimes
+vanishes from the Agents admin UI table on the next page load, even
+though the underlying record is presumably still in `spm-db`.
+
+Suspected causes:
+
+- API GET /agents may filter by a status field the runtime no longer
+  satisfies.
+- The agent-orchestrator may be deleting/garbage-collecting agents
+  whose runtime container has terminated.
+
+Action items (not done):
+
+- [ ] Reproduce reliably and capture the timing.
+- [ ] Check the spm-api `/agents` query and see whether it excludes
+      the row.
+- [ ] If the row is intact, this is a UI bug — the table fetch
+      response is dropping it client-side.
+
 ## What's NOT installed (and why)
 
 - **Longhorn / Rook-Ceph / SeaweedFS-CSI** — kernel modules they need
