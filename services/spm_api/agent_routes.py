@@ -179,6 +179,12 @@ def _to_dict(a: Agent, *, warnings: Optional[List[str]] = None) -> Dict[str, Any
         "risk":           _enum_value(_safe_get(a, "risk")),
         "policy_status":  _enum_value(_safe_get(a, "policy_status")),
         "runtime_state":  _enum_value(_safe_get(a, "runtime_state")),
+        # "customer" (default, user-uploaded agent that has a chat
+        # surface) or "system" (platform-internal service like
+        # threat-hunting-agent — inventory row but no chat window).
+        # Default to "customer" for backward compat with rows that
+        # predate the kind column.
+        "kind":           _enum_value(_safe_get(a, "kind", "customer")) or "customer",
         "code_path":      _safe_get(a, "code_path"),
         "code_sha256":    _safe_get(a, "code_sha256"),
         "tenant_id":      _safe_get(a, "tenant_id"),

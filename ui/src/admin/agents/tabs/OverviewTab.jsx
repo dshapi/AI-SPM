@@ -92,11 +92,18 @@ export default function OverviewTab({ agent, onOpenChat, onStateChange }) {
           )}
         </div>
 
-        {/* Open Chat — only for live agents. Mocks would 404 on the
-            chat endpoint (the seed rows aren't registered with a real
-            mcp_token / llm_api_key), so hiding the button avoids a
-            confusing dead-end click. */}
-        {agent._live ? (
+        {/* Open Chat — only for live, customer-uploaded agents.
+            - Mocks would 404 on the chat endpoint (seed rows aren't
+              registered with a real mcp_token / llm_api_key).
+            - System agents (threat-hunting-agent, etc.) are
+              platform-internal services — they have an inventory row
+              + llm_api_key for spm-llm-proxy auth but do not expose a
+              chat surface. Hiding the button avoids a dead-end click.
+            We key off `agentKind` (not `kind`) because `kind` at this
+            level is the inventory asset category set in adaptLiveAgent,
+            which is always "agent" for this drawer. agentKind is the
+            agent-level distinction sourced from the backend column. */}
+        {agent._live && agent.agentKind !== "system" ? (
           <button
             type="button"
             onClick={onOpenChat}
@@ -108,6 +115,12 @@ export default function OverviewTab({ agent, onOpenChat, onStateChange }) {
             <MessageSquare size={13} aria-hidden />
             Open Chat
           </button>
+        ) : agent.agentKind === "system" ? (
+          <p className="mt-3 text-[11px] text-slate-500 italic">
+            Platform-internal system agent — runs as a Kubernetes Deployment
+            and does not expose a chat surface. Visible in the inventory so
+            its <code>llm_api_key</code> is auditable alongside customer agents.
+          </p>
         ) : (
           <p className="mt-3 text-[11px] text-slate-500 italic">
             This is a seed mock — register an agent.py to enable chat &amp; lifecycle controls.

@@ -667,41 +667,226 @@ Action items (not done):
 - [ ] If the row is intact, this is a UI bug — the table fetch
       response is dropping it client-side.
 
-### Flink HA leader election broken after etcd restore
+### threat-hunting-agent: register as system agent *(DONE)*
 
-Both ``flink-jobmanager-0`` and ``flink-jobmanager-1`` show ``1/2``
-Ready (istio sidecar up, jobmanager container probe failing). HTTP
-``/overview`` on port 8081 hangs; logs show
+The threat-hunting-agent is a platform service that calls
+spm-llm-proxy (which validates bearer tokens against
+``agents.llm_api_key``). Originally it sent the placeholder string
+``"local"`` (left over from an OrbStack-era Ollama setup that didn't
+require auth) — every LLM call returned 401 ``Unknown llm_api_key``.
+
+Architectural fix: register the agent as a first-class **system
+agent** so it has a real row in ``agents`` (visible in the inventory)
+and gets a real ``llm_api_key`` like any customer agent. Sets the
+precedent for future platform services that need spm-llm-proxy.
+
+Single source of truth pattern (DB and Deployment always agree):
+
+```
+helm value secrets.threatHuntingAgentLlmKey
+        ↓ (rendered into)
+platform-secrets.THREAT_HUNTING_AGENT_LLM_KEY  (k8s Secret)
+        ↓ (mounted as env)        ↓ (mounted as env)
+threat-hunting-agent      spm-api → seed_db.py
+   AGENT_LLM_API_KEY                seed_system_agents()
+        ↓                                    ↓
+   Bearer token sent                agents.llm_api_key (DB row)
+        ↓
+   spm-llm-proxy._auth_required → resolve_agent_by_llm_token
+                                          ↓
+                                    matches → 200 OK
+```
+
+What changed:
+
+- [x] ``services/spm_api/seed_db.py`` — new ``seed_system_agents()``
+      function. Reads ``THREAT_HUNTING_AGENT_LLM_KEY`` env, inserts or
+      reconciles ``agents`` row for ``threat-hunting-agent``
+      (kind=system via ``owner=platform``, ``provider=internal``).
+      Idempotent; rotates token if value changes.
+- [x] ``deploy/helm/aispm/templates/secrets.yaml`` — added
+      ``THREAT_HUNTING_AGENT_LLM_KEY`` field, sourced from
+      ``.Values.secrets.threatHuntingAgentLlmKey``.
+- [x] ``deploy/helm/aispm/values.yaml`` — new top-level value
+      ``secrets.threatHuntingAgentLlmKey`` with operator docstring.
+- [x] ``deploy/helm/aispm/templates/threat-hunting-agent-deployment.yaml``
+      now reads ``AGENT_LLM_API_KEY`` from ``platform-secrets``
+      (was ``threat-hunting-agent-creds``; that standalone Secret
+      can be deleted post-migration).
+- [x] Verified end-to-end: ``200 OK`` from spm-llm-proxy via the
+      threat-hunting-agent's bearer token; Ollama responds via the
+      proxy; no 401s in agent logs. Subsequent hunt cycles complete
+      successfully and persist findings.
+- [x] Added ``kind`` enum column on ``agents`` (``customer`` /
+      ``system``) plus migration via direct SQL on the live cluster;
+      SQLAlchemy model in ``spm/db/models.py`` updated with new
+      ``AgentKind`` enum.
+- [x] API serializer ``_to_dict()`` exposes ``kind`` in the public
+      response (defaults to ``customer`` for legacy rows).
+- [x] Admin UI renders a "System" badge on the row, disables the
+      Open Chat button, and replaces Run/Stop/Delete with a
+      "Lifecycle managed by Kubernetes" note for system agents.
+      View Detail and Apply Policy stay available — OPA policies
+      still apply to the agent's LLM calls.
+- [x] Renamed the agent's display name to ``Threat-Hunting-Agent``
+      (the K8s Deployment stays lowercase; spm-llm-proxy lookups use
+      ``llm_api_key`` so the rename is operationally inert).
+
+Operator workflow on a fresh install:
+
+```bash
+# 1. Generate the token once
+TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+
+# 2. Pass to helm (or set in values.dev-multinode.yaml)
+helm template aispm deploy/helm/aispm -n aispm \
+  -f deploy/helm/aispm/values.yaml \
+  -f deploy/helm/aispm/values.dev-multinode.yaml \
+  --set secrets.threatHuntingAgentLlmKey="$TOKEN" \
+  | kubectl apply -n aispm -f -
+
+# 3. The db-seed Job runs seed_system_agents(); the threat-hunting
+#    deployment reads the same token from platform-secrets. Both
+#    sides agree without coordination.
+```
+
+To rotate: change the helm value, re-render, re-apply, re-run db-seed.
+The deployment picks up the new env on its next pod restart.
+
+### threat-hunting-agent LLM URL pinned to OrbStack hostname *(DONE)*
+
+The agent's reasoning LLM client was failing every call with
+``httpcore.ConnectError: [Errno -2] Name or service not known``.
+
+Root cause: ``services/threat-hunting-agent/config.py:18`` had
+``GROQ_BASE_URL = "http://host.lima.internal:11434/v1"`` hardcoded
+as a module-level constant — left over from when the team ran
+Ollama on the host via OrbStack k8s. The original comment even
+explained it was "intentionally NOT exposed as env-configurable…
+so stale shell exports cannot override them." That intent was
+correct for OrbStack but wrong on Docker Desktop kind, where
+``host.lima.internal`` doesn't resolve from inside pods. Despite
+the deployment setting ``AGENT_LLM_BASE_URL`` in env, the constant
+was never read from env and always pointed at the dead host.
+
+Fix: read from env with the correct in-cluster default.
+
+- [x] ``GROQ_BASE_URL`` and ``HUNT_MODEL`` now read from env
+      (``AGENT_LLM_BASE_URL``, ``HUNT_MODEL``) with default
+      ``http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1``.
+      Variable name kept as ``GROQ_BASE_URL`` for import compat.
+- [x] Verified post-restart: agent logs
+      ``base_url=http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1``,
+      no more DNS-failure traces.
+
+### threat-hunting-agent collectors: column "session_id" does not exist
+
+Separate bug found in the same logs as the LLM URL issue.
+Multiple collectors (``runtime_collector``,
+``prompt_secrets_collector``, ``data_leakage_collector``,
+``tool_misuse_collector``) fail every cycle with:
+
+```
+column "session_id" does not exist
+LINE 2: ... SELECT session_id, ...
+```
+
+Their queries reference a ``session_id`` column on tables that
+either renamed it or never had it. The agent is otherwise running
+fine (LLM connects, scan_runner cycles complete) but its findings
+output is empty because every collector errors out before
+producing rows.
+
+Action items:
+
+- [ ] Identify which table(s) the failing collectors query (likely
+      ``session_events`` or ``audit_events`` in spm-db). Find the
+      actual schema with ``\d <table>`` from psql.
+- [ ] Compare to the SELECT clauses in the collector code; the
+      column was probably renamed (``session_id`` → ``session``
+      or moved into a JSONB ``metadata`` column).
+- [ ] Update the collectors' queries to match the live schema, or
+      add a migration that restores the missing column if it was
+      genuinely lost.
+- [ ] Add a smoke test: each collector should return at least one
+      row when fed a known-good event, otherwise fail the test.
+
+### Flink HA leader election broken after etcd restore *(DONE)*
+
+After the etcd restore, both ``flink-jobmanager-0`` and
+``flink-jobmanager-1`` showed ``1/2`` Ready, ``/overview`` on port
+8081 hung, logs spammed
 ``AskTimeoutException: Recipient ... had already been terminated``.
-Both are running but neither holds the leader lease — Flink's
-Kubernetes-based HA leader election was disrupted by the etcd
-restore (configmap-backed leases got wiped/regenerated and neither JM
-re-acquired).
 
-Action items:
+Root cause: the K8s ConfigMap that holds Flink's leader lease
+(``aispm-flink-cluster-config-map``) had a stale
+``control-plane.alpha.kubernetes.io/leader`` annotation pointing at
+a ``holderIdentity`` UUID belonging to a pod that no longer existed
+(from before the etcd restore). Both new JMs saw the stale lease,
+each tried to take over, neither succeeded — the dispatcher actor
+got terminated mid-election and ``/overview`` blocked forever
+waiting on a dead actor.
 
-- [ ] Rolling-restart both jobmanagers; expected to clear cleanly:
-      ``kubectl -n aispm rollout restart statefulset/flink-jobmanager``
-- [ ] If it recurs after restart, investigate the lease ConfigMap
-      lifecycle in CNPG-equivalent recovery scenarios.
-- [ ] Document jobmanager recovery in a per-component recovery section
-      so this is a 30-second reflex not a 30-minute investigation.
+Recovery procedure (committed pattern):
 
-### CNPG cluster (spm-db-1/2/3) — high restart counts
+```bash
+# 1. Cold-stop both JMs to break the race
+kubectl -n aispm scale statefulset flink-jobmanager --replicas=0
+kubectl -n aispm wait --for=delete pod/flink-jobmanager-0 --timeout=60s
 
-The CNPG-managed Postgres cluster instances cycle frequently (restart
-counts climbed to 14–16 over a few hours during today's session). The
-fix that landed for the standalone ``spm-db`` StatefulSet
-(``timeoutSeconds: 5`` on ``pg_isready`` probes) was NOT applied to
-the CNPG ``Cluster`` resource — that controls its own probe specs.
+# 2. Wipe the stale lease ConfigMap — Flink HA recreates on JM startup
+kubectl -n aispm delete cm aispm-flink-cluster-config-map
 
-Action items:
+# 3. Bring up ONE JM only — no race possible, fresh lease
+kubectl -n aispm scale statefulset flink-jobmanager --replicas=1
+kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m
 
-- [ ] Find where CNPG generates pod probes (operator default vs
-      ``Cluster.spec.affinity.podLivenessProbe``).
-- [ ] Patch the Cluster resource to use ``timeoutSeconds: 5`` for
-      ``pg_isready``.
-- [ ] Verify spm-db-1/2/3 stop cycling.
+# 4. Verify leader annotation is fresh and /overview responds
+kubectl -n aispm describe cm aispm-flink-cluster-config-map | grep -A2 Annotations
+kubectl -n aispm exec flink-jobmanager-0 -c flink-jobmanager -- \
+  curl -s http://localhost:8081/overview
+
+# 5. Scale to 2 — JM-1 sees JM-0's lease, joins as standby cleanly
+kubectl -n aispm scale statefulset flink-jobmanager --replicas=2
+kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m
+```
+
+Why this and NOT a rolling restart: a rolling restart bounces JMs
+one at a time but leaves the stale lease intact and lets both new
+JMs race. The "scale to 0 → wipe configmap → scale to 1 → scale to 2"
+sequence forces a deterministic single-leader cold start.
+
+- [x] Recovery procedure documented above and tested.
+- [x] Cluster recovered: 2 JMs, 2 TMs, 6 slots available.
+
+### CNPG cluster (spm-db-1/2/3) — high restart counts *(DONE — false alarm)*
+
+Initial hypothesis: same probe-timeout footgun as the standalone
+``spm-db`` StatefulSet. **Wrong.**
+
+Investigation:
+
+- The pods' actual probe spec uses ``timeoutSeconds: 5`` (CNPG
+  operator default), routed through istio's app-health proxy at
+  port 15020 (``/app-health/postgres/{livez,readyz}``).
+- ``previous`` logs from the most recent restart show a clean
+  graceful shutdown: ``postmaster exited`` with
+  ``postmasterExitStatus: null``, instance-manager waiting for
+  caches/webhooks/HTTP servers, ``pg_controldata`` reporting
+  ``shut down in recovery`` (clean on-disk state).
+
+Actual cause: the high restart counts (13–18) accumulated **during**
+yesterday's etcd recovery — the standalone primary ``spm-db-0`` was
+itself cycling (probe-timeout footgun, fixed separately), so the
+CNPG replicas kept trying to attach to a primary that wasn't there.
+Each failed-sync cycle counted as a restart. Once the standalone
+primary stabilized, replica restarts dropped to noise level (2 in
+18 hours, indistinguishable from CNPG's normal reconciliation).
+
+- [x] Confirmed CNPG probes are not the cause; no fix needed.
+- [x] Future reference: high restart counts on CNPG instances are
+      most often downstream of the primary's health, not the
+      replicas' own probes. Diagnose by checking the primary first.
 
 ### spm-api 401 on model registration during startup
 
@@ -727,24 +912,72 @@ Action items:
 - [ ] Add a startup-orchestrator integration test that catches model
       registration regressions.
 
-### Kafka leader rebalance (cosmetic)
+### Kafka leader rebalance *(DONE)*
 
-After today's partition reassignment to RF=3, every partition's leader
-landed on broker 0. Reads/writes are healthy but the load is uneven.
-Run a preferred-leader election to redistribute:
+After yesterday's partition reassignment to RF=3, every partition's
+leader landed on broker 0 (74 / 6 / 6 distribution). Cause: the
+reassignment script set replicas as ``[0,1,2]`` for every partition,
+making broker 0 the *preferred* leader for everything. Running
+``kafka-leader-election --election-type preferred`` alone wouldn't
+redistribute — it picks the FIRST replica in the list, which was 0
+everywhere.
+
+Fix: rotate the replica order per partition (partition 0 →
+``[0,1,2]``, partition 1 → ``[1,2,0]``, partition 2 → ``[2,0,1]``)
+via a one-shot reassignment, then run preferred-leader-election. The
+reassignment is metadata-only since the replica *set* doesn't change,
+only the order — fast and zero data movement.
+
+Recovery procedure (committed pattern):
 
 ```bash
+# 1. Generate rotated reassignment JSON inside kafka-0
+kubectl -n aispm exec kafka-0 -- bash -c '
+TOPICS=$(/usr/bin/kafka-topics --bootstrap-server localhost:9092 --list --exclude-internal)
+echo "{ \"version\": 1, \"partitions\": ["
+FIRST=1
+for t in $TOPICS; do
+  desc=$(/usr/bin/kafka-topics --bootstrap-server localhost:9092 --describe --topic "$t" 2>/dev/null)
+  parts=$(printf "%s\n" "$desc" | awk "/PartitionCount:/ { for (i=1;i<=NF;i++) if (\$i==\"PartitionCount:\") { print \$(i+1); exit } }")
+  rf=$(printf "%s\n" "$desc"   | awk "/ReplicationFactor:/ { for (i=1;i<=NF;i++) if (\$i==\"ReplicationFactor:\") { print \$(i+1); exit } }")
+  [ -z "$parts" ] && continue
+  [ "$rf" -lt 3 ] && continue
+  for p in $(seq 0 $((parts - 1))); do
+    a=$((p % 3)); b=$(((p + 1) % 3)); c=$(((p + 2) % 3))
+    [ $FIRST -eq 0 ] && echo ","
+    FIRST=0
+    printf "  {\"topic\": \"%s\", \"partition\": %d, \"replicas\": [%d, %d, %d]}" "$t" "$p" $a $b $c
+  done
+done
+echo
+echo "] }"
+' > /tmp/aispm-rebalance.json
+
+# 2. Apply the reassignment + run preferred-leader-election
+kubectl -n aispm cp /tmp/aispm-rebalance.json kafka-0:/tmp/aispm-rebalance.json
+kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-reassign-partitions \
+  --bootstrap-server localhost:9092 \
+  --reassignment-json-file /tmp/aispm-rebalance.json --execute
+sleep 5
 kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-leader-election \
   --bootstrap-server localhost:9092 \
   --election-type preferred --all-topic-partitions
+
+# 3. Verify even distribution (~28-30 per broker)
+kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-topics \
+  --bootstrap-server localhost:9092 --describe --exclude-internal \
+  | grep "Leader:" | awk '{print $6}' | sort | uniq -c
 ```
 
-Action items:
+Result: distribution went from 74-6-6 → 30-28-28. The 2-extra on
+broker 0 is from two single-partition topics
+(per-agent ``chat.in``/``chat.out``) that can't rotate.
 
-- [ ] Run the election; verify per-topic ``Leader`` field varies
-      across 0, 1, 2.
-- [ ] Schedule periodically (preferred-election cron) so future
-      reassignments don't leave imbalance.
+- [x] One-shot rebalance executed; verified 30-28-28 distribution.
+- [x] Updated ``deploy/scripts/kafka-reconcile-topics.sh`` to rotate
+      replicas by partition index (partition P → preferred leader
+      P mod num_brokers). Future reconcile runs produce balanced
+      leadership from the start; no follow-up election needed.
 
 ### Garak `encoding.InjectBase64` probe noise
 

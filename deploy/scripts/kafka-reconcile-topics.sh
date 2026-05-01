@@ -104,8 +104,14 @@ PLAN_FILE_LOCAL="/tmp/aispm-reassign-$(date +%s).json"
 PLAN_FILE_POD="/tmp/aispm-reassign.json"
 echo '{ "version": 1, "partitions": [' > "$PLAN_FILE_LOCAL"
 
-# Convert "0,1,2" → "0, 1, 2" for JSON readability
-JSON_BROKERS=$(echo "$BROKER_LIST" | sed 's/,/, /g')
+# Brokers as a bash array so we can rotate. Rotating replicas per
+# partition (partition 0 → [0,1,2], partition 1 → [1,2,0], partition 2
+# → [2,0,1], ...) makes broker P the *preferred* leader for partition
+# P, distributing leadership evenly. Earlier versions used a fixed
+# [0,1,2] for every partition — that worked for replication but pinned
+# every leader to broker 0 and required a separate manual rebalance.
+IFS=',' read -ra BROKERS <<< "$BROKER_LIST"
+NB="${#BROKERS[@]}"
 
 FIRST=1
 set +o pipefail
@@ -119,8 +125,15 @@ for t in "${NEEDS_FIX[@]}"; do
   for p in $(seq 0 $((parts - 1))); do
     if [ "$FIRST" -eq 0 ]; then echo "," >> "$PLAN_FILE_LOCAL"; fi
     FIRST=0
+    # Build "[a, b, c]" with rotation by partition index.
+    rotated=""
+    for i in $(seq 0 $((NB - 1))); do
+      idx=$(( (p + i) % NB ))
+      [ "$i" -ne 0 ] && rotated+=", "
+      rotated+="${BROKERS[$idx]}"
+    done
     printf '  {"topic": "%s", "partition": %d, "replicas": [%s]}' \
-      "$t" "$p" "$JSON_BROKERS" >> "$PLAN_FILE_LOCAL"
+      "$t" "$p" "$rotated" >> "$PLAN_FILE_LOCAL"
   done
 done
 set -o pipefail

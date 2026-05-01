@@ -339,6 +339,14 @@ function AssetTable({ assets, selectedId, onSelect }) {
                 <div className="flex items-center gap-2">
                   {selected && <span className="w-0.5 h-4 bg-blue-500 rounded-full shrink-0 -ml-1.5" />}
                   <span className="text-[13px] font-medium text-gray-800 whitespace-nowrap leading-none">{asset.name}</span>
+                  {asset.agentKind === 'system' && (
+                    <span
+                      title="Platform-internal system agent — no chat surface"
+                      className="inline-flex items-center px-1.5 py-0.5 rounded-md text-[10px] font-semibold uppercase tracking-wide bg-slate-100 text-slate-600 border border-slate-200"
+                    >
+                      System
+                    </span>
+                  )}
                 </div>
               </td>
 
@@ -710,9 +718,13 @@ function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) 
 
       {/* Actions */}
       <div className="px-4 py-3 border-t border-gray-100 space-y-2 shrink-0">
-        {/* Live-agent only: runtime status + Open Chat. Stays above
-            the existing actions so it's the first thing the operator
-            sees when they open an agent row. */}
+        {/* Live-agent actions: runtime status, Open Chat, Stop, Delete.
+            For system agents (e.g. Threat-Hunting-Agent) the lifecycle
+            is managed by Kubernetes Deployments, NOT by the
+            agent-controller's spawn-pod flow — Run/Stop would either
+            no-op or break the row's auth without actually affecting
+            the running service. We render runtime status read-only and
+            hide every action button. */}
         {isLiveAgent && (
           <>
             <div className="flex items-center justify-between text-[11px] text-gray-500 mb-1">
@@ -721,40 +733,50 @@ function PreviewPanel({ asset, onClose, onOpenChat, onOpenDetails, onDeleted }) 
                 {asset.runtime_state || 'stopped'}
               </span>
             </div>
-            <AgentRunStopToggle
-              agent={{ id: asset._backendId, runtime_state: asset.runtime_state }}
-              size="sm"
-              className="w-full justify-center"
-            />
-            <Button
-              variant="outline" size="sm"
-              onClick={() => onOpenChat && onOpenChat(asset)}
-              className="w-full h-8 gap-1.5 text-[12px] justify-center"
-            >
-              <MessageSquare size={12} />
-              Open Chat
-            </Button>
-            <Button
-              variant="outline" size="sm"
-              onClick={() => setConfirmingDelete(true)}
-              disabled={deleting}
-              className="w-full h-8 gap-1.5 text-[12px] justify-center text-red-600 border-red-200 hover:bg-red-50"
-            >
-              <X size={12} />
-              Delete asset
-            </Button>
-            {deleteErr && (
-              <p className="text-[11px] text-red-600 text-center" role="alert">
-                ⚠ {deleteErr}
+            {asset.agentKind === 'system' ? (
+              <p className="text-[11px] text-slate-500 italic">
+                Lifecycle managed by Kubernetes — Run/Stop/Delete actions
+                are disabled. Operate via <code>kubectl</code> on the
+                <code className="ml-1">{asset.name?.toLowerCase()}</code> Deployment.
               </p>
+            ) : (
+              <>
+                <AgentRunStopToggle
+                  agent={{ id: asset._backendId, runtime_state: asset.runtime_state }}
+                  size="sm"
+                  className="w-full justify-center"
+                />
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => onOpenChat && onOpenChat(asset)}
+                  className="w-full h-8 gap-1.5 text-[12px] justify-center"
+                >
+                  <MessageSquare size={12} />
+                  Open Chat
+                </Button>
+                <Button
+                  variant="outline" size="sm"
+                  onClick={() => setConfirmingDelete(true)}
+                  disabled={deleting}
+                  className="w-full h-8 gap-1.5 text-[12px] justify-center text-red-600 border-red-200 hover:bg-red-50"
+                >
+                  <X size={12} />
+                  Delete asset
+                </Button>
+                {deleteErr && (
+                  <p className="text-[11px] text-red-600 text-center" role="alert">
+                    ⚠ {deleteErr}
+                  </p>
+                )}
+                <DeleteAgentConfirmModal
+                  open={confirmingDelete}
+                  agentName={asset.name}
+                  loading={deleting}
+                  onConfirm={_runDelete}
+                  onCancel={() => { if (!deleting) setConfirmingDelete(false) }}
+                />
+              </>
             )}
-            <DeleteAgentConfirmModal
-              open={confirmingDelete}
-              agentName={asset.name}
-              loading={deleting}
-              onConfirm={_runDelete}
-              onCancel={() => { if (!deleting) setConfirmingDelete(false) }}
-            />
           </>
         )}
         <Button
@@ -1335,7 +1357,12 @@ function adaptLiveAgent(a) {
     // Prefix so the URL-param selector can't accidentally match a mock row.
     id:            `live-${a.id}`,
     _backendId:    a.id,
+    // Inventory-level "kind" is the asset CATEGORY (agent vs. model
+    // vs. integration). The agent-level kind (customer vs. system)
+    // is exposed as `agentKind` below to avoid collision; the chat
+    // gating in PreviewPanel / OverviewTab keys off agentKind.
     kind:          'agent',
+    agentKind:     a.kind || 'customer',
     name:          a.name,
     type:          AGENT_TYPE_LABEL[a.agent_type] || (a.agent_type || 'Agent'),
     risk:          riskDisplayFromBackend(a.risk),

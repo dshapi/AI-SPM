@@ -244,6 +244,14 @@ secrets:
   tavilyApiKey: ""
   garakInternalSecret: ""
   spmInternalBootstrapSecret: ""
+  # Bearer token the threat-hunting-agent system service uses against
+  # spm-llm-proxy. Must be a 32-byte URL-safe random string. Generate:
+  #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
+  # services/spm_api/seed_db.py reads the env sourced from this value
+  # and writes it to agents.llm_api_key, keeping deployment + DB in
+  # sync. Empty means seed_db will log an error and the
+  # threat-hunting-agent deployment will fail auth at runtime.
+  threatHuntingAgentLlmKey: ""
   grafanaAdminPassword: "admin"
 
 # ── Ingress ──────────────────────────────────────────────────────────────────

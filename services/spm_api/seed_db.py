@@ -386,6 +386,123 @@ async def seed_posture_snapshots(db) -> int:
     return len(rows)
 
 
+async def seed_system_agents(db) -> int:
+    """Ensure platform-internal "system" agents have a row in ``agents``.
+
+    System agents (e.g. threat-hunting-agent) are deployed as ordinary
+    Kubernetes Deployments — not customer-uploaded — but they call
+    spm-llm-proxy whose ``_auth_required`` validates the bearer token
+    against ``agents.llm_api_key``. Without a row here, the platform
+    service hits 401 on every LLM call.
+
+    Token sourcing: the token comes from env vars that are populated
+    from the same Kubernetes Secret the deployment mounts. This makes
+    the DB and the deployment share a single source of truth — set the
+    helm value once and both sides agree. If the env is empty we log
+    a clear error pointing at the operator runbook rather than
+    silently generating a token (which would never match what the
+    deployment uses).
+
+    Idempotent: re-runs update token to match env (handles rotation).
+    """
+    from sqlalchemy import select
+    from spm.db.models import Agent
+
+    SYSTEM_AGENTS = [
+        {
+            # Display-cased name shown in the admin inventory. The
+            # corresponding Kubernetes Deployment is named lowercase
+            # (`threat-hunting-agent`) because k8s resource names must
+            # be RFC1123-compatible — that's a separate namespace from
+            # the agent inventory display name and the two don't need
+            # to match. spm-llm-proxy looks up by ``llm_api_key`` so
+            # the display name has no operational effect.
+            "name": "Threat-Hunting-Agent",
+            "version": "1.0",
+            "agent_type": "langchain",
+            "provider": "internal",
+            "owner": "platform",
+            "description": (
+                "System agent: continuous threat hunting over session "
+                "events. Deployed as a Kubernetes Deployment, not "
+                "user-uploaded; uses spm-llm-proxy via this llm_api_key."
+            ),
+            "risk":          "low",
+            "policy_status": "partial",
+            "runtime_state": "running",
+            "code_path":     "k8s://threat-hunting-agent",
+            "code_sha256":   "system-managed",
+            "llm_key_env":   "THREAT_HUNTING_AGENT_LLM_KEY",
+        },
+    ]
+
+    seeded = 0
+    for spec in SYSTEM_AGENTS:
+        token = os.environ.get(spec["llm_key_env"], "").strip()
+        if not token:
+            log.error(
+                "✗ system-agent %s — env %s is empty; cannot seed agents row. "
+                "Set helm value secrets.threatHuntingAgentLlmKey before "
+                "running db-seed.",
+                spec["name"], spec["llm_key_env"],
+            )
+            continue
+
+        existing = (await db.execute(
+            select(Agent).where(
+                Agent.name == spec["name"],
+                Agent.version == spec["version"],
+                Agent.tenant_id == "t1",
+            )
+        )).scalar_one_or_none()
+
+        if existing is None:
+            import secrets as _secrets
+            row = Agent(
+                id=uuid.uuid4(),
+                name=spec["name"], version=spec["version"],
+                agent_type=spec["agent_type"],
+                provider=spec["provider"],
+                owner=spec["owner"],
+                description=spec["description"],
+                risk=spec["risk"], policy_status=spec["policy_status"],
+                runtime_state=spec["runtime_state"],
+                # System agents render as inventory-only in the admin UI;
+                # the chat panel is gated off so operators don't try to
+                # chat with a service that doesn't expose chat.
+                kind="system",
+                code_path=spec["code_path"], code_sha256=spec["code_sha256"],
+                # mcp_token is NOT used by the threat-hunting agent (it
+                # doesn't expose an MCP server) but the column is NOT NULL
+                # so we mint a stable token to satisfy the schema.
+                mcp_token=_secrets.token_urlsafe(32),
+                llm_api_key=token,
+                tenant_id="t1",
+            )
+            db.add(row)
+            await db.flush()
+            log.info("  inserted system agent %s (key prefix=%s)",
+                     spec["name"], token[:8])
+            seeded += 1
+        else:
+            # Reconcile token (handles rotation), kind, ownership, and
+            # runtime_state without disturbing operator-edited description.
+            if existing.llm_api_key != token:
+                existing.llm_api_key = token
+                log.info("  rotated llm_api_key on system agent %s "
+                         "(new prefix=%s)", spec["name"], token[:8])
+                seeded += 1
+            if getattr(existing, "kind", None) != "system":
+                existing.kind = "system"
+            if existing.owner != spec["owner"]:
+                existing.owner = spec["owner"]
+            if existing.provider != spec["provider"]:
+                existing.provider = spec["provider"]
+
+    await db.commit()
+    return seeded
+
+
 async def ensure_schema() -> None:
     """Create all tables defined on `spm.db.models.Base` if they don't exist.
 
@@ -458,6 +575,14 @@ async def main() -> int:
             log.info("✓ PostureSnapshot: seeded %d snapshots", n)
         except Exception as e:
             log.error("✗ seed_posture_snapshots failed: %s", e, exc_info=True)
+            errors += 1
+
+    async with factory() as db:
+        try:
+            n = await seed_system_agents(db)
+            log.info("✓ system-agents: seeded/reconciled %d row(s)", n)
+        except Exception as e:
+            log.error("✗ seed_system_agents failed: %s", e, exc_info=True)
             errors += 1
 
     if errors:

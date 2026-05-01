@@ -389,6 +389,18 @@ class RuntimeState(str, enum.Enum):
     crashed = "crashed"
 
 
+class AgentKind(str, enum.Enum):
+    """Distinguishes customer-uploaded agents from platform-internal
+    system services that happen to need an ``agents`` row (so they get
+    a real ``llm_api_key`` accepted by spm-llm-proxy and show up in the
+    inventory). Customer agents render the chat surface in the admin
+    UI; system agents render an inventory row only — no chat, no
+    "Open Chat" button — because they are not interactive.
+    """
+    customer = "customer"
+    system   = "system"
+
+
 class ChatRole(str, enum.Enum):
     """Role of messages in a chat session."""
     user = "user"
@@ -415,6 +427,11 @@ class Agent(Base):
     risk         = Column(Enum(ModelRiskTier, name="model_risk_tier"), default=ModelRiskTier.low)
     policy_status= Column(Enum(PolicyCoverage, name="policy_coverage"), default=PolicyCoverage.none)
     runtime_state= Column(Enum(RuntimeState, name="runtime_state"), nullable=False, default=RuntimeState.stopped)
+    # Customer-uploaded vs. platform-internal system agent. System
+    # agents (threat-hunting-agent, etc.) keep an inventory row +
+    # llm_api_key so they pass spm-llm-proxy auth, but the admin UI
+    # does NOT render a chat window for them.
+    kind         = Column(Enum(AgentKind, name="agent_kind"), nullable=False, default=AgentKind.customer)
     code_path    = Column(Text, nullable=False)
     code_sha256  = Column(Text, nullable=False)
     # Phase 4 — full text of the customer's agent.py at registration

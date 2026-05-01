@@ -39,6 +39,20 @@ spec:
               value: "20"
             - name: LOG_LEVEL
               value: "INFO"
+            # Bearer token used by the agent's OpenAI-compatible client to
+            # authenticate with spm-llm-proxy. The proxy validates the
+            # bearer token against the agents.llm_api_key column.
+            # Single source of truth: platform-secrets's
+            # THREAT_HUNTING_AGENT_LLM_KEY field. seed_db.py (called by
+            # the db-seed Job) reads the same env var and writes the
+            # token into agents.llm_api_key — DB and deployment are
+            # always in sync because both read the same Secret value.
+            # Rotation: update helm value + re-run db-seed.
+            - name: AGENT_LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: platform-secrets
+                  key: THREAT_HUNTING_AGENT_LLM_KEY
           readinessProbe:
             httpGet: { path: /health, port: 8095 }
             initialDelaySeconds: 20

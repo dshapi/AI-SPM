@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from pydantic_settings import BaseSettings
 
 
@@ -6,17 +7,26 @@ from pydantic_settings import BaseSettings
 TENANT_ID = "t1"
 
 
-# ─── Hardcoded LLM backend (OrbStack k8s → host Ollama) ──────────────────────
-# Intentionally NOT exposed as env-configurable Settings fields so that
-# hydrate_env_from_db() and stale shell exports cannot override them.
+# ─── LLM backend (cluster-routed via spm-llm-proxy) ──────────────────────────
+# The threat-hunting agent's reasoning LLM is reached through the
+# in-cluster ``spm-llm-proxy`` Service, which exposes an OpenAI-compatible
+# ``/v1`` endpoint and proxies to whichever upstream model is configured
+# at the platform level (Groq, Ollama, Anthropic-via-shim, etc.).
 #
-# From inside an OrbStack k8s pod, the host is reachable at host.lima.internal
-# (host.docker.internal is a docker-engine-only alias and does NOT resolve
-# inside k8s pods).  Run `getent hosts host.lima.internal` from inside a pod
-# to confirm; on newer OrbStack builds host.orb.internal also resolves.
-HUNT_MODEL    = "llama3.2"
-GROQ_BASE_URL = "http://host.lima.internal:11434/v1"
-GROQ_API_KEY  = "local"   # any non-empty string — Ollama ignores it
+# History: this was originally hardcoded to ``http://host.lima.internal:11434/v1``
+# for an OrbStack k8s setup that ran Ollama on the host. After the move
+# to Docker Desktop kind, that hostname does not resolve from inside
+# pods and DNS errors floored every hunt cycle. The cluster Service
+# resolves cleanly and lets the agent run regardless of which upstream
+# the platform has rotated to. Env-overridable via AGENT_LLM_BASE_URL
+# for non-default deployments. Variable name kept as ``GROQ_BASE_URL``
+# for backward-compat with existing import sites.
+HUNT_MODEL = os.environ.get("HUNT_MODEL", "llama3.2")
+GROQ_BASE_URL = os.environ.get(
+    "AGENT_LLM_BASE_URL",
+    "http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1",
+)
+GROQ_API_KEY = os.environ.get("AGENT_LLM_API_KEY", "local")  # any non-empty
 
 
 class Settings(BaseSettings):
