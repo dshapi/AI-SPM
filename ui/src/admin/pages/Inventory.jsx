@@ -43,7 +43,10 @@ const ASSETS = {
     { id: 'ag-002', name: 'CodeReview-Assistant',      type: 'OpenAI Assistant',   risk: 'Medium',   owner: 'devex-team',     provider: 'Azure', policyStatus: 'full',    lastSeen: '14m ago',  description: 'Automated code review agent for PR analysis. Reads GitHub diffs, outputs structured feedback.', linkedPolicies: ['CodeScan v1'],                      linkedAlerts: 0 },
     { id: 'ag-003', name: 'DataPipeline-Orchestrator', type: 'AutoGPT',            risk: 'Critical', owner: 'data-eng',       provider: 'GCP',   policyStatus: 'none',    lastSeen: '1h ago',   description: 'Orchestrates multi-step ETL pipelines. Has write access to production databases.', linkedPolicies: [],                                       linkedAlerts: 5 },
     { id: 'ag-004', name: 'HRIntake-Bot',              type: 'LlamaIndex Agent',   risk: 'Low',      owner: 'people-ops',     provider: 'AWS',   policyStatus: 'full',    lastSeen: '3h ago',   description: 'Handles new employee onboarding queries. Access to HR knowledge base only.', linkedPolicies: ['PII-Guard v2', 'Access-Scope v3'],      linkedAlerts: 0 },
-    { id: 'ag-005', name: 'ThreatHunter-AI',           type: 'LangChain Agent',    risk: 'High',     owner: 'security-ops',   provider: 'Internal', policyStatus: 'partial', lastSeen: 'live', description: 'Real-time threat hunting agent. Consumes Kafka events across all tenants, correlates AI-layer and infrastructure signals, and opens findings for human investigation. Powered by Groq llama-3.3-70b-versatile.', linkedPolicies: ['Audit-Log v1', 'OPA-Policy v1'], linkedAlerts: 0 },
+    // ThreatHunter-AI mock removed — the real Threat-Hunting-Agent is now
+    // a live row sourced from /api/spm/agents (db-seeded as a SYSTEM agent
+    // by services/spm_api/seed_db.py:SYSTEM_AGENTS). Keeping a hardcoded
+    // mock alongside the live row produced duplicate inventory entries.
   ],
   models: [
     { id: 'md-001', name: 'gpt-4-turbo',              type: 'LLM',                risk: 'High',     owner: 'ml-platform',    provider: 'Azure', policyStatus: 'partial', lastSeen: '1m ago',   description: 'Primary completion model. Used by 8 downstream agents. Context window 128k tokens.', linkedPolicies: ['Output-Filter v2'],                   linkedAlerts: 3 },

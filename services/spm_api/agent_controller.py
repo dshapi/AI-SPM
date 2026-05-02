@@ -471,6 +471,25 @@ async def _db_delete(db, obj) -> None:
 
 # ─── 5. High-level lifecycle (unchanged logic) ────────────────────────────────
 
+def _is_system_agent(agent) -> bool:
+    """Detect a system-managed agent (deployed externally, not via code-blob).
+
+    System agents (e.g. ``Threat-Hunting-Agent``) ship as ordinary k8s
+    Deployments managed by the Helm chart, NOT as user-uploaded agent
+    Pods spawned from a DB-stored ``code_blob``.  Their ``code_path`` is
+    set to ``k8s://<deployment-name>`` by ``services/spm_api/seed_db.py:
+    SYSTEM_AGENTS`` to encode this contract.
+
+    The lifecycle endpoints (``deploy_agent`` / ``start_agent`` / ``stop_agent``)
+    must short-circuit on these rows — calling ``spawn_agent_pod`` for a
+    system agent fails because there is no ``code_blob`` to mount as a
+    ConfigMap, and even if one existed the chart-managed Deployment would
+    fight the spawned Pod for the same role.
+    """
+    code_path = getattr(agent, "code_path", "") or ""
+    return code_path.startswith("k8s://")
+
+
 async def deploy_agent(db, agent_id) -> None:
     """Deploy: create topics → mark starting → spawn Pod → poll ready."""
     from spm.db.models import Agent  # type: ignore
@@ -478,6 +497,20 @@ async def deploy_agent(db, agent_id) -> None:
     a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
+
+    # System agents (code_path: k8s://...) are managed by the Helm chart
+    # as Deployments. ``deploy/start/stop`` from the UI is a no-op for
+    # them — the chart owns the lifecycle. We mark runtime_state=running
+    # so the inventory reflects reality (the Deployment IS up by chart
+    # contract) and return without invoking spawn_agent_pod.
+    if _is_system_agent(a):
+        log.info(
+            "deploy_agent: %s is a system-managed agent (%s); skipping pod spawn",
+            agent_id, a.code_path,
+        )
+        a.runtime_state = "running"
+        await _db_commit(db)
+        return
 
     code_blob = getattr(a, "code_blob", None)
     if not code_blob:
@@ -549,6 +582,18 @@ async def start_agent(db, agent_id) -> None:
     if a.runtime_state == "running":
         return
 
+    # System-managed agents are owned by the chart; treat the UI-side
+    # start as a state-sync rather than a pod spawn. See _is_system_agent
+    # for the contract.
+    if _is_system_agent(a):
+        log.info(
+            "start_agent: %s is a system-managed agent (%s); marking running, "
+            "no pod spawn", agent_id, a.code_path,
+        )
+        a.runtime_state = "running"
+        await _db_commit(db)
+        return
+
     code_blob = getattr(a, "code_blob", None)
     await spawn_agent_pod(
         agent_id=str(a.id),
@@ -568,6 +613,19 @@ async def stop_agent(db, agent_id) -> None:
     a = await _db_get(db, Agent, agent_id)
     if a is None:
         raise ValueError(f"agent {agent_id!r} not found")
+
+    # System-managed agents are owned by the chart's Deployment — we don't
+    # delete those Pods from the UI. Just record the desired state in the
+    # DB; an operator wanting to actually stop the Deployment uses
+    # `kubectl scale deployment/<name> --replicas=0`.
+    if _is_system_agent(a):
+        log.info(
+            "stop_agent: %s is a system-managed agent (%s); marking stopped, "
+            "no Pod delete (Deployment unaffected)", agent_id, a.code_path,
+        )
+        a.runtime_state = "stopped"
+        await _db_commit(db)
+        return
 
     await stop_agent_pod(str(a.id))
     a.runtime_state = "stopped"

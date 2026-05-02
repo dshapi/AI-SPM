@@ -270,14 +270,29 @@ secrets:
   tavilyApiKey: ""
   garakInternalSecret: ""
   spmInternalBootstrapSecret: ""
-  # Bearer token the threat-hunting-agent system service uses against
-  # spm-llm-proxy. Must be a 32-byte URL-safe random string. Generate:
+  # Bearer token the threat-hunting-agent system service sends in its
+  # Authorization header when calling spm-llm-proxy.
+  #
+  # IMPORTANT: spm-llm-proxy validates only that the header EXISTS; the
+  # token's value is not validated against any allowlist (the actual
+  # upstream LLM auth is done by the proxy using ANTHROPIC_API_KEY /
+  # GROQ_API_KEY hydrated from the integrations table). So a literal
+  # placeholder like "local" is sufficient for development — it keeps
+  # services/spm_api/seed_db.py from logging "key empty" and lets the
+  # agent satisfy spm-llm-proxy's "Field required" validator.
+  #
+  # For production, OVERRIDE in your environment-specific values file
+  # with a real 32-byte URL-safe random string:
   #   python3 -c 'import secrets; print(secrets.token_urlsafe(32))'
-  # services/spm_api/seed_db.py reads the env sourced from this value
-  # and writes it to agents.llm_api_key, keeping deployment + DB in
-  # sync. Empty means seed_db will log an error and the
-  # threat-hunting-agent deployment will fail auth at runtime.
-  threatHuntingAgentLlmKey: ""
+  # so each environment has a distinct token (audit-trail friendly,
+  # makes per-agent token revocation possible later).
+  #
+  # Symptom of regression (token empty after redeploy): threat-hunting-
+  # agent logs `LLM invocation failed ... 422 ... 'authorization' Field
+  # required` every scan cycle. Fix is to ensure this default value
+  # makes it into platform-secrets via the chart, instead of relying on
+  # a manual `kubectl patch` that gets reverted on the next helm upgrade.
+  threatHuntingAgentLlmKey: "local"
   grafanaAdminPassword: "admin"
 
 # ── Ingress ──────────────────────────────────────────────────────────────────

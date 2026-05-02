@@ -295,6 +295,50 @@ async def _seed_demo_models() -> None:
         log.warning("_seed_demo_models failed (non-fatal): %s", exc)
 
 
+async def _seed_system_agents_on_startup() -> None:
+    """Self-healing reconciliation of system-managed agent rows.
+
+    The chart's ``db-seed`` Job seeds these rows on first install, but real
+    clusters drift: someone swaps the DB (CNPG cluster swap → fresh empty
+    spm), the seed Job races startup-orchestrator on a re-install, an
+    operator runs `helm template | kubectl apply` (which doesn't trigger
+    Helm hooks at all), or the row gets manually deleted.  Without this
+    function the symptom is always the same: the threat-hunting-agent
+    Deployment is up and pumping events, but its ``agents`` table row is
+    missing — so clicking Start/Apply-Policy in the UI 500s, the
+    Inventory page misses the SYSTEM badge, and the agent's LLM auth
+    token isn't reconciled with what the chart deployed.
+
+    Calling ``seed_system_agents`` from the spm-api lifespan turns every
+    pod restart into a self-heal pass.  Idempotent (uses
+    ``WHERE name=... AND version=...``-scoped upserts), non-fatal (a
+    failure here never blocks API startup), and cheap (single SELECT +
+    optional INSERT).
+
+    Pairs with:
+      • Layer 1 — chart-level default for ``secrets.threatHuntingAgentLlmKey``
+        in values.yaml (so the env var is always non-empty).
+      • Layer 2 — _is_system_agent guard in services/spm_api/agent_controller
+        (so UI Start/Stop never tries to spawn a non-existent code-blob Pod).
+      • Layer 3 — this function (so the row always exists).
+    Three independent checks; loss of any one still leaves the system
+    functional via the other two.
+    """
+    try:
+        from seed_db import seed_system_agents  # type: ignore
+        from spm.db.session import get_session_factory
+
+        factory = get_session_factory()
+        async with factory() as db:
+            n = await seed_system_agents(db)
+            if n:
+                log.info("_seed_system_agents_on_startup: %d system-agent row(s) reconciled", n)
+            else:
+                log.debug("_seed_system_agents_on_startup: system agents already current")
+    except Exception as exc:
+        log.warning("_seed_system_agents_on_startup failed (non-fatal): %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create tables if they don't exist (fallback if migrations weren't run)
@@ -308,6 +352,11 @@ async def lifespan(app: FastAPI):
     # Seed demo models + posture history so Inventory / Posture pages are
     # populated on first deploy without any manual step.
     await _seed_demo_models()
+    # Self-healing reconciliation of SYSTEM agents (Threat-Hunting-Agent etc).
+    # Runs on every spm-api pod restart, idempotent, non-fatal — see the
+    # function docstring for the full rationale and how it pairs with the
+    # chart-default LLM token + the agent_controller system-agent guard.
+    await _seed_system_agents_on_startup()
     log.info("spm-api started")
     yield
     await get_engine().dispose()
