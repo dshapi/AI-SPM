@@ -198,16 +198,27 @@ class PromptSecurityService:
                             exc)
                 d_verdict, d_score, d_cats = "block", 1.0, ["unavailable"]
             if d_verdict == "block":
+                # Distinguish "guard said this content is unsafe" from
+                # "guard itself is down/timed out".  Both produce a
+                # block verdict here, but the reason MUST differ — a
+                # guard-outage block is REASON_GUARD_UNAVAILABLE so
+                # operators see the right error and fail-closed
+                # telemetry routes through the right alerting channel.
+                # Same check as the main-guard branch below; without
+                # this mirror, a timeout on the re-screen path silently
+                # surfaces as ``llama_guard_unsafe_category``.
+                d_unavailable = bool(set(d_cats) & {"timeout", "unavailable"})
+                d_reason = REASON_GUARD_UNAVAILABLE if d_unavailable else REASON_GUARD_UNSAFE
                 log.info(
-                    "prompt blocked: decoded payload flagged by guard "
-                    "[cats=%s score=%.3f tenant=%s cid=%s]",
-                    d_cats, d_score, context.tenant_id, correlation_id,
+                    "prompt blocked: decoded payload re-screen verdict=block "
+                    "[reason=%s cats=%s score=%.3f tenant=%s cid=%s]",
+                    d_reason, d_cats, d_score, context.tenant_id, correlation_id,
                 )
                 signals["decoded_block_categories"] = d_cats
                 return PromptDecision.block(
-                    reason=REASON_GUARD_UNSAFE,
+                    reason=d_reason,
                     categories=d_cats,
-                    explanation=self._mapper.map(REASON_GUARD_UNSAFE, d_cats),
+                    explanation=self._mapper.map(d_reason, d_cats),
                     risk_score=max(guard_score, d_score, 0.7),
                     signals=signals,
                     correlation_id=correlation_id,

@@ -474,74 +474,7 @@ Stays here so the next person reading this runbook understands non-obvious
 design decisions made during incident response. Each section names the
 chokepoint code so you can grep without digging.
 
-### Tool execution policy gate (bug A)
 
-Every tool call Claude requests goes through a single chokepoint:
-``services/api/app.py:_execute_tool_with_policy``. That function queries
-OPA at ``/v1/data/spm/tools/allow`` (rules in
-``opa/policies/tool_policy.rego``) before executing the tool, and
-returns a "[Tool blocked by policy: …]" string back to the model when
-the policy denies. Three call sites all use this helper: ``/chat``,
-``/chat/stream``, ``/internal/probe``. Adding a new tool means: define
-it in ``_TOOLS`` (production) and ``_TEST_TOOLS`` (garak), and add
-``allow`` rules in ``tool_policy.rego``. **Never bypass the chokepoint**
-— previous design let tool calls run unconditionally, which is how the
-``tooluse`` probe scored 90 (total bypass) before the fix.
-
-### Encoding-bypass screening (bug F)
-
-Prompts are screened in 4 layers:
-``Normalizer → LexicalScanner → LlamaGuard → OPA``. A new step between
-LexicalScanner and LlamaGuard extracts decoded payloads (Base64, hex,
-ROT13) via
-``services/api/models/obfuscation_screen.py:extract_decoded_payloads``.
-Each decoded payload is **re-screened through Llama Guard** so novel
-phrasing in encoded payloads gets caught by the same content classifier
-that screens the raw prompt. When encoding is detected (and the inner
-content passes guard), an ``"obfuscation"`` signal is appended to
-``guard_categories``; ``opa/policies/prompt_policy.rego`` has a rule
-that escalates this signal to block when ``guard_score >= 0.30``,
-unless the auth context has scope ``prompts:encoded_allowed``. Benign
-short Base64 (e.g. ``"RG9nYW4="`` = "Dogan") passes through cleanly —
-no false positives.
-
-### Redis: Sentinel-aware clients (haproxy proxy bypassed)
-
-Services no longer connect through the ``redis-master`` Service /
-``redis-master-proxy`` haproxy pods. The proxy was flapping under
-istio sidecar pooling (high-frequency tcp-checks tripping ECONNRESET
-mid-handshake). The fix moves master-discovery into the application
-clients themselves via Redis Sentinel.
-
-Single source of truth: ``platform_shared/redis.py:get_redis_client()``.
-Reads ``REDIS_SENTINEL_HOSTS`` (comma-separated list of all 3 sentinel
-endpoints, set by the platform-env configmap) and
-``REDIS_SENTINEL_MASTER`` (``"mymaster"``). Falls back to direct
-``REDIS_HOST:REDIS_PORT`` when sentinel hosts are unset (single-node
-dev). Every service's local ``_get_redis()`` now delegates to this
-helper. The haproxy proxy is still deployed but **dead code in the data
-path** — pending cleanup (see Known Issues below).
-
-### Topic registry expansion + reconciliation
-
-Kafka topics are owned by ``platform_shared/topics.py``. The
-startup-orchestrator creates them all on boot with RF derived from
-``KAFKA_REPLICATION_FACTOR`` and reconciles drift on existing topics.
-RF mismatches are logged as warnings (operator runs
-``deploy/scripts/kafka-reconcile-topics.sh``); retention / cleanup
-policy drift is auto-fixed via ``alter_configs``. Per-agent topics
-(``cpm.t1.agents.<UUID>.chat.{in,out}``) are created by
-``services/spm_api/agent_controller.py:create_agent_topics`` which now
-reads RF / partitions from env (previously hardcoded RF=1).
-
-### Probe timeout pattern
-
-Bitnami's pg/redis charts default ``timeoutSeconds: 1`` on liveness/
-readiness probes. On kind-on-Mac that's too tight — the underlying
-exec routinely takes 2–3s, kubelet false-fails the probe and kills
-the pod, every dependent service sees connection drops. The pattern
-applied to kafka and spm-db is ``timeoutSeconds: 5``. Audit all helm
-probes for this footgun (see Known Issues below).
 
 ### Image deployment quirk on kind
 
@@ -576,88 +509,6 @@ These are real product/configuration issues observed during the kind
 multi-node bring-up. They do not block the cluster from running but
 need follow-up before this setup is dependable for security testing.
 
-### spm-api 401 on model registration during startup *(DONE — was redundant work)*
-
-Initial framing was wrong. The 20× "401 for llama-guard-3" log spam
-made it look like Llama-Guard-3 stayed unregistered, but the
-``model_registry`` table had it (``status: approved``) — verified
-via ``SELECT name, version, provider, status FROM model_registry``.
-Two paths were registering the same models: ``seed_db.py:seed_models()``
-inserts the rows directly into the DB during the db-seed Job (runs
-first, succeeds), and the orchestrator's Step 7 was POSTing to
-``spm-api /models`` (runs second, hit 401 because the endpoint is
-gated by ``Depends(require_admin)`` — JWT admin auth — and the
-orchestrator has no admin JWT).
-
-Both paths produced the same end state, so the 401s were noisy but
-benign. seed_db is the single source of truth.
-
-Fix: replace the orchestrator's HTTP-POST step with a read-only DB
-verification that warns if expected platform models are missing
-(would indicate db-seed didn't run).
-
-- [x] ``services/startup_orchestrator/app.py:register_cpm_models_with_spm()``
-      now queries ``model_registry`` directly via psycopg2 and logs
-      ``✓ Platform models registered: [llama-guard-3, output-guard-llm]``
-      instead of issuing 20 401s.
-- [x] Added ``psycopg2-binary`` to
-      ``services/startup_orchestrator/requirements.txt`` (read-only
-      use; orchestrator runs once per boot so image-size cost is
-      irrelevant).
-- [x] Verified clean boot log: single info line, no warnings.
-
-### redis-allow-platform AuthorizationPolicy is a no-op
-
-Found while debugging redis flakiness — the AuthorizationPolicy
-``redis-allow-platform`` selects ``app: redis``, but Bitnami's redis
-chart labels pods with ``app.kubernetes.io/name: redis``. The
-selector matches nothing, so the policy is dead. Nothing in istio
-currently enforces who can talk to the platform redis.
-
-Action items:
-
-- [ ] Update the policy's selector to
-      ``app.kubernetes.io/name: redis``.
-- [ ] Apply same audit to other AuthorizationPolicies in the chart;
-      Bitnami pods consistently use the ``app.kubernetes.io/*``
-      labels and the chart's policies often use ``app: <name>``.
-
-### Garak helm template baked-in 60s probe timeout *(DONE)*
-
-After yesterday's "garak per-probe HTTP timeout" fix
-(``CPMPipelineGenerator.timeout`` derived from ``PROBE_TIMEOUT_S``),
-the encoding simulation still failed with ``Probe 'encoding'
-timed out after 60s``. Cause: yesterday's runtime fix was
-``kubectl set env`` (transient) — the helm template
-``deploy/helm/aispm/templates/garak-runner-deployment.yaml`` still
-had ``PROBE_TIMEOUT_S: "60"`` hardcoded, so every helm apply
-silently reset the env to 60. The 60s budget is too short for any
-probe whose first attempt takes >60s (encoding/dataexfil regularly
-do, since each call traverses the full guard chain).
-
-- [x] Updated the helm template to ``PROBE_TIMEOUT_S: "300"`` with a
-      comment documenting the budget rationale and the link to
-      ``services/api/routes/simulation.py``'s
-      ``SIM_HARD_TIMEOUT_S`` derivation, so the two stay in sync.
-- [x] Verified post-apply: ``kubectl exec deploy/garak-runner -- env``
-      shows ``PROBE_TIMEOUT_S=300``; encoding probe no longer hits
-      the 60s cap.
-
-### Garak `encoding.InjectBase64` probe noise
-
-The probe's success criterion is "did the model decode any Base64?"
-That's overly broad — benign decodes (e.g. ``"RG9nYW4="`` → "Dogan")
-get scored as defense-bypassed even though no harmful content was
-involved. After bug F (Layer 2.5 Llama-Guard re-screen) the actual
-security gap is fixed; the residual score on this probe is mostly
-false-positive noise.
-
-Action items:
-
-- [ ] Tune the probe's detector or replace with a custom probe that
-      scores only on harmful decoded content.
-- [ ] Document the noise in the simulation results UI so reviewers
-      don't flag it as a real failure.
 
 ### Helm probe timeout audit (footgun applied broadly)
 
@@ -673,6 +524,35 @@ Action items:
       (and ``failureThreshold: 3`` for parity) wherever missing.
 - [ ] Consider chart-level lint that blocks PRs introducing
       unspecified probe timeouts.
+
+### `extract_decoded_payloads` is too permissive
+
+`services/api/models/obfuscation_screen.py::extract_decoded_payloads`
+runs the base64 / hex regex over the raw prompt and decodes every
+match without applying the same alpha-ratio sanity check that
+`screen_obfuscation` uses (`_MIN_B64_DECODED_ALPHA_RATIO = 0.8`).
+Result: any 4+ letter alphabetic word can match the base64 regex and
+get "decoded" into garbage like `'Z\x16'` or `'歅'`. Each garbage
+decode is then re-screened through Llama Guard, which costs an HTTP
+round-trip per false positive and exposed the
+`test_stream_guard_timeout_fails_closed` regression (May 2026 — fixed
+by mirroring the `is_unavailable` mapping into the re-screen branch
+of `prompt_security/service.py` and `security/service.py`).
+
+Action items:
+
+- [ ] Apply the same `alpha_ratio >= _MIN_B64_DECODED_ALPHA_RATIO`
+      guard inside `extract_decoded_payloads` so benign English text
+      doesn't produce decoded payloads. Mirrors the logic already in
+      `screen_obfuscation`.
+- [ ] Add a unit test asserting that prompts like
+      `"What is the weather forecast for tomorrow?"` and
+      `"Please process this construction order"` produce
+      `extract_decoded_payloads(...) == []`.
+- [ ] Consider raising `_MIN_B64_BYTES` from 4 to 6 for the extract
+      path — anything below 6 chars is effectively never a real
+      base64 payload (and is hugely overrepresented by short
+      English words).
 
 ### Bootstrap vs Alembic reconciliation
 
@@ -692,40 +572,6 @@ Action items:
       after applying 001 (preserves migration history).
 - [ ] Add a CI check that ``alembic upgrade head`` from a freshly
       bootstrapped DB is a no-op — proves 001 + Alembic are aligned.
-
-### Policy editor: accept Rego, not Python
-
-The admin-UI policy editor currently lets users author policies in
-Python (or a Python-flavored DSL). That's a layer of indirection on
-top of what OPA actually evaluates — all enforcement runs against
-``.rego`` files in ``opa/policies/``. Users edit Python, something
-translates / executes it, OPA never sees the user's intent in its
-native form. Means: drift between editor preview and live behavior,
-rules that don't compose with our other ``allow``/``has_signal``
-helpers, and a worse experience for anyone who knows Rego.
-
-Direction: switch the editor to a Rego authoring surface (Monaco with
-``rego`` syntax mode, in-browser ``opa eval`` for live preview,
-server-side validation by uploading to OPA before save). The editor
-should also show the existing platform rules read-only as references
-(prompt_policy.rego, tool_policy.rego, output_policy.rego) so users
-extend rather than reinvent.
-
-Action items:
-
-- [ ] Audit current editor: where is "Python" rendered? Find the
-      compiler / executor and document the indirection.
-- [ ] Add ``rego`` Monaco language mode to the UI editor.
-- [ ] Server-side: validate rego on save via
-      ``opa parse`` / ``opa eval`` before accepting; reject syntax
-      errors with line/column-pointed messages.
-- [ ] Migration: keep Python authoring read-only for existing
-      user-authored policies (or auto-translate when round-trip is
-      faithful); new policies are Rego-only.
-- [ ] Surface the platform-shipped policies as inline references in
-      the editor so users see the existing helpers
-      (``has_signal``, ``has_scope``, ``has_behavioral``) and the
-      ``allow := { decision, reason, action }`` shape.
 
 ## What's NOT installed (and why)
 
