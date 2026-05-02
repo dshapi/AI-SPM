@@ -176,6 +176,25 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   selector: { app: flink-jobmanager }
+  # ── HA bootstrap requirement ──────────────────────────────────────────
+  # JobManager HA is a Pekko cluster between flink-jobmanager-{0,1}.  Each
+  # pod resolves its peer via the per-pod DNS form
+  # (flink-jobmanager-1.flink-jobmanager.{ns}.svc.cluster.local) and joins
+  # the lease.  By default kube-dns/CoreDNS only publishes endpoints whose
+  # pod is Ready=true.  But during a rolling restart (or any cascading
+  # incident — Istio probe failure, containerd restart, OOM) BOTH JMs can
+  # be NotReady at the same instant; DNS then refuses to publish either,
+  # and each pod fails to bootstrap with java.net.UnknownHostException —
+  # a deadlock that only resolves on operator intervention.
+  #
+  # publishNotReadyAddresses=true tells kube-dns to publish endpoints
+  # regardless of readiness, breaking the cycle.  Same fix-pattern we
+  # already applied to the kafka headless service (templates/kafka-
+  # service.yaml) for the KRaft quorum bootstrap, for the same reason.
+  # The cost is purely cosmetic: external clients hitting the ClusterIP
+  # may briefly hit a NotReady pod, but Flink JM HA decides leadership
+  # by lease, so a NotReady JM still routes correctly.
+  publishNotReadyAddresses: true
   ports:
     - name: rest
       port: 8081

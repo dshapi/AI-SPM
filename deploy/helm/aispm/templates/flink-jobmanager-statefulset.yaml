@@ -40,6 +40,23 @@ spec:
   template:
     metadata:
       labels: { app: flink-jobmanager }
+      annotations:
+        # ── Stay out of the Istio mesh ────────────────────────────────────
+        # When kubelet probes a sidecar-injected pod, Istio rewrites the
+        # probe to go through pilot-agent's :15020 status port and proxies
+        # to the actual app port (here :8081 — Flink REST/Web UI).  During
+        # JM startup the Pekko cluster + Flink dispatcher take 10-30s to
+        # bind :8081, but Istio's probe-rewrite kicks in immediately;
+        # every probe gets "connection refused" until the app is up.  If
+        # ANY probe in that window fails liveness threshold, kubelet
+        # restarts the pod — and the pod can never out-pace the race.
+        # Observed 2026-05-02: 9 restarts in 5 hours per JM.  Disabling
+        # sidecar injection sidesteps the rewrite entirely; Flink JMs do
+        # their own internal RPC over Pekko TCP and don't gain anything
+        # from mesh mTLS.  Apps that talk TO the JMs (UI, agent-
+        # orchestrator) stay in the mesh — only the JM pods themselves
+        # are exempt.
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: flink
       # ── Spread JM replicas across nodes (multi-node clusters) ─────────────

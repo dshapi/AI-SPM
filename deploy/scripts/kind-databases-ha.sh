@@ -97,6 +97,28 @@ spec:
   instances: ${PG_INSTANCES}
   imageName: ghcr.io/cloudnative-pg/postgresql:16.4-bookworm
 
+  # ── Stay out of the Istio mesh ──────────────────────────────────────────
+  # CNPG instances pass labels/annotations declared here through to the
+  # generated Pods.  We use that to disable Istio sidecar injection on
+  # every Postgres instance.
+  #
+  # Why: Istio rewrites kubelet probes to route through pilot-agent, then
+  # proxies them to the actual app port (here :8000 — CNPG's
+  # instance-manager health endpoint).  Under any kind of pressure
+  # (containerd restart cascade, replica catch-up, OOM) instance-manager
+  # answers slowly, the rewritten probe times out, kubelet kills the pod,
+  # CNPG restarts it, repeat.  Observed 2026-05-02 — 96 restarts on
+  # spm-db-1 in 43h.
+  #
+  # CNPG already does its own internal mTLS between primary and standbys
+  # for replication, and apps reach Postgres via plain SQL/TCP through
+  # the read-write service.  Mesh mTLS adds nothing here.  Apps stay in
+  # the mesh and reach the rw/ro/r services fine — only the Postgres
+  # instance pods themselves are exempt.
+  inheritedMetadata:
+    annotations:
+      sidecar.istio.io/inject: "false"
+
   # Spread instances across nodes so a node loss only takes one Postgres
   # replica down. Required topology spread, not preferred — we have 3
   # nodes and 3 instances so this fits exactly.
@@ -193,6 +215,27 @@ _install_redis_ha() {
     --set replica.persistence.enabled=true \
     --set replica.persistence.size=2Gi \
     --set replica.persistence.storageClass=standard \
+    \
+    `# ── Probe-timeout overrides (sentinel container) ─────────────────` \
+    `# The Bitnami chart defaults timeoutSeconds to 1 on the sentinel`    \
+    `# liveness/readiness exec probes (/health/ping_sentinel.sh).  That` \
+    `# probe forks bash + redis-cli inside the script, which under any`  \
+    `# CPU contention exceeds 1s and trips kubelet's failureThreshold.`  \
+    `# Same class of footgun as the Kafka kafka-broker-api-versions`     \
+    `# probe we lengthened earlier (5s now).  Observed 2026-05-02:`      \
+    `# redis-node-{0,1,2} sentinel containers at 18 / 9 / 13 cumulative` \
+    `# restarts over 44h — masked real degradations and noised up`       \
+    `# incident review.  5s gives bash room to breathe; real sentinel`   \
+    `# hangs still trip failureThreshold.`                               \
+    --set sentinel.livenessProbe.timeoutSeconds=5 \
+    --set sentinel.readinessProbe.timeoutSeconds=5 \
+    `# Mirror the same fix on the redis-server container — its probe is` \
+    `# also a shell exec (/health/ping_liveness_local.sh) with the same` \
+    `# 1s default.`                                                     \
+    --set master.livenessProbe.timeoutSeconds=5 \
+    --set master.readinessProbe.timeoutSeconds=5 \
+    --set replica.livenessProbe.timeoutSeconds=5 \
+    --set replica.readinessProbe.timeoutSeconds=5 \
     --wait --timeout=10m
 
   _log "  ✓ Redis HA Ready (1 master + 3 replicas + 3 sentinels)"

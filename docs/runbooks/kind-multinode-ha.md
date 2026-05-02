@@ -554,6 +554,131 @@ Action items:
       base64 payload (and is hugely overrepresented by short
       English words).
 
+### `install-gvisor.sh` only patches the host VM, not each kind node
+
+The Job-based installer mounts the **host VM**'s `/etc/containerd` via
+`hostPath` and chroots in.  But kind nodes are containers running
+*inside* that VM with their own filesystems and their own containerd
+instances; the host-VM chroot never reaches them.  Today: only
+`aispm-control-plane2` had `runsc` installed (mechanism unknown — likely
+a manual run); the other two nodes silently lacked it.  Custom-agent
+pods scheduled to the unpatched nodes failed sandbox-create with:
+
+    failed to get sandbox runtime: no runtime for "runsc" is configured
+
+Manual recovery was a `docker cp` loop pushing `runsc`,
+`containerd-shim-runsc-v1`, and `runsc.toml` into each missing node,
+then appending the `runtimes.runsc` block to the node's
+`/etc/containerd/config.toml` and restarting containerd.
+
+Action items:
+
+- [x] Refactor `deploy/scripts/install-gvisor.sh` to enumerate kind
+      nodes (`docker ps --filter label=io.x-k8s.kind.role`) and `docker
+      exec` the binary install + config patch into each one.
+- [ ] Add an idempotency check that re-runs of the script on a fully
+      patched cluster are zero-write (verify `runsc` already present,
+      `runtimes.runsc` already in config).
+- [ ] CI smoke test: `kubectl apply -f` a pod with
+      `runtimeClassName: gvisor` + `nodeSelector` for every node, assert
+      all reach Running.
+
+### Istio sidecar probe-rewrite race on slow-starting apps
+
+When a sidecar-injected pod has a kubelet probe, Istio rewrites the
+probe to go through `pilot-agent`'s status port (`:15020`), which
+proxies to the actual app port (e.g. CNPG instance-manager `:8000`,
+Flink JM `:8081`, OPA `:8181`).  If the app takes longer than the
+probe's `failureThreshold * periodSeconds` window to bind that port,
+every probe in the startup window 503s, kubelet kills the pod, the new
+pod hits the same window — a crashloop the pod can never out-pace.
+Documented victims this session:
+
+- CNPG (spm-db-{1,2,3}): 96, 64, 75 restarts in 43h
+- Flink JobManager: 9 restarts in 5h
+- Flink TaskManager: silent restarts whenever JMs flapped
+- OPA: probe-rewrite errors during the istiod restart cascade
+
+The cluster-wide fix would be `holdApplicationUntilProxyStarts: true` in
+the mesh `MeshConfig`, which makes apps wait for the sidecar before
+their own probes run.  Until that's enabled cluster-wide, the local
+escape hatch is `sidecar.istio.io/inject: "false"` on the affected
+pod's annotations — already applied in this chart for kafka, redis,
+spm-db (legacy), Flink JM, Flink TM, OPA, and the CNPG Cluster CR
+(via `inheritedMetadata` in `kind-databases-ha.sh`).  Apps that talk
+TO these services stay in the mesh and reach them via ClusterIP fine —
+only the stateful pods themselves are exempt.
+
+Action items:
+
+- [ ] Enable `holdApplicationUntilProxyStarts: true` in the mesh
+      `MeshConfig` so future stateful infra doesn't need a per-pod
+      exemption.
+- [x] Document the exemption pattern in chart templates so a future
+      contributor adding (say) Elasticsearch or ClickHouse knows to
+      apply the same annotation.
+- [ ] Audit policy-simulator, threat-hunting-agent, agent-orchestrator,
+      grafana, prometheus — any service the events log shows hitting
+      `:15020/app-health/...readyz context deadline exceeded` regularly
+      may need the exemption too.
+
+### Headless-service HA bootstrap needs `publishNotReadyAddresses: true`
+
+CoreDNS by default only publishes EndpointSlice members whose pod is
+`Ready=true`.  But for any HA cluster that bootstraps via per-pod DNS
+(StatefulSet pods discovering peers by name), there's a chicken-and-egg
+window: pod-0 needs pod-1's IP to bootstrap → pod-1 isn't Ready yet
+because it's also bootstrapping → DNS returns NXDOMAIN for both →
+deadlock.  Fixes itself eventually if the bootstrap retry loop
+out-paces the readiness probe, but during incident recovery (everyone
+bouncing simultaneously) the loop loses and one or both pods sit in
+permanent `UnknownHostException`.
+
+Today: Flink JobManager hit this with `java.net.UnknownHostException:
+flink-jobmanager-1.flink-jobmanager.aispm.svc.cluster.local`.  Same
+fix-pattern as the Kafka KRaft quorum (already in the chart):
+`publishNotReadyAddresses: true` on the headless service.  Cost is
+purely cosmetic — external clients hitting the ClusterIP may briefly
+hit a NotReady pod, but HA-cluster-aware clients (Pekko, KRaft
+Raft) handle that fine.
+
+Action items:
+
+- [x] `flink-jobmanager` service — added in this session.
+- [ ] Audit every other headless service backing a StatefulSet
+      (`kafka` already has it).  Check Redis Sentinel's headless
+      service if/when we move to a real StatefulSet.
+
+### Redis Sentinel probe `timeoutSeconds: 1` is too aggressive
+
+`redis-node-{0,1,2}` accumulated 18 / 9 / 13 sentinel-container
+restarts (the third container, name `sentinel`) over the cluster's 44h
+lifetime.  The probe is a shell exec
+(`/bin/bash -ec /health/ping_sentinel.sh 1`) with
+`timeoutSeconds: 1` — every probe forks bash + the redis-cli
+inside the script, which under any kind of CPU contention exceeds 1s.
+Same class of footgun as the Kafka `kafka-broker-api-versions` exec
+probe we lengthened earlier this session (5s now, was 1s).
+
+Pods stay Ready because the failureThreshold is high enough to absorb
+intermittent timeouts, but the restart counter ticks up every time a
+probe loses against contention — masking real degradations and
+scaring operators who see double-digit RESTARTS during incident
+review.
+
+Action items:
+
+- [x] Bump `timeoutSeconds` to 5 on the Bitnami Redis Sentinel
+      readiness/liveness probes.  Knob is at
+      `sentinel.livenessProbe.timeoutSeconds` and
+      `sentinel.readinessProbe.timeoutSeconds` in the Bitnami chart.
+- [x] Apply via `--set` flag in
+      `deploy/scripts/kind-databases-ha.sh::_install_redis_ha()` so the
+      bump is captured in source, not just one operator's helm
+      install command.  (Same `--set` for `master`/`replica` probes.)
+- [ ] Existing live cluster: the bump only affects new pods.  After
+      this change lands, run `kubectl -n aispm-data delete pod -l app.kubernetes.io/name=redis` to recycle the existing pods so they pick up the new timeout.
+
 ### Bootstrap vs Alembic reconciliation
 
 Fresh installs apply ``spm/db/migrations/001_initial.sql`` to

@@ -93,6 +93,33 @@ platformEnv:
   REDIS_SENTINEL_URL:    "redis://redis.aispm.svc.cluster.local:26379"
   REDIS_SENTINEL_MASTER: "mymaster"
 
+# ── Custom-agent sandbox runtime ─────────────────────────────────────────────
+# User-uploaded custom agents are arbitrary Python code by definition — they
+# get a full Pod with whatever entrypoint the operator pushed.  Running them
+# under the host kernel means a single agent-side syscall bug (or deliberate
+# escape attempt) reaches every other tenant on the same node.  gVisor's
+# userspace kernel (runsc) intercepts every syscall and refuses anything
+# outside the sandbox model, so the attack surface drops from "the host
+# kernel" to "gVisor's syscall whitelist" — a much narrower target.
+#
+# Plumbing already in place (no template change needed):
+#   agentRuntime.runtimeClassName  → spm-api env AGENT_RUNTIME_CLASS
+#                                  → services/spm_api/agent_controller.py
+#                                    _build_pod(runtime_class_name=...)
+#                                  → every spawned Pod's spec.runtimeClassName
+#
+# System agents (threat-hunting-agent, etc.) are deployed via the chart
+# directly, NOT through _build_pod(), so they keep using the default host
+# runtime — they need ptrace/perf for their security-monitoring work and
+# would error under runsc.  This knob ONLY hits user-uploaded agents.
+#
+# Prerequisite: the gvisor RuntimeClass must exist in the cluster.  Created
+# by deploy/scripts/install-gvisor.sh which patches containerd on every
+# node; idempotent.  If you flipped this on without running that first, the
+# scheduler will reject the pod with "RuntimeClass gvisor not found".
+agentRuntime:
+  runtimeClassName: gvisor
+
 # ── Per-image registry overrides (Mac Docker → kind nodes) ──────────────
 # kind nodes pull from the local registry on the host at localhost:5001
 # (Docker Desktop hijacks 5000). The kind-cluster.sh init wires this up

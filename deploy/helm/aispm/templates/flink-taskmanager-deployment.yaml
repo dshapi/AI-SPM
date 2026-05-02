@@ -13,6 +13,11 @@ spec:
   template:
     metadata:
       labels: { app: flink-taskmanager }
+      annotations:
+        # Same probe-rewrite race the JM hits — see comment in
+        # flink-jobmanager-statefulset.yaml.  TMs talk to JMs and Kafka
+        # over plain TCP/Pekko, no benefit from sidecar mTLS.
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: flink
       # Spread TM replicas across nodes on multi-node clusters so slot

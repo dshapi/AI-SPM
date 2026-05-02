@@ -11,6 +11,17 @@ spec:
   template:
     metadata:
       labels: { app: opa }
+      annotations:
+        # Stay out of the Istio mesh.  OPA's startup is fast (~1s) but
+        # the static-build image ships busybox-only — no nslookup, no
+        # curl — and Istio's pilot-agent probe-rewrite has tripped over
+        # the same window before.  More importantly: OPA's only inbound
+        # traffic is from the policy_decider service on :8181, both
+        # in-cluster, no external auth requirement.  Mesh mTLS adds no
+        # security here and adds a moving part (sidecar) that can fail
+        # independently.  Callers stay in the mesh and reach OPA's
+        # ClusterIP fine without OPA itself being a mesh member.
+        sidecar.istio.io/inject: "false"
     spec:
       containers:
         - name: opa
