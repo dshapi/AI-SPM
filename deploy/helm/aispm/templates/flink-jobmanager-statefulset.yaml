@@ -110,10 +110,54 @@ spec:
             limits:
               cpu: {{ .Values.flink.jobmanager.resources.limits.cpu | quote }}
               memory: {{ .Values.flink.jobmanager.resources.limits.memory | quote }}
+          # ── Readiness probe ─────────────────────────────────────────────
+          # /overview returns HTTP 200 only when the dispatcher actor is
+          # alive AND a leader has been elected. Probing every 10s with a
+          # 3-failure threshold means a misbehaving JM is removed from the
+          # flink-jobmanager Service endpoints within ~30s — TaskManagers
+          # then route to the standby JM transparently.
           readinessProbe:
-            httpGet: { path: /overview, port: 8081 }
+            httpGet:
+              path: /overview
+              port: 8081
             initialDelaySeconds: 20
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          # ── Liveness probe ──────────────────────────────────────────────
+          # Without this, a Flink 1.18 JM that suffers a Pekko dispatcher
+          # actor death (the actor system crashes internally but the JVM
+          # keeps running its embedded HTTP server returning HTTP 500
+          # ``RecipientUnreachableException``) sits in NotReady forever
+          # because readinessProbe failing only removes it from Service
+          # endpoints — it does NOT kill the pod.  Operators see the
+          # cluster stuck for hours, TaskManagers in CrashLoopBackOff
+          # because they can't reach a healthy JM, and have to manually
+          # ``kubectl delete pod ... --grace-period=0`` to break the
+          # deadlock.
+          #
+          # Liveness on the same /overview endpoint catches the deadlock
+          # automatically: 3 consecutive HTTP 500s in 90s → kubelet kills
+          # the pod, StatefulSet recreates it, leader fails over to the
+          # standby JM, cluster self-heals.
+          #
+          # Conservative numbers chosen so a real start-up (cold JVM +
+          # leader election + checkpoint restore from MinIO) doesn't get
+          # killed mid-init: initialDelaySeconds=60 covers the slowest
+          # observed restart we've seen on kind multinode (~45s); 90s
+          # before-kill window from periodSeconds*failureThreshold gives
+          # plenty of room for a single transient probe failure during
+          # leader handoff.
+          livenessProbe:
+            httpGet:
+              path: /overview
+              port: 8081
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
           {{- /*
           Conditionally mount checkpoint / HA PVCs based on whether the
           chart is configured to use filesystem or S3 storage. With
