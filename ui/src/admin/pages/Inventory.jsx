@@ -22,6 +22,7 @@ import { fetchModels, registerModelWithFile, fetchPolicies } from '../api/spm.js
 import { useAgentList, mergeAgents } from '../agents/hooks/useAgentList.js'
 import { deleteAgent, startAgent, stopAgent } from '../api/agents.js'
 import AgentChatPanel       from '../agents/AgentChatPanel.jsx'
+import ContextMenu          from '../agents/ContextMenu.jsx'
 import AgentDetailDrawer    from '../agents/AgentDetailDrawer.jsx'
 import AgentRunStopToggle   from '../agents/AgentRunStopToggle.jsx'
 import PolicySelector       from '../agents/PolicySelector.jsx'
@@ -325,9 +326,43 @@ function AssetTable({ assets, selectedId, onSelect }) {
       <tbody>
         {assets.map(asset => {
           const selected = selectedId === asset.id
+          // Right-click "Open Chat in New Tab" is only meaningful when:
+          //   1. it's a custom (non-system) agent — system agents have no
+          //      chat surface and would 404 on /api/spm/agents/{id}/chat
+          //   2. it's actually running — the backend returns 409 if you
+          //      hit /chat on a stopped agent. We surface that by greying
+          //      out the menu item with an explanatory tooltip rather
+          //      than letting the new tab open just to error.
+          // The ContextMenu component disables the row's native browser
+          // context menu (preventDefault) and shows our own menu instead.
+          const isCustomAgent = asset.agentKind && asset.agentKind !== 'system'
+          const isRunning     = (asset.runtime_state || '').toLowerCase() === 'running'
+          const canChat       = isCustomAgent && isRunning
+          const chatLabel     = !isCustomAgent
+            ? 'Open Chat — system agents have no chat surface'
+            : !isRunning
+              ? 'Open Chat — start the agent first'
+              : 'Open Chat in New Tab'
+
+          const menuItems = [
+            {
+              label:    chatLabel,
+              icon:     <MessageSquare size={12} />,
+              disabled: !canChat,
+              onClick: () => {
+                // Backend uses the DB primary key as the agent id, NOT
+                // the slug-style asset.id we use in the UI. _backendId is
+                // attached by the live-agent merge in mergeAgents().
+                const backendId = asset._backendId || asset.id
+                const url = `/agent/${encodeURIComponent(backendId)}/chat`
+                  + `?name=${encodeURIComponent(asset.name || backendId)}`
+                window.open(url, '_blank', 'noopener,noreferrer')
+              },
+            },
+          ]
           return (
+            <ContextMenu key={asset.id} items={menuItems}>
             <tr
-              key={asset.id}
               onClick={() => onSelect(selected ? null : asset)}
               className={cn(
                 'group border-b border-gray-100/80 last:border-0 cursor-pointer',
@@ -414,6 +449,7 @@ function AssetTable({ assets, selectedId, onSelect }) {
                 />
               </td>
             </tr>
+            </ContextMenu>
           )
         })}
       </tbody>

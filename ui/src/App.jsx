@@ -2,7 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import Header from './components/Header.jsx'
 import ChatView from './components/ChatView.jsx'
 import ChatInput from './components/ChatInput.jsx'
-import { sendMessageStream } from './api.js'
+import { sendMessageStream, sendAgentMessageStream } from './api.js'
 import { useSimulationContext } from './context/SimulationContext.jsx'
 
 const MODELS = [
@@ -15,10 +15,33 @@ function _freshSessionId() {
   return `session-${Date.now()}`
 }
 
-export default function App() {
+/**
+ * App — landing chat UI.
+ *
+ * Two render modes selected by the optional ``agentBinding`` prop:
+ *
+ *  - ``agentBinding`` unset (default): chat with the platform's default
+ *    LLM via ``sendMessageStream`` → POST /api/chat/stream.  The model
+ *    dropdown lets the user pick Haiku / Sonnet / Opus.
+ *
+ *  - ``agentBinding = { id, name }``: chat with a specific custom agent
+ *    via ``sendAgentMessageStream`` → POST /api/spm/agents/{id}/chat.
+ *    The model dropdown is replaced with a static "Agent: <name>" label
+ *    since the choice has been made by which row the operator
+ *    right-clicked.  Used by the /agent/:id/chat route.
+ */
+export default function App({ agentBinding } = {}) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(false)
-  const [model, setModel] = useState(MODELS[0].id)
+  // Build the dropdown's "models" list.  In agent mode we synthesise a
+  // single-entry list so Header / ChatInput / Landing can keep using the
+  // same `models={...}` prop without conditionals — they just see one
+  // option, no chooser.
+  const isAgentMode = !!(agentBinding && agentBinding.id)
+  const effectiveModels = isAgentMode
+    ? [{ id: `agent:${agentBinding.id}`, label: `Agent: ${agentBinding.name || agentBinding.id}` }]
+    : MODELS
+  const [model, setModel] = useState(effectiveModels[0].id)
   const [inChat, setInChat] = useState(false)
   const [error, setError] = useState(null)
   const [sessionId, setSessionId] = useState(_freshSessionId)
@@ -118,9 +141,12 @@ export default function App() {
     setLoading(true)
     appendMessage('assistant', '', true)
 
-    sendMessageStream(text, sessionId, {
+    // Pick the streaming sender based on whether we're bound to an agent.
+    // Both senders share the same callback contract so the rest of the
+    // streaming bookkeeping (rAF token coalescing, error rendering, etc.)
+    // doesn't need to change.
+    const callbacks = {
       onToken: (chunk) => {
-        // Append the token directly and coalesce renders via rAF.
         displayedRef.current += chunk
         scheduleRender(true)
       },
@@ -139,8 +165,13 @@ export default function App() {
         setError(e.message)
         setLoading(false)
       },
-    })
-  }, [loading, inChat, sessionId, appendMessage, updateLastAssistant, scheduleRender, flushRender])
+    }
+    if (isAgentMode) {
+      sendAgentMessageStream(agentBinding.id, text, sessionId, callbacks)
+    } else {
+      sendMessageStream(text, sessionId, callbacks)
+    }
+  }, [loading, inChat, sessionId, isAgentMode, agentBinding, appendMessage, updateLastAssistant, scheduleRender, flushRender])
 
   const handleNewChat = useCallback(() => {
     setMessages([])
@@ -158,9 +189,14 @@ export default function App() {
       {inChat && (
         <Header
           model={model}
-          models={MODELS}
+          models={effectiveModels}
           onModelChange={setModel}
           onNewChat={handleNewChat}
+          /* Show agent name in the title strip when bound to an agent so
+             the operator never loses context about which custom agent
+             they're talking to.  Default chat (`/`) leaves this unset
+             and Header falls back to its own "Orbyx" branding. */
+          agentName={isAgentMode ? agentBinding.name : null}
         />
       )}
 
@@ -171,9 +207,10 @@ export default function App() {
           <Landing
             onSend={handleSend}
             model={model}
-            models={MODELS}
+            models={effectiveModels}
             onModelChange={setModel}
             inputRef={inputRef}
+            agentBinding={isAgentMode ? agentBinding : null}
           />
         )}
       </div>
@@ -183,7 +220,7 @@ export default function App() {
           onSend={handleSend}
           loading={loading}
           model={model}
-          models={MODELS}
+          models={effectiveModels}
           onModelChange={setModel}
           inputRef={inputRef}
         />
@@ -194,9 +231,10 @@ export default function App() {
 
 // ── Landing ─────────────────────────────────────────────────────────────
 
-function Landing({ onSend, model, models, onModelChange, inputRef }) {
+function Landing({ onSend, model, models, onModelChange, inputRef, agentBinding }) {
   const [value, setValue] = useState('')
   const [devOpen, setDevOpen] = useState(false)
+  const isAgentMode = !!(agentBinding && agentBinding.id)
 
   const submit = () => {
     if (value.trim()) {
@@ -227,7 +265,7 @@ function Landing({ onSend, model, models, onModelChange, inputRef }) {
           margin: 0,
           color: '#0f172a',
         }}>
-          Orbyx
+          {isAgentMode ? agentBinding.name : 'Orbyx'}
         </h1>
 
         <p style={{
@@ -235,7 +273,9 @@ function Landing({ onSend, model, models, onModelChange, inputRef }) {
           fontSize: '1.05rem',
           marginTop: 6,
         }}>
-          AI Security Posture Management
+          {isAgentMode
+            ? 'Custom agent — messages go directly to this agent’s runtime'
+            : 'AI Security Posture Management'}
         </p>
       </div>
 

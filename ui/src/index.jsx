@@ -1,7 +1,7 @@
 // src/index.jsx
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom'
 import App                 from './App.jsx'
 import { AppShell as DashboardLayout } from './admin/shell/AppShell.jsx'
 import { SimulationContext } from './context/SimulationContext.jsx'
@@ -35,6 +35,30 @@ import './index.css'
  * Calling useSimulationState() anywhere else creates a second, isolated
  * instance and breaks cross-route event sharing.
  */
+/**
+ * AgentChatRoute
+ * ──────────────
+ * Wrapper around the existing landing-chat ``<App />`` that pulls the
+ * agent ID + display name out of the URL and forwards them as the
+ * ``agentBinding`` prop.  This is the route that the right-click
+ * context menu in Inventory opens in a new tab — gives the operator a
+ * dedicated full-window chat surface for one specific custom agent
+ * without disturbing whatever they were doing in the original tab.
+ *
+ * Why URL-based and not a fetch: the agent name is a cosmetic label
+ * (the heavy lifting — auth, agent existence, runtime_state — happens
+ * server-side in /api/spm/agents/{id}/chat).  Putting the name in the
+ * query string avoids a second round-trip on tab open and keeps the
+ * route bookmarkable / copy-pasteable.
+ */
+function AgentChatRoute() {
+  const { agentId } = useParams()
+  const [search]    = useSearchParams()
+  const name        = search.get('name') || agentId
+  return <App agentBinding={{ id: agentId, name }} />
+}
+
+
 function SimulationRoot({ children }) {
   const {
     simState,
@@ -67,8 +91,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <BrowserRouter>
       <SimulationRoot>
       <Routes>
-          {/* Chat UI */}
+          {/* Chat UI — default LLM */}
           <Route path="/" element={<App />} />
+
+          {/* Chat UI — bound to a specific custom agent. Opened by
+              right-click → "Open Chat in New Tab" on Inventory rows. */}
+          <Route path="/agent/:agentId/chat" element={<AgentChatRoute />} />
 
           {/* Admin UI */}
           <Route path="/admin" element={<DashboardLayout />}>
