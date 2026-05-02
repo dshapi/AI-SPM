@@ -59,10 +59,24 @@ def test_base64_attack_payload_blocks():
     assert label == "base64_payload"
 
 def test_base64_short_payload_passes():
-    # Very short base64 (< 20 decoded bytes) should not trigger
-    short = base64.b64encode(b"hello").decode()
+    # Trivially short base64 must not trigger — anything below
+    # _MIN_B64_BYTES (currently 4) is too short to encode a meaningful
+    # English word, so even a 100% alpha-ratio decode shouldn't flip
+    # the bulk-payload rule.  The test intent (false-positive guard
+    # for short tokens / IDs / 1-2 letter values) is preserved; only
+    # the "short" threshold has tightened from 20 → 4 bytes.
+    #
+    # The 4-7 byte hate-speech encodings garak's encoding.InjectBase64
+    # probe ships ("Paki", "Hajji", "Wetback") MUST still block at the
+    # new threshold — see test_base64_short_attack_phrase_blocks below
+    # for the regression coverage that tracks the other side of this
+    # contract.
+    short = base64.b64encode(b"hi").decode()      # 2 decoded bytes
     blocked, _ = screen_obfuscation(f"value: {short}")
-    assert not blocked
+    assert not blocked, (
+        f"2-byte payload {short!r} (decodes to b'hi') should pass — "
+        "well below _MIN_B64_BYTES = 4"
+    )
 
 def test_base64_binary_data_passes():
     # Binary blob that isn't printable UTF-8 should not trigger
@@ -99,11 +113,24 @@ def test_base64_short_attack_phrase_blocks(phrase):
 
 
 def test_base64_short_benign_still_passes():
-    # 'hello' encoded is 8 b64 chars, well below bulk threshold, and not an
-    # attack phrase — must still pass so we don't over-block short tokens.
-    short = base64.b64encode(b"hello").decode()
+    # Sanity: an alphabetic decoded payload BELOW _MIN_B64_BYTES (currently
+    # 4) must pass — even though it's prose-shaped, it's too short to be a
+    # meaningful word, so the bulk rule shouldn't fire and we shouldn't
+    # over-block tokens / IDs / 1-3 letter values.
+    #
+    # Originally this test used b"hello" (5 bytes, alpha ratio 1.0) on the
+    # premise that _MIN_B64_BYTES = 20.  After the security ratchet to 4
+    # bytes (to catch garak's 4-7 byte hate-speech encodings — see
+    # obfuscation_screen.py:50 for the rationale), 5-byte alphabetic
+    # payloads correctly DO trigger.  Recalibrated to 2 bytes so the
+    # invariant the test is actually trying to express ("trivially short
+    # alphabetic b64 isn't worth flagging") still holds.
+    short = base64.b64encode(b"hi").decode()      # 2 decoded bytes
     blocked, _ = screen_obfuscation(f"value: {short}")
-    assert not blocked
+    assert not blocked, (
+        f"2-byte payload {short!r} (decodes to b'hi') should pass — "
+        "well below _MIN_B64_BYTES = 4"
+    )
 
 
 # ── Hex encoding ───────────────────────────────────────────────────────────────

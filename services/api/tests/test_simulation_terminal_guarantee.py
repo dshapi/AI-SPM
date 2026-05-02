@@ -302,8 +302,27 @@ async def test_garak_emits_terminal_on_happy_path(sim_module, capture_emits):
             execution_mode="live",
         )
     types = [t for t, _ in capture_emits]
-    # 1 started + 2*(trace events + progress + allowed) + 1 completed
+    # 1 started + 2*(trace events + progress + blocked) + 1 completed
+    #
+    # Garak findings always emit ``simulation.blocked`` regardless of the
+    # finding's ``passed`` flag, because every Garak probe IS an attack
+    # attempt by definition — so "the runner saw the attack and recorded
+    # it" is a successful detection, not a let-through.  See
+    # garak_runner.py for the full rationale.  This test originally
+    # asserted ``simulation.allowed`` because garak_runner used to mirror
+    # ``passed`` directly to the event type; that contract was reversed
+    # to match operator intuition during the May-2026 simulate UX pass.
     assert types[0] == "simulation.started"
     assert types.count("simulation.progress") == 2
-    assert types.count("simulation.allowed") == 2
+    assert types.count("simulation.blocked") == 2, (
+        f"expected one simulation.blocked per probe finding (Garak "
+        f"runner always treats findings as detected attacks); "
+        f"got types={types}"
+    )
+    # Defensive: simulation.allowed should NOT fire for Garak findings
+    # under the current contract.  If a future change re-introduces it,
+    # this assertion will catch the regression so we make a deliberate
+    # decision rather than silently flipping the operator-facing event
+    # type back to "allow".
+    assert "simulation.allowed" not in types
     assert _terminal_types(capture_emits) == ["simulation.completed"]
