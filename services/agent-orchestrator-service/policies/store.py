@@ -451,7 +451,20 @@ allow if {
 # ── Initialisation helpers ────────────────────────────────────────────────────
 
 def init_db(db_url: str, create_tables: bool = True) -> None:
-    """Initialise the module-level session factory from a database URL."""
+    """Initialise the module-level session factory from a database URL.
+
+    For ``sqlite:///`` file URLs this also pre-creates the parent
+    directory if it doesn't exist.  Without that, a fresh clone (CI
+    runner, dev workstation) blows up with:
+
+        sqlite3.OperationalError: unable to open database file
+
+    on the very first ``Base.metadata.create_all`` call.  Production
+    pods don't hit this because k8s mounts ``/data`` for them, but
+    relying on the deployer to pre-create the dir was a footgun every
+    new contributor tripped over.  The mkdir is idempotent
+    (``exist_ok=True``) so re-runs are no-ops.
+    """
     global _SessionLocal, _test_session
     # Always clear any injected test session so the live session factory wins.
     _test_session = None
@@ -463,9 +476,35 @@ def init_db(db_url: str, create_tables: bool = True) -> None:
     # StaticPool forces all connections to reuse the same underlying connection so
     # create_all() and subsequent queries see the same tables.
     engine_kwargs: dict = {"echo": False, "future": True}
-    if ":memory:" in db_url:
+    is_sqlite_memory = ":memory:" in db_url
+    if is_sqlite_memory:
         engine_kwargs["connect_args"] = {"check_same_thread": False}
         engine_kwargs["poolclass"] = StaticPool
+    elif db_url.startswith("sqlite:///") or db_url.startswith("sqlite:////"):
+        # Extract the filesystem path from the URL.  For sqlite:/// (3
+        # slashes, relative path) AND sqlite:////absolute/... (4 slashes,
+        # absolute path) the path is everything after the scheme + 3
+        # slashes.  pathlib doesn't care whether it's absolute or not.
+        from pathlib import Path
+        sqlite_path = Path(db_url.removeprefix("sqlite:///").removeprefix("/"))
+        # If the URL was sqlite:////absolute the leading "/" was
+        # stripped above; restore it so the path is genuinely absolute.
+        if db_url.startswith("sqlite:////"):
+            sqlite_path = Path("/") / sqlite_path
+        parent = sqlite_path.parent
+        # Skip when the parent is "" or "." (current dir always exists).
+        if str(parent) not in ("", "."):
+            try:
+                parent.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                # Don't mask the real DB error — log and let SQLAlchemy
+                # raise the more specific OperationalError next.
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "Could not pre-create SQLite parent dir %s: %s "
+                    "(continuing — engine.connect will surface the real error)",
+                    parent, e,
+                )
 
     engine = create_engine(db_url, **engine_kwargs)
     if create_tables:
