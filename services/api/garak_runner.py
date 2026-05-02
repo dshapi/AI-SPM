@@ -103,6 +103,14 @@ def _map_severity(finding: dict[str, Any]) -> str:
 
 # Substring → category label.  Checked in order; first match wins.
 _CATEGORY_PATTERNS: list[tuple[str, str]] = [
+    # Friendly probe IDs first — see services/garak/main.py for rationale
+    # (substring patterns below would never match "promptinject" because
+    # the friendly name doesn't contain "injection" as a substring).
+    ("promptinject",         "Prompt Injection"),
+    ("tooluse",              "Tool Abuse"),
+    ("dataexfil",            "Data Exfiltration"),
+    ("multiturn",            "Social Engineering"),
+    # Substring patterns matched against resolved garak probe-class names.
     ("dan",                  "Jailbreak"),
     ("jailbreak",            "Jailbreak"),
     ("prompt_injection",     "Prompt Injection"),
@@ -588,6 +596,13 @@ async def run_garak_simulation(
                         "reason":         trace.get("guard_reason", ""),
                         "score":          trace.get("guard_score", 0.0),
                         "correlation_id": attempt_corr,
+                        # policy_name flows from /internal/probe → sidecar _meta
+                        # → trace dict → here. The UI's buildAttemptsFromEvents
+                        # stores this on attempt.guard_decision.policy_name,
+                        # which useRecommendations.js reads to suppress the
+                        # "No policy coverage for <probe>" recommendation.
+                        # Empty string on allow-path attempts is the contract.
+                        "policy_name":    trace.get("policy_name", ""),
                     })
                 if trace.get("tool_call"):
                     tc = trace["tool_call"]
@@ -611,16 +626,25 @@ async def run_garak_simulation(
                         "severity":        normalized["severity"],
                         "message":         normalized["description"],
                     })
-                elif normalized["severity"] in ("high", "critical"):
-                    # High-severity finding → simulation.blocked
-                    # This feeds into useSimulationState.partialResults and
-                    # the ProbeResults tab without any frontend changes.
+                else:
+                    # Every Garak probe attempt is, by definition, an adversarial
+                    # input — Garak's whole job is to send attacks. The dashboard
+                    # bucket is therefore always "blocked" ("we identified this
+                    # as an attack"). The actual security outcome — did the
+                    # defense hold or did the attack land? — is conveyed via
+                    # ``defense_outcome`` ("stopped" vs "missed") and the
+                    # severity field, NOT by routing low-severity findings to
+                    # simulation.allowed.
                     #
-                    # `defense_outcome` tells the UI which security outcome
-                    # this is: "stopped" = our defense caught the attack,
-                    # "missed" = Garak's detector caught the model being
-                    # fooled.  Both emit simulation.blocked but they are
-                    # opposite outcomes and the UI labels them differently.
+                    # Routing low-severity Garak findings to simulation.allowed
+                    # was the previous behaviour, but it caused successful
+                    # defenses (model refused, guard caught the prompt) to
+                    # disappear into the green "Allowed" tile alongside benign
+                    # user traffic — making it impossible to see at a glance
+                    # how many adversarial inputs the system was tested with.
+                    # Reserving simulation.allowed for non-Garak flows (real
+                    # user traffic where most prompts are not attacks) keeps
+                    # the dashboard semantics honest.
                     await emit_event("simulation.blocked", {
                         "categories":      [normalized["category"]],
                         "decision_reason": normalized["description"],
@@ -628,15 +652,10 @@ async def run_garak_simulation(
                         "probe_name":      probe_name,
                         "severity":        normalized["severity"],
                         "defense_outcome": raw.get("defense_outcome"),
-                    })
-                else:
-                    # Low-severity → simulation.allowed
-                    await emit_event("simulation.allowed", {
-                        "response_preview": normalized["description"],
-                        "correlation_id":   attempt_corr,
-                        "probe_name":       probe_name,
-                        "severity":         normalized["severity"],
-                        "defense_outcome":  raw.get("defense_outcome"),
+                        # Same policy_name as on guard.decision so the
+                        # Policy Impact tab (which reads simulation.blocked)
+                        # also shows a real policy label.
+                        "policy_name":     trace.get("policy_name", ""),
                     })
 
         # ── simulation.completed ──────────────────────────────────────────────

@@ -576,452 +576,35 @@ These are real product/configuration issues observed during the kind
 multi-node bring-up. They do not block the cluster from running but
 need follow-up before this setup is dependable for security testing.
 
-### Garak Simulation Lab — partial coverage
-
-Symptoms when running the **Full Kill Chain** profile from the UI:
-
-- Most probes complete with all attempts marked **ALLOWED**.
-- One probe (typically `dataexfil`) finishes with **ERROR / 1 attempt**
-  while others run their 10 attempts cleanly.
-- A re-run after auth fixes (see "AuthorizationPolicy" in
-  Troubleshooting) yields a more realistic 5 blocked / 6 passed across
-  the kill-chain probes — the chain *is* evaluating, but the verdict
-  distribution suggests the guard policies catch obvious attacks and
-  miss subtler ones.
-
-What we know:
-
-- The earlier "all ALLOWED" runs were Garak using its synthetic
-  **Blank** generator instead of the real AISPM target — a missing
-  `GARAK_INTERNAL_SECRET` in `platform-secrets`. Bootstrap should
-  auto-generate it; on this kind cluster it landed empty. Workaround
-  is in Troubleshooting.
-- The `dataexfil` probe ERROR is reproducible and may indicate a
-  specific upstream-API contract issue worth investigating
-  separately.
-
-Action items (not done):
-
-- [ ] Bootstrap should fail loudly if `GARAK_INTERNAL_SECRET` ends up
-      empty rather than letting the simulator silently fall back to
-      Blank.
-- [ ] Investigate why `dataexfil` errors while other probes complete.
-- [ ] Tune `GUARD_BLOCK_SCORE` and / or improve the guard prompt to
-      raise block rate on the subtler probes.
-
-### Custom agents do not block jailbreak attempts
-
-When you run a chat through a custom agent created via the Agents
-admin UI, jailbreak prompts that the platform-level guard chain
-*should* catch (prompt injection, ignore-previous-instructions, etc.)
-make it to the LLM and produce a response.
-
-Suspected causes (none confirmed yet):
-
-- Custom-agent runtime may bypass the guard chain entirely and call
-  the LLM proxy directly.
-- Or the per-agent policy attached to the custom agent doesn't include
-  the prompt-injection rule that the simulator-style flow has.
-
-Action items (not done):
-
-- [ ] Trace a single custom-agent request end-to-end — confirm
-      whether `guard-model` is invoked.
-- [ ] If not, fix the agent runtime to route through `guard-model` /
-      `output-guard` like the platform chat path does.
-- [ ] Add a regression test (Garak probe) that fails if a known
-      prompt-injection slips through a custom agent.
-
-### Simulator UI: "Simulation timeout — no terminal event received"
-
-After the Garak run finishes successfully on the backend (probes
-return verdicts in api logs), the UI sometimes shows a banner:
-"Simulation timeout — no terminal event received from the backend."
-
-The terminal event is delivered over the WebSocket
-`/ws/sessions/<session-id>`. Likely culprits:
-
-- ingress-nginx WebSocket idle timeout. Default is 60s; long Garak
-  runs exceed that without an in-band keepalive.
-- istio sidecar idle timeout closing the upstream WS before the
-  terminal event reaches the UI.
-- The api side never emits the terminal frame on this code path.
-
-Action items (not done):
-
-- [ ] Add `nginx.ingress.kubernetes.io/proxy-read-timeout: "600"` and
-      `proxy-send-timeout: "600"` to the AISPM Ingress to extend WS
-      lifetime past 60s.
-- [ ] Confirm api emits `{"type":"terminal", ...}` on simulation
-      completion — if not, fix the simulator service.
-- [ ] Add a server-side keepalive ping every 20s to keep ingress
-      proxies happy.
-
-### Custom agent disappears from the agents table
-
-After creating a custom agent and using it once, it sometimes
-vanishes from the Agents admin UI table on the next page load, even
-though the underlying record is presumably still in `spm-db`.
-
-Suspected causes:
-
-- API GET /agents may filter by a status field the runtime no longer
-  satisfies.
-- The agent-orchestrator may be deleting/garbage-collecting agents
-  whose runtime container has terminated.
-
-Action items (not done):
-
-- [ ] Reproduce reliably and capture the timing.
-- [ ] Check the spm-api `/agents` query and see whether it excludes
-      the row.
-- [ ] If the row is intact, this is a UI bug — the table fetch
-      response is dropping it client-side.
-
-### threat-hunting-agent: register as system agent *(DONE)*
-
-The threat-hunting-agent is a platform service that calls
-spm-llm-proxy (which validates bearer tokens against
-``agents.llm_api_key``). Originally it sent the placeholder string
-``"local"`` (left over from an OrbStack-era Ollama setup that didn't
-require auth) — every LLM call returned 401 ``Unknown llm_api_key``.
-
-Architectural fix: register the agent as a first-class **system
-agent** so it has a real row in ``agents`` (visible in the inventory)
-and gets a real ``llm_api_key`` like any customer agent. Sets the
-precedent for future platform services that need spm-llm-proxy.
-
-Single source of truth pattern (DB and Deployment always agree):
-
-```
-helm value secrets.threatHuntingAgentLlmKey
-        ↓ (rendered into)
-platform-secrets.THREAT_HUNTING_AGENT_LLM_KEY  (k8s Secret)
-        ↓ (mounted as env)        ↓ (mounted as env)
-threat-hunting-agent      spm-api → seed_db.py
-   AGENT_LLM_API_KEY                seed_system_agents()
-        ↓                                    ↓
-   Bearer token sent                agents.llm_api_key (DB row)
-        ↓
-   spm-llm-proxy._auth_required → resolve_agent_by_llm_token
-                                          ↓
-                                    matches → 200 OK
-```
-
-What changed:
-
-- [x] ``services/spm_api/seed_db.py`` — new ``seed_system_agents()``
-      function. Reads ``THREAT_HUNTING_AGENT_LLM_KEY`` env, inserts or
-      reconciles ``agents`` row for ``threat-hunting-agent``
-      (kind=system via ``owner=platform``, ``provider=internal``).
-      Idempotent; rotates token if value changes.
-- [x] ``deploy/helm/aispm/templates/secrets.yaml`` — added
-      ``THREAT_HUNTING_AGENT_LLM_KEY`` field, sourced from
-      ``.Values.secrets.threatHuntingAgentLlmKey``.
-- [x] ``deploy/helm/aispm/values.yaml`` — new top-level value
-      ``secrets.threatHuntingAgentLlmKey`` with operator docstring.
-- [x] ``deploy/helm/aispm/templates/threat-hunting-agent-deployment.yaml``
-      now reads ``AGENT_LLM_API_KEY`` from ``platform-secrets``
-      (was ``threat-hunting-agent-creds``; that standalone Secret
-      can be deleted post-migration).
-- [x] Verified end-to-end: ``200 OK`` from spm-llm-proxy via the
-      threat-hunting-agent's bearer token; Ollama responds via the
-      proxy; no 401s in agent logs. Subsequent hunt cycles complete
-      successfully and persist findings.
-- [x] Added ``kind`` enum column on ``agents`` (``customer`` /
-      ``system``) plus migration via direct SQL on the live cluster;
-      SQLAlchemy model in ``spm/db/models.py`` updated with new
-      ``AgentKind`` enum.
-- [x] API serializer ``_to_dict()`` exposes ``kind`` in the public
-      response (defaults to ``customer`` for legacy rows).
-- [x] Admin UI renders a "System" badge on the row, disables the
-      Open Chat button, and replaces Run/Stop/Delete with a
-      "Lifecycle managed by Kubernetes" note for system agents.
-      View Detail and Apply Policy stay available — OPA policies
-      still apply to the agent's LLM calls.
-- [x] Renamed the agent's display name to ``Threat-Hunting-Agent``
-      (the K8s Deployment stays lowercase; spm-llm-proxy lookups use
-      ``llm_api_key`` so the rename is operationally inert).
-
-Operator workflow on a fresh install:
-
-```bash
-# 1. Generate the token once
-TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
-
-# 2. Pass to helm (or set in values.dev-multinode.yaml)
-helm template aispm deploy/helm/aispm -n aispm \
-  -f deploy/helm/aispm/values.yaml \
-  -f deploy/helm/aispm/values.dev-multinode.yaml \
-  --set secrets.threatHuntingAgentLlmKey="$TOKEN" \
-  | kubectl apply -n aispm -f -
-
-# 3. The db-seed Job runs seed_system_agents(); the threat-hunting
-#    deployment reads the same token from platform-secrets. Both
-#    sides agree without coordination.
-```
-
-To rotate: change the helm value, re-render, re-apply, re-run db-seed.
-The deployment picks up the new env on its next pod restart.
-
-### threat-hunting-agent LLM URL pinned to OrbStack hostname *(DONE)*
-
-The agent's reasoning LLM client was failing every call with
-``httpcore.ConnectError: [Errno -2] Name or service not known``.
-
-Root cause: ``services/threat-hunting-agent/config.py:18`` had
-``GROQ_BASE_URL = "http://host.lima.internal:11434/v1"`` hardcoded
-as a module-level constant — left over from when the team ran
-Ollama on the host via OrbStack k8s. The original comment even
-explained it was "intentionally NOT exposed as env-configurable…
-so stale shell exports cannot override them." That intent was
-correct for OrbStack but wrong on Docker Desktop kind, where
-``host.lima.internal`` doesn't resolve from inside pods. Despite
-the deployment setting ``AGENT_LLM_BASE_URL`` in env, the constant
-was never read from env and always pointed at the dead host.
-
-Fix: read from env with the correct in-cluster default.
-
-- [x] ``GROQ_BASE_URL`` and ``HUNT_MODEL`` now read from env
-      (``AGENT_LLM_BASE_URL``, ``HUNT_MODEL``) with default
-      ``http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1``.
-      Variable name kept as ``GROQ_BASE_URL`` for import compat.
-- [x] Verified post-restart: agent logs
-      ``base_url=http://spm-llm-proxy.aispm.svc.cluster.local:8500/v1``,
-      no more DNS-failure traces.
-
-### threat-hunting-agent collectors: column "session_id" does not exist *(DONE)*
-
-Five collectors (``runtime_collector._check_enforcement_block_clusters``,
-``runtime_collector._check_session_storm``,
-``prompt_secrets_collector``, ``data_leakage_collector``,
-``tool_misuse_collector._check_rapid_chaining``) failed every cycle
-with ``column "session_id" does not exist`` on the ``audit_export``
-table.
-
-Root cause: the cluster was bootstrapped from
-``spm/db/migrations/001_initial.sql`` which predates ``session_id``
-and creates ``audit_export`` without it. The Alembic migration
-``002_add_session_id_to_audit_export.py`` exists and would add
-the column + index, but **was never executed** on this cluster
-because the bootstrap path used raw SQL instead of Alembic. The
-SQLAlchemy model in ``spm/db/models.py`` already declares the
-column (line 163), and the ``spm_aggregator`` writer already passes
-``session_id`` in its INSERT (with a graceful fallback that strips
-the column on legacy schemas). Schema-vs-model drift, nothing more.
-
-Fix: ran the migration's logic as direct SQL on the live cluster:
-
-```sql
-DO $$
-BEGIN
-    ALTER TABLE audit_export ADD COLUMN session_id VARCHAR(64);
-EXCEPTION
-    WHEN duplicate_column THEN NULL;
-END
-$$;
-CREATE INDEX IF NOT EXISTS idx_audit_export_session_id
-    ON audit_export (session_id);
-```
-
-Existing rows have ``session_id=NULL`` (fine — collectors that
-``GROUP BY session_id`` just return zero rows from those rows; no
-backfill needed). New rows from spm-aggregator populate it.
-
-- [x] Column + index added to live cluster.
-- [x] Verified collectors no longer emit
-      ``column "session_id" does not exist`` warnings.
-- [ ] Reconcile the bootstrap path: either make
-      ``001_initial.sql`` include session_id, or always run Alembic
-      after the raw SQL on fresh installs. Current state means
-      every fresh install hits this same bug. Add an action item
-      under "Helm probe-timeout audit" to also audit
-      ``001_initial.sql`` vs the Alembic chain for missing
-      migrations.
-
-### Flink HA leader election broken after etcd restore *(DONE)*
-
-After the etcd restore, both ``flink-jobmanager-0`` and
-``flink-jobmanager-1`` showed ``1/2`` Ready, ``/overview`` on port
-8081 hung, logs spammed
-``AskTimeoutException: Recipient ... had already been terminated``.
-
-Root cause: the K8s ConfigMap that holds Flink's leader lease
-(``aispm-flink-cluster-config-map``) had a stale
-``control-plane.alpha.kubernetes.io/leader`` annotation pointing at
-a ``holderIdentity`` UUID belonging to a pod that no longer existed
-(from before the etcd restore). Both new JMs saw the stale lease,
-each tried to take over, neither succeeded — the dispatcher actor
-got terminated mid-election and ``/overview`` blocked forever
-waiting on a dead actor.
-
-Recovery procedure (committed pattern):
-
-```bash
-# 1. Cold-stop both JMs to break the race
-kubectl -n aispm scale statefulset flink-jobmanager --replicas=0
-kubectl -n aispm wait --for=delete pod/flink-jobmanager-0 --timeout=60s
-
-# 2. Wipe the stale lease ConfigMap — Flink HA recreates on JM startup
-kubectl -n aispm delete cm aispm-flink-cluster-config-map
-
-# 3. Bring up ONE JM only — no race possible, fresh lease
-kubectl -n aispm scale statefulset flink-jobmanager --replicas=1
-kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m
-
-# 4. Verify leader annotation is fresh and /overview responds
-kubectl -n aispm describe cm aispm-flink-cluster-config-map | grep -A2 Annotations
-kubectl -n aispm exec flink-jobmanager-0 -c flink-jobmanager -- \
-  curl -s http://localhost:8081/overview
-
-# 5. Scale to 2 — JM-1 sees JM-0's lease, joins as standby cleanly
-kubectl -n aispm scale statefulset flink-jobmanager --replicas=2
-kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m
-```
-
-Why this and NOT a rolling restart: a rolling restart bounces JMs
-one at a time but leaves the stale lease intact and lets both new
-JMs race. The "scale to 0 → wipe configmap → scale to 1 → scale to 2"
-sequence forces a deterministic single-leader cold start.
-
-- [x] Recovery procedure documented above and tested.
-- [x] Cluster recovered: 2 JMs, 2 TMs, 6 slots available.
-
-### CNPG cluster (spm-db-1/2/3) — high restart counts *(DONE — false alarm)*
-
-Initial hypothesis: same probe-timeout footgun as the standalone
-``spm-db`` StatefulSet. **Wrong.**
-
-Investigation:
-
-- The pods' actual probe spec uses ``timeoutSeconds: 5`` (CNPG
-  operator default), routed through istio's app-health proxy at
-  port 15020 (``/app-health/postgres/{livez,readyz}``).
-- ``previous`` logs from the most recent restart show a clean
-  graceful shutdown: ``postmaster exited`` with
-  ``postmasterExitStatus: null``, instance-manager waiting for
-  caches/webhooks/HTTP servers, ``pg_controldata`` reporting
-  ``shut down in recovery`` (clean on-disk state).
-
-Actual cause: the high restart counts (13–18) accumulated **during**
-yesterday's etcd recovery — the standalone primary ``spm-db-0`` was
-itself cycling (probe-timeout footgun, fixed separately), so the
-CNPG replicas kept trying to attach to a primary that wasn't there.
-Each failed-sync cycle counted as a restart. Once the standalone
-primary stabilized, replica restarts dropped to noise level (2 in
-18 hours, indistinguishable from CNPG's normal reconciliation).
-
-- [x] Confirmed CNPG probes are not the cause; no fix needed.
-- [x] Future reference: high restart counts on CNPG instances are
-      most often downstream of the primary's health, not the
-      replicas' own probes. Diagnose by checking the primary first.
-
-### spm-api 401 on model registration during startup
-
-The startup-orchestrator's "register CPM models" step fails 20/20
-attempts with ``spm-api returned 401 for llama-guard-3``. Result:
-Llama-Guard-3 is unregistered after every boot, and the SPM admin UI
-shows no models.
-
-Suspected causes:
-
-- Internal-token mismatch between orchestrator and spm-api
-  (``platform-secrets`` got rotated post-recovery and orchestrator's
-  cached token went stale).
-- spm-api's ``/internal/models`` endpoint uses a different auth
-  scheme than orchestrator is sending.
-
-Action items:
-
-- [ ] Capture the actual 401 response body — identifies which auth
-      scheme is being rejected.
-- [ ] If token-rotation, restart orchestrator AFTER the secret rotates
-      (or have it re-read on every attempt).
-- [ ] Add a startup-orchestrator integration test that catches model
-      registration regressions.
-
-### Kafka leader rebalance *(DONE)*
-
-After yesterday's partition reassignment to RF=3, every partition's
-leader landed on broker 0 (74 / 6 / 6 distribution). Cause: the
-reassignment script set replicas as ``[0,1,2]`` for every partition,
-making broker 0 the *preferred* leader for everything. Running
-``kafka-leader-election --election-type preferred`` alone wouldn't
-redistribute — it picks the FIRST replica in the list, which was 0
-everywhere.
-
-Fix: rotate the replica order per partition (partition 0 →
-``[0,1,2]``, partition 1 → ``[1,2,0]``, partition 2 → ``[2,0,1]``)
-via a one-shot reassignment, then run preferred-leader-election. The
-reassignment is metadata-only since the replica *set* doesn't change,
-only the order — fast and zero data movement.
-
-Recovery procedure (committed pattern):
-
-```bash
-# 1. Generate rotated reassignment JSON inside kafka-0
-kubectl -n aispm exec kafka-0 -- bash -c '
-TOPICS=$(/usr/bin/kafka-topics --bootstrap-server localhost:9092 --list --exclude-internal)
-echo "{ \"version\": 1, \"partitions\": ["
-FIRST=1
-for t in $TOPICS; do
-  desc=$(/usr/bin/kafka-topics --bootstrap-server localhost:9092 --describe --topic "$t" 2>/dev/null)
-  parts=$(printf "%s\n" "$desc" | awk "/PartitionCount:/ { for (i=1;i<=NF;i++) if (\$i==\"PartitionCount:\") { print \$(i+1); exit } }")
-  rf=$(printf "%s\n" "$desc"   | awk "/ReplicationFactor:/ { for (i=1;i<=NF;i++) if (\$i==\"ReplicationFactor:\") { print \$(i+1); exit } }")
-  [ -z "$parts" ] && continue
-  [ "$rf" -lt 3 ] && continue
-  for p in $(seq 0 $((parts - 1))); do
-    a=$((p % 3)); b=$(((p + 1) % 3)); c=$(((p + 2) % 3))
-    [ $FIRST -eq 0 ] && echo ","
-    FIRST=0
-    printf "  {\"topic\": \"%s\", \"partition\": %d, \"replicas\": [%d, %d, %d]}" "$t" "$p" $a $b $c
-  done
-done
-echo
-echo "] }"
-' > /tmp/aispm-rebalance.json
-
-# 2. Apply the reassignment + run preferred-leader-election
-kubectl -n aispm cp /tmp/aispm-rebalance.json kafka-0:/tmp/aispm-rebalance.json
-kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-reassign-partitions \
-  --bootstrap-server localhost:9092 \
-  --reassignment-json-file /tmp/aispm-rebalance.json --execute
-sleep 5
-kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-leader-election \
-  --bootstrap-server localhost:9092 \
-  --election-type preferred --all-topic-partitions
-
-# 3. Verify even distribution (~28-30 per broker)
-kubectl -n aispm exec kafka-0 -- /usr/bin/kafka-topics \
-  --bootstrap-server localhost:9092 --describe --exclude-internal \
-  | grep "Leader:" | awk '{print $6}' | sort | uniq -c
-```
-
-Result: distribution went from 74-6-6 → 30-28-28. The 2-extra on
-broker 0 is from two single-partition topics
-(per-agent ``chat.in``/``chat.out``) that can't rotate.
-
-- [x] One-shot rebalance executed; verified 30-28-28 distribution.
-- [x] Updated ``deploy/scripts/kafka-reconcile-topics.sh`` to rotate
-      replicas by partition index (partition P → preferred leader
-      P mod num_brokers). Future reconcile runs produce balanced
-      leadership from the start; no follow-up election needed.
-
-### Garak `encoding.InjectBase64` probe noise
-
-The probe's success criterion is "did the model decode any Base64?"
-That's overly broad — benign decodes (e.g. ``"RG9nYW4="`` → "Dogan")
-get scored as defense-bypassed even though no harmful content was
-involved. After bug F (Layer 2.5 Llama-Guard re-screen) the actual
-security gap is fixed; the residual score on this probe is mostly
-false-positive noise.
-
-Action items:
-
-- [ ] Tune the probe's detector or replace with a custom probe that
-      scores only on harmful decoded content.
-- [ ] Document the noise in the simulation results UI so reviewers
-      don't flag it as a real failure.
+### spm-api 401 on model registration during startup *(DONE — was redundant work)*
+
+Initial framing was wrong. The 20× "401 for llama-guard-3" log spam
+made it look like Llama-Guard-3 stayed unregistered, but the
+``model_registry`` table had it (``status: approved``) — verified
+via ``SELECT name, version, provider, status FROM model_registry``.
+Two paths were registering the same models: ``seed_db.py:seed_models()``
+inserts the rows directly into the DB during the db-seed Job (runs
+first, succeeds), and the orchestrator's Step 7 was POSTing to
+``spm-api /models`` (runs second, hit 401 because the endpoint is
+gated by ``Depends(require_admin)`` — JWT admin auth — and the
+orchestrator has no admin JWT).
+
+Both paths produced the same end state, so the 401s were noisy but
+benign. seed_db is the single source of truth.
+
+Fix: replace the orchestrator's HTTP-POST step with a read-only DB
+verification that warns if expected platform models are missing
+(would indicate db-seed didn't run).
+
+- [x] ``services/startup_orchestrator/app.py:register_cpm_models_with_spm()``
+      now queries ``model_registry`` directly via psycopg2 and logs
+      ``✓ Platform models registered: [llama-guard-3, output-guard-llm]``
+      instead of issuing 20 401s.
+- [x] Added ``psycopg2-binary`` to
+      ``services/startup_orchestrator/requirements.txt`` (read-only
+      use; orchestrator runs once per boot so image-size cost is
+      irrelevant).
+- [x] Verified clean boot log: single info line, no warnings.
 
 ### redis-allow-platform AuthorizationPolicy is a no-op
 
@@ -1039,6 +622,43 @@ Action items:
       Bitnami pods consistently use the ``app.kubernetes.io/*``
       labels and the chart's policies often use ``app: <name>``.
 
+### Garak helm template baked-in 60s probe timeout *(DONE)*
+
+After yesterday's "garak per-probe HTTP timeout" fix
+(``CPMPipelineGenerator.timeout`` derived from ``PROBE_TIMEOUT_S``),
+the encoding simulation still failed with ``Probe 'encoding'
+timed out after 60s``. Cause: yesterday's runtime fix was
+``kubectl set env`` (transient) — the helm template
+``deploy/helm/aispm/templates/garak-runner-deployment.yaml`` still
+had ``PROBE_TIMEOUT_S: "60"`` hardcoded, so every helm apply
+silently reset the env to 60. The 60s budget is too short for any
+probe whose first attempt takes >60s (encoding/dataexfil regularly
+do, since each call traverses the full guard chain).
+
+- [x] Updated the helm template to ``PROBE_TIMEOUT_S: "300"`` with a
+      comment documenting the budget rationale and the link to
+      ``services/api/routes/simulation.py``'s
+      ``SIM_HARD_TIMEOUT_S`` derivation, so the two stay in sync.
+- [x] Verified post-apply: ``kubectl exec deploy/garak-runner -- env``
+      shows ``PROBE_TIMEOUT_S=300``; encoding probe no longer hits
+      the 60s cap.
+
+### Garak `encoding.InjectBase64` probe noise
+
+The probe's success criterion is "did the model decode any Base64?"
+That's overly broad — benign decodes (e.g. ``"RG9nYW4="`` → "Dogan")
+get scored as defense-bypassed even though no harmful content was
+involved. After bug F (Layer 2.5 Llama-Guard re-screen) the actual
+security gap is fixed; the residual score on this probe is mostly
+false-positive noise.
+
+Action items:
+
+- [ ] Tune the probe's detector or replace with a custom probe that
+      scores only on harmful decoded content.
+- [ ] Document the noise in the simulation results UI so reviewers
+      don't flag it as a real failure.
+
 ### Helm probe timeout audit (footgun applied broadly)
 
 The ``timeoutSeconds: 1`` default footgun was hit on kafka and
@@ -1054,21 +674,24 @@ Action items:
 - [ ] Consider chart-level lint that blocks PRs introducing
       unspecified probe timeouts.
 
-### Cleanup: dead haproxy redis-master proxy *(DONE)*
+### Bootstrap vs Alembic reconciliation
 
-After the Sentinel-aware client migration, the ``redis-master-proxy``
-Deployment + ``redis-master`` Service were dead code in the data path
-and have been removed.
+Fresh installs apply ``spm/db/migrations/001_initial.sql`` to
+bootstrap the schema, then never run the Alembic migration chain.
+Migrations after 001 (e.g. ``002_add_session_id_to_audit_export``)
+exist and are correct, but a fresh cluster starts in the post-001
+state — missing every column added by 002+. The
+threat-hunting-agent's ``session_id`` failure was the visible
+symptom; there are likely more silent ones.
 
-- [x] Removed the ``redis-master-proxy`` Deployment + ``redis-master``
-      Service block from ``deploy/scripts/kind-databases-ha.sh``;
-      replaced with a comment block documenting why no proxy is needed
-      (clients use Sentinel via ``platform_shared/redis.py``).
-- [x] Verified no service still references
-      ``redis-master.aispm.svc.cluster.local`` — the only redis access
-      path is now ``get_redis_client()``.
-- [x] Deleted ``redis-haproxy-cfg`` ConfigMap, ``redis-master-proxy``
-      Deployment, and ``redis-master`` Service from the cluster.
+Action items:
+
+- [ ] Either backport every Alembic migration into ``001_initial.sql``
+      (single source of truth at bootstrap time), or
+- [ ] Make the bootstrap path always run ``alembic upgrade head``
+      after applying 001 (preserves migration history).
+- [ ] Add a CI check that ``alembic upgrade head`` from a freshly
+      bootstrapped DB is a no-op — proves 001 + Alembic are aligned.
 
 ### Policy editor: accept Rego, not Python
 
@@ -1103,20 +726,6 @@ Action items:
       the editor so users see the existing helpers
       (``has_signal``, ``has_scope``, ``has_behavioral``) and the
       ``allow := { decision, reason, action }`` shape.
-
-### Connector card description drift *(DONE)*
-
-The Redis integration card's text was old DB-seeded copy from before
-the platform-managed read-only redesign.
-
-- [x] Updated ``services/spm_api/integrations_seed_data.py`` for
-      ``int-021`` (Redis) — fresh installs now seed the correct
-      description on first boot.
-- [x] Updated the existing DB row via direct SQL UPDATE on
-      ``integrations.description``. The bootstrap-on-startup upsert
-      in ``_upsert_integration`` (``integrations_routes.py:1497``)
-      reconciles ``description`` on every spm-api restart, so future
-      drift won't recur as long as the seed file stays correct.
 
 ## What's NOT installed (and why)
 

@@ -60,6 +60,32 @@ flink:
         cpu: "2"
         memory: "3Gi"
 
+  # ── JVM options — JDK 17+ + Apache Beam (PyFlink) compatibility ─────────────
+  # PyFlink runs Python operators through Apache Beam's portable runner,
+  # which uses reflection into ``java.base`` internals (ObjectStreamClass
+  # caches, NIO direct buffers, concurrent helpers). JDK 17 enforces module
+  # boundaries by default, so without these ``--add-opens`` flags every
+  # Python operator crashes with InaccessibleObjectException on the first
+  # checkpoint or buffer flush — symptom: TM restart count climbs by 1 every
+  # ~30s and the CEP job sticks in RESTARTING forever.
+  #
+  # The set below is the documented Beam-on-JDK-17 minimum (java.lang,
+  # java.io, java.util, sun.nio.ch) plus java.lang.reflect and java.nio
+  # which Beam's serialization layer touches under load. Operators
+  # extending the platform with custom Python operators that touch other
+  # internals can append to this list via a values override.
+  #
+  # Wired into both JM and TM JVMs via ``env.java.opts.all`` in
+  # templates/flink-conf-configmap.yaml.
+  jvmOpts: >-
+    --add-opens=java.base/java.lang=ALL-UNNAMED
+    --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+    --add-opens=java.base/java.io=ALL-UNNAMED
+    --add-opens=java.base/java.nio=ALL-UNNAMED
+    --add-opens=java.base/java.util=ALL-UNNAMED
+    --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+    --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+
 kafka:
   image: confluentinc/cp-kafka
   tag: "7.6.1"

@@ -167,7 +167,13 @@ async def _stub_probe(probe_name, config, timeout_s=60.0):
 
 @pytest.mark.asyncio
 async def test_happy_path_emits_all_required_events(runner):
-    """2 probes → started + 2×progress + 2×(trace events) + 2×allowed + completed."""
+    """2 probes → started + 2×progress + 2×(trace events) + 2×blocked + completed.
+
+    Every Garak probe attempt is an adversarial input by definition, so
+    the runner emits ``simulation.blocked`` for ALL findings (with
+    ``defense_outcome`` distinguishing stopped vs. missed).  No Garak
+    finding ever lands in ``simulation.allowed``.
+    """
     captured, emit = _make_emit()
     cfg = _FakeConfig(probes=["dan", "jailbreak"])
 
@@ -178,9 +184,9 @@ async def test_happy_path_emits_all_required_events(runner):
     types = _event_types(captured)
     assert types[0] == "simulation.started"
     assert types.count("simulation.progress") == 2
-    # stub returns score=0.0 → info → allowed
-    assert types.count("simulation.allowed") == 2
-    assert types.count("simulation.blocked") == 0
+    # All Garak findings are attacks → simulation.blocked (never .allowed).
+    assert types.count("simulation.blocked") == 2
+    assert types.count("simulation.allowed") == 0
     assert _terminals(captured) == ["simulation.completed"]
 
 
@@ -437,9 +443,9 @@ async def test_trace_events_emitted_per_finding(runner):
     assert "guard.decision" in types
 
     # Ordering: trace events must appear before the decision event for that probe
-    idx_prompt  = types.index("llm.prompt")
-    idx_allowed = types.index("simulation.allowed")
-    assert idx_prompt < idx_allowed
+    idx_prompt   = types.index("llm.prompt")
+    idx_decision = types.index("simulation.blocked")
+    assert idx_prompt < idx_decision
 
 
 @pytest.mark.asyncio
@@ -460,7 +466,8 @@ async def test_trace_events_carry_correlation_id(runner):
     # All trace events and the decision event share the same correlation_id
     assert corr_ids.get("llm.prompt") == corr_ids.get("llm.response")
     assert corr_ids.get("llm.prompt") == corr_ids.get("guard.decision")
-    assert corr_ids.get("llm.prompt") == corr_ids.get("simulation.allowed")
+    # Every Garak finding now emits simulation.blocked (never .allowed).
+    assert corr_ids.get("llm.prompt") == corr_ids.get("simulation.blocked")
 
 
 # ── Per-attempt correlation_id (task #17 regression) ─────────────────────────
@@ -524,12 +531,15 @@ async def test_each_attempt_gets_distinct_correlation_id(runner):
     assert len(set(all_cids)) == len(all_cids), \
         f"attempts share correlation_ids (dedup would collapse them): {all_cids}"
 
-    # ALL 3 simulation.allowed events must have survived with distinct cids —
+    # ALL 3 simulation.blocked events must have survived with distinct cids —
     # this is the invariant the frontend dedup (key `cid:canonical:corr`) relies
-    # on to keep every attempt visible.
-    allowed_cids = [p["correlation_id"] for t, p in captured if t == "simulation.allowed"]
-    assert len(allowed_cids) == 3
-    assert len(set(allowed_cids)) == 3
+    # on to keep every attempt visible.  Every Garak finding now emits
+    # simulation.blocked regardless of severity (see runner.py — Garak runs are
+    # adversarial inputs by definition; defense_outcome distinguishes
+    # stopped vs. missed within the blocked bucket).
+    blocked_cids = [p["correlation_id"] for t, p in captured if t == "simulation.blocked"]
+    assert len(blocked_cids) == 3
+    assert len(set(blocked_cids)) == 3
 
     # Terminal event for the session is simulation.completed (probe-level, not
     # per-attempt, so it carries no correlation_id).
@@ -567,15 +577,15 @@ async def test_probe_level_corr_still_used_for_progress_and_lineage(runner):
 
     progress_cids = [p["correlation_id"] for t, p in captured if t == "simulation.progress"]
     lineage_ids   = [p["id"]             for t, p in captured if t == "lineage.node"]
-    allowed_cids  = [p["correlation_id"] for t, p in captured if t == "simulation.allowed"]
+    decision_cids = [p["correlation_id"] for t, p in captured if t == "simulation.blocked"]
 
     # One progress + one lineage event per probe (there's only 1 probe here)
     assert len(progress_cids) == 1
     assert len(lineage_ids) == 1
     # Progress and lineage agree on the probe-level id
     assert progress_cids[0] == lineage_ids[0]
-    # None of the per-attempt allowed events reuse the probe-level id
-    assert progress_cids[0] not in allowed_cids
+    # None of the per-attempt decision events reuse the probe-level id
+    assert progress_cids[0] not in decision_cids
 
 
 @pytest.mark.asyncio
@@ -732,8 +742,11 @@ async def test_run_garak_integration_via_simulation_module():
     types = [t for t, _ in emitted]
     assert types[0] == "simulation.started"
     assert types.count("simulation.progress") == 2
-    # stub → score 0.0 → info → allowed
-    assert types.count("simulation.allowed") == 2
+    # All Garak findings emit simulation.blocked regardless of severity —
+    # Garak runs are adversarial inputs by definition; defense_outcome
+    # rides in the payload to distinguish stopped vs. missed.
+    assert types.count("simulation.blocked") == 2
+    assert types.count("simulation.allowed") == 0
     terminals = [t for t in types if t in ("simulation.completed", "simulation.error")]
     assert terminals == ["simulation.completed"]
 

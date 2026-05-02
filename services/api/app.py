@@ -78,6 +78,12 @@ from ws.simulation_ws import router as simulation_ws_router
 from consumers.session_event_consumer import SessionEventConsumer
 from consumers.topic_resolver import resolve_topics, configured_tenants
 
+# Output-side prompt-echo screen — third leg of the output-scan stool, alongside
+# the existing _scan_output (secrets/PII) and the OPA spm/output/allow rule.
+# Catches the model-regurgitates-prompt failure mode that neither of those
+# layers sees because the regurgitated content is itself benign-looking.
+from models.output_echo_screen import screen_output_echo
+
 # ── API routes ────────────────────────────────────────────────────────────────
 from routes.simulation import router as simulation_router
 
@@ -437,12 +443,20 @@ async def _report_to_orchestrator(
     guard_categories: list,
     decision: str,
     tool_uses: list,
+    policy_name: str = "",
 ) -> None:
     """
     Fire-and-forget: register this chat interaction as a session in the
     agent-orchestrator service so it appears on the Runtime dashboard.
     Uses the caller's own token so Runtime shows the real user identity.
     Errors are logged and swallowed — never allowed to affect the chat response.
+
+    ``policy_name`` is the OPA-style package name attribution (e.g.
+    ``ai.security.jailbreak_detect``) computed in the chat / stream handlers
+    via _policy_name_for_decision. The orchestrator forwards this into its
+    session_event payloads so the Runtime page's Control panel and Policy
+    Impact tab render a real policy label instead of "Unresolved Policy"
+    on chat-side blocks.
     """
     try:
         payload = {
@@ -462,6 +476,7 @@ async def _report_to_orchestrator(
                 "guard_score":      round(guard_score, 4),
                 "guard_categories": guard_categories,
                 "policy_decision":  decision,
+                "policy_name":      policy_name,
             },
         }
         async with httpx.AsyncClient(timeout=3.0) as client:
@@ -753,6 +768,15 @@ async def chat(
     guard_score      = _decision.signals.get("guard_score",      0.0)
     guard_categories = _decision.signals.get("guard_categories", [])
     guard_verdict    = "block" if _decision.is_blocked else "allow"
+    # Score-display + policy-name attribution — same contract as /internal/probe.
+    # Rule-based blocks short-circuit before Llama Guard scores the prompt, so
+    # without these two lines a chat-side block lands in the audit log /
+    # orchestrator with score 0.0 and an empty policy name, which the Runtime
+    # page then renders as "Unresolved Policy" — same UX bug we fixed on the
+    # simulation path.
+    if _decision.is_blocked and guard_score == 0.0:
+        guard_score = 0.95
+    policy_name = _policy_name_for_decision(_decision, _decision.reason or "") if _decision.is_blocked else ""
 
     if _decision.is_blocked:
         _lex_label = _decision.signals.get("lexical_label", "")
@@ -775,6 +799,7 @@ async def chat(
                 "explanation":    _decision.explanation,
                 "correlation_id": _decision.correlation_id,
                 "guard_score":    guard_score,
+                "policy_name":    policy_name,
                 "prompt_len":     len(req.prompt),
                 "session_id":     req.session_id,
             },
@@ -783,6 +808,7 @@ async def chat(
             raw_token=token, prompt=req.prompt, session_id=req.session_id,
             claims=claims, guard_verdict="block", guard_score=guard_score,
             guard_categories=guard_categories, decision="blocked", tool_uses=[],
+            policy_name=policy_name,
         ))
         raise HTTPException(
             status_code=400,
@@ -987,6 +1013,10 @@ async def chat(
         guard_categories=guard_categories,
         decision=output_action if guard_verdict != "block" else "blocked",
         tool_uses=tool_uses,
+        # policy_name was computed at the top of /chat — empty string on the
+        # allow path (no rule fired) is the consistent contract we use
+        # everywhere so the orchestrator's policy-attribution is uniform.
+        policy_name=policy_name,
     ))
 
     return ChatResponse(
@@ -1019,11 +1049,71 @@ class InternalProbeRequest(BaseModel):
     tools: list[dict] | None = None
 
 
+# ── Policy-name attribution helper ──────────────────────────────────────────
+# The Recommendations tab in the UI checks each attempt's
+# guard_decision.policy_name to decide whether to flag "No policy coverage
+# for <probe>". Lexical / obfuscation rules are deterministic Python rules,
+# not OPA policies, so they don't naturally produce a policy package name —
+# but they ARE the layer that fired, and operators reading the audit trail
+# need to know that. This map translates an internal guard_reason / category
+# into the canonical OPA package name that conceptually owns the rule, so
+# decision logs and the Recommendations view both attribute the block to a
+# named policy.
+_POLICY_NAME_BY_REASON: dict[str, str] = {
+    "lexical_block":           "ai.security.jailbreak_detect",
+    "obfuscation_block":       "ai.security.obfuscation_screen",
+    "base64_payload":          "ai.security.obfuscation_screen",
+    "hex_payload":             "ai.security.obfuscation_screen",
+    "rot13_payload":           "ai.security.obfuscation_screen",
+    "leet_payload":            "ai.security.obfuscation_screen",
+    "punctuation_injection":   "ai.security.obfuscation_screen",
+    "unicode_invisible":       "ai.security.obfuscation_screen",
+    "jailbreak_attempt":       "ai.security.jailbreak_detect",
+    "prompt_injection":        "ai.security.jailbreak_detect",
+    "indirect_injection":      "ai.security.jailbreak_detect",
+    "social_engineering":      "ai.security.jailbreak_detect",
+    "exfiltration":            "ai.security.exfiltration_guard",
+    "tool_abuse":              "ai.security.tool_injection_guard",
+    "malware_generation":      "ai.security.malware_guard",
+    "harmful_synthesis":       "ai.security.harmful_synthesis_guard",
+    "privilege_escalation":    "ai.security.privilege_escalation_guard",
+    "obfuscation":             "ai.security.obfuscation_screen",
+    "output_echo":             "ai.security.output_echo_screen",
+}
+
+
+def _policy_name_for_decision(decision_obj, guard_reason: str) -> str:
+    """Resolve the OPA-style policy-name attribution for a decision.
+
+    Order: explicit signals.guard_categories first (a list of named
+    categories the upstream lexical / prompt-security service emitted),
+    then guard_reason as a fallback, then "" if neither maps to a known
+    policy. The empty-string return is what triggers the
+    no_policy_coverage rec — but at this point we've tried everything
+    we know to attribute, so the gap is real and the rec is correct.
+    """
+    cats = (decision_obj.signals.get("guard_categories", []) or []) if decision_obj else []
+    for cat in cats:
+        if cat in _POLICY_NAME_BY_REASON:
+            return _POLICY_NAME_BY_REASON[cat]
+    if guard_reason in _POLICY_NAME_BY_REASON:
+        return _POLICY_NAME_BY_REASON[guard_reason]
+    return ""
+
+
 class InternalProbeResponse(BaseModel):
     response: str
     guard_verdict: str
     guard_score: float = 0.0
     guard_reason: str = ""
+    # OPA-style policy package name that owns this decision, e.g.
+    # "ai.security.jailbreak_detect" or "ai.security.obfuscation_screen".
+    # Resolved by _policy_name_for_decision() from the decision's
+    # guard_categories signals or guard_reason.  Empty string when no
+    # policy fired (allow path) — the UI's no_policy_coverage rec keys on
+    # this being empty for an attempt that nonetheless blocked, so we
+    # always populate it on block.
+    policy_name: str = ""
     # When tools are exercised, list which tool names Claude attempted
     # and which were blocked by policy. Garak uses this for richer
     # verdict scoring than just "model output text matched detector".
@@ -1058,6 +1148,33 @@ async def internal_probe(
     guard_verdict = "block" if decision.is_blocked else "allow"
     guard_score   = float(decision.signals.get("guard_score", 0.0))
     guard_reason  = decision.reason or ""
+    # ── Score-display contract fix ──────────────────────────────────────────
+    # Rule-based blocks (lexical / obfuscation / OPA pattern match) short-
+    # circuit before Llama Guard runs, so guard_score stays at its
+    # initialised 0.0.  Surfacing "BLOCKED · score 0.00" in the UI reads as
+    # contradictory and masks the fact that the block was high-confidence.
+    #
+    # Llama-Guard-driven blocks ARE probabilistic and already carry a real
+    # LG score (typically 0.3–0.95) — we leave those untouched.  Only blocks
+    # with a literal 0.0 score are rule-based; for those we surface 0.95 to
+    # reflect high — but not absolute — confidence.  We deliberately stop
+    # short of 1.0 because:
+    #   * regex / substring patterns CAN have edge-case false positives that
+    #     surface later, so claiming absolute certainty is dishonest;
+    #   * Llama Guard itself caps around 0.95–0.98 for severe content,
+    #     keeping rule-based and LG-based scores on the same scale makes
+    #     downstream comparisons (severity mapping, Flink CEP thresholds)
+    #     meaningful;
+    #   * 1.0 is conventionally reserved for saturated / pinned values, so
+    #     leaving it free preserves headroom for explicit escalations.
+    # 0.95 maps to "critical" in the runner's severity map (0.80 floor) so
+    # the UI tile shows BLOCK · score 0.95 and the row renders red.
+    if decision.is_blocked and guard_score == 0.0:
+        guard_score = 0.95
+    # Resolve the OPA-style policy name that owns this decision so the
+    # Recommendations tab in the UI can attribute the block instead of
+    # flagging "No policy coverage for <probe>".
+    policy_name = _policy_name_for_decision(decision, guard_reason) if decision.is_blocked else ""
 
     def _publish_rt_event(gv: str, gc: list) -> None:
         """Publish a RawEvent to Kafka so probes flow through Flink/processor."""
@@ -1095,6 +1212,7 @@ async def internal_probe(
             guard_verdict=guard_verdict,
             guard_score=guard_score,
             guard_reason=guard_reason,
+            policy_name=policy_name,
         )
 
     # 2. LLM call — use async client so the event loop stays unblocked.
@@ -1165,35 +1283,80 @@ async def internal_probe(
             log.warning("internal_probe: LLM call failed: %s", _le)
             rt_llm_response = f"[LLM error: {_le}]"
 
-    # 3. Output scanning (secrets/PII + OPA output policy)
+    # 3. Output scanning (echo-regurgitation + secrets/PII + OPA output policy)
     _output_action = "allow"
     if rt_llm_response and not rt_llm_response.startswith("["):
-        _cs, _cp = _scan_output(rt_llm_response)
-        try:
-            async with httpx.AsyncClient(timeout=1.0) as _opa_cli:
-                _or = await _opa_cli.post(
-                    f"{OPA_URL_FOR_GATE}/v1/data/spm/output/allow",
-                    json={"input": {"contains_secret": _cs, "contains_pii": _cp, "llm_verdict": "allow"}},
-                )
-                if _or.status_code == 200:
-                    _res = _or.json().get("result", {})
-                    _output_action = _res.get("decision", "allow") if isinstance(_res, dict) else "allow"
-        except Exception as _oe:
-            log.warning("internal_probe: OPA output check failed: %s", _oe)
+        # 3a. Prompt-echo screen.
+        #
+        # When the model emits the adversarial prompt back instead of
+        # refusing, the input-side scanners (lexical → guard model → OPA)
+        # have already returned "allow" for the prompt itself — by the
+        # time we get here, the failure is purely an OUTPUT-side one.
+        # The prompt-echo screen is the only layer that compares the
+        # response to the prompt, so it's the only place this regurgitation
+        # failure mode can be caught. We promote it to a block (not a
+        # redact) because the entire response is suspect.
+        _echo_blocked, _echo_reason = screen_output_echo(req.prompt, rt_llm_response)
+        if _echo_blocked:
+            log.info(
+                "internal_probe: output echo detected (%s) — blocking response "
+                "session=%s", _echo_reason, probe_session_id,
+            )
+            # Override the input-side verdict: even though the prompt
+            # passed, the model engaged with adversarial content by
+            # regurgitating it. From the operator's perspective this is
+            # a real attack we caught at the output layer (defense held
+            # at the LAST line of defense, not the first).
+            guard_verdict = "block"
+            guard_reason  = (
+                f"Output regurgitation: model echoed adversarial prompt back "
+                f"({_echo_reason}). Response withheld."
+            )
+            # Make sure the original prompt does NOT escape via the response
+            # body — that's the leak we're closing.
+            rt_llm_response = "[BLOCKED by output echo screen]"
+            # Annotate the guard signals so downstream Kafka consumers
+            # (Flink CEP, processor, posture pipeline) can attribute the
+            # block correctly.
+            _categories = list(decision.signals.get("guard_categories", []))
+            if "output_echo" not in _categories:
+                _categories.append("output_echo")
+            decision.signals["guard_categories"] = _categories
+        else:
+            # 3b. Existing secrets/PII + OPA output-policy check.
+            _cs, _cp = _scan_output(rt_llm_response)
+            try:
+                async with httpx.AsyncClient(timeout=1.0) as _opa_cli:
+                    _or = await _opa_cli.post(
+                        f"{OPA_URL_FOR_GATE}/v1/data/spm/output/allow",
+                        json={"input": {"contains_secret": _cs, "contains_pii": _cp, "llm_verdict": "allow"}},
+                    )
+                    if _or.status_code == 200:
+                        _res = _or.json().get("result", {})
+                        _output_action = _res.get("decision", "allow") if isinstance(_res, dict) else "allow"
+            except Exception as _oe:
+                log.warning("internal_probe: OPA output check failed: %s", _oe)
 
-        if _output_action == "redact":
-            rt_llm_response = _redact_output(rt_llm_response)
-        elif _output_action == "block":
-            rt_llm_response = "[BLOCKED by output policy]"
+            if _output_action == "redact":
+                rt_llm_response = _redact_output(rt_llm_response)
+            elif _output_action == "block":
+                rt_llm_response = "[BLOCKED by output policy]"
 
     # 4. Publish to Kafka → flows through Flink/processor/posture pipeline
     _publish_rt_event(guard_verdict, decision.signals.get("guard_categories", []))
+
+    # Re-resolve policy_name in case the output-side echo screen flipped the
+    # verdict to block after the LLM call (the input-side policy_name above
+    # was computed before that, so it'd be empty for output-echo blocks).
+    if guard_verdict == "block" and not policy_name:
+        policy_name = _policy_name_for_decision(decision, guard_reason)
 
     return InternalProbeResponse(
         response=rt_llm_response,
         guard_verdict=guard_verdict,
         guard_score=guard_score,
         guard_reason=guard_reason,
+        policy_name=policy_name,
         tools_invoked=rt_tools_invoked,
         tools_blocked=rt_tools_blocked,
     )
@@ -1227,6 +1390,16 @@ async def chat_stream(
     guard_score      = _stream_decision.signals.get("guard_score",      0.0)
     guard_categories = _stream_decision.signals.get("guard_categories", [])
     guard_verdict    = "block" if _stream_decision.is_blocked else "allow"
+    # Score-display + policy-name attribution (same contract as /chat and
+    # /internal/probe). Without these, every stream-side block lands in the
+    # WS event payload and the audit log with score 0.0 / policy_name "" and
+    # the Runtime page renders it as "Unresolved Policy".
+    if _stream_decision.is_blocked and guard_score == 0.0:
+        guard_score = 0.95
+    policy_name = (
+        _policy_name_for_decision(_stream_decision, _stream_decision.reason or "")
+        if _stream_decision.is_blocked else ""
+    )
 
     # ── Chat → WS lineage emitter (defined BEFORE the blocked branch so
     #    both allow and block paths can emit canonical session events) ───────
@@ -1326,6 +1499,7 @@ async def chat_stream(
                 "explanation":    _stream_decision.explanation,
                 "correlation_id": _stream_decision.correlation_id,
                 "guard_score":    guard_score,
+                "policy_name":    policy_name,
                 "prompt_len":     len(req.prompt),
                 "session_id":     req.session_id,
             },
@@ -1334,13 +1508,18 @@ async def chat_stream(
             raw_token=token, prompt=req.prompt, session_id=req.session_id,
             claims=claims, guard_verdict="block", guard_score=guard_score,
             guard_categories=guard_categories, decision="blocked", tool_uses=[],
+            policy_name=policy_name,
         ))
         # Lineage: terminal block + completion (so the graph closes cleanly).
+        # policy_name on the WS event is what the Runtime page Control panel
+        # and Policy Impact tab read to render a real policy label instead
+        # of "Unresolved Policy".
         await _emit_ws("policy.blocked", {
             "reason":      _stream_decision.reason,
             "blocked_by":  _stream_decision.blocked_by,
             "categories":  _stream_decision.categories,
             "guard_score": guard_score,
+            "policy_name": policy_name,
         })
         await _emit_ws("session.completed", {
             "event_id":    event_id,
@@ -1575,6 +1754,11 @@ async def chat_stream(
                 guard_categories=guard_categories,
                 decision="allow",
                 tool_uses=tool_uses,
+                # policy_name is "" on the allow path — uniform contract
+                # across /chat, /chat/stream, and /internal/probe so the
+                # orchestrator never sees a mix of "allowed-with-policy"
+                # vs "allowed-without-policy" rows.
+                policy_name=policy_name,
             ))
 
         except Exception as e:

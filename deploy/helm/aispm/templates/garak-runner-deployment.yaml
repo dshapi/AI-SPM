@@ -32,8 +32,18 @@ spec:
               value: "postgresql://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
             - name: LOG_LEVEL
               value: "INFO"
+            # Per-probe wall-clock budget enforced inside garak's probe
+            # runner. The original 60s default tripped almost every probe
+            # on kind-on-Mac because each /internal/probe call goes
+            # through the full guard chain (lexical → Llama Guard →
+            # OPA → Anthropic → output scan), and a single attempt can
+            # legitimately take 30-90s under load. 300s gives a probe
+            # of 10 attempts (with 8-wide parallelism) realistic
+            # headroom while still cancelling truly stuck probes.
+            # Mirrors PROBE_TIMEOUT_S consumed by the api service's
+            # simulation-hard-timeout derivation; both should match.
             - name: PROBE_TIMEOUT_S
-              value: "60"
+              value: "300"
             - name: GARAK_WORKERS
               value: "4"
             - name: GARAK_PARALLEL_ATTEMPTS

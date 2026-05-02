@@ -38,6 +38,15 @@
 #                                                # script for details)
 # ─────────────────────────────────────────────────────────────────────────
 
+# ── Ingress / gateway hostname ──────────────────────────────────────────
+# Multinode kind cluster maps aispm.local → 127.0.0.1 in /etc/hosts and
+# exposes the Istio gateway on NodePort 30443. The base values.yaml
+# default is aispm.example.com (the prod hostname); override here so the
+# dev-multinode chart matches what's already in /etc/hosts and what the
+# kind-multinode-ha runbook documents.
+ingress:
+  host: aispm.local
+
 # ── Kafka — full KRaft quorum across 3 nodes ────────────────────────────
 kafka:
   replicas: 3
@@ -51,6 +60,14 @@ kafka:
 # aware). The chart's built-in single-pod StatefulSets are skipped.
 spmDb:
   enabled: false
+  # External Postgres lives outside the chart (CNPG-managed HA cluster
+  # created by deploy/scripts/kind-databases-ha.sh). The chart still
+  # renders an ExternalName Service named `spm-db` that aliases the
+  # well-known hostname every consumer's SPM_DB_URL hardcodes
+  # (`spm-db.aispm.svc.cluster.local`) to the CNPG read-write endpoint.
+  # When CNPG promotes a new primary, spm-db-rw retargets automatically
+  # and this alias follows along — failover-safe with no chart edits.
+  externalName: spm-db-rw.aispm.svc.cluster.local
 redis:
   enabled: false
 

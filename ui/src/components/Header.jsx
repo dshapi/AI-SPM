@@ -14,7 +14,14 @@ export default function Header({ model, models, onModelChange, onNewChat }) {
       zIndex: 100,
     }}>
       {/* Wordmark */}
-      <div style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
+      <div style={{ display: 'flex', alignItems: 'center', flex: 1, gap: 8 }}>
+        <img
+          src="/logo.png"
+          alt="Orbyx"
+          width={24}
+          height={24}
+          style={{ display: 'block', borderRadius: 4 }}
+        />
         <span style={{ fontWeight: 700, fontSize: 16, letterSpacing: '-0.02em', color: 'var(--text)' }}>
           Orbyx
         </span>

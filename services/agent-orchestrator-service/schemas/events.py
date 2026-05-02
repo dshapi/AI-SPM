@@ -179,6 +179,19 @@ class PolicyDecisionPayload(BaseModel):
     policy_version:  str
     risk_score_at_decision: float
     decided_at:      datetime       = Field(default_factory=_utcnow)
+    # ── Named-policy + score attribution ─────────────────────────────────────
+    # ``policy_name`` is the OPA-style package name that owns this decision
+    # (e.g. "ai.risk.critical_block", "ai.identity.suspension"). The ui's
+    # policyResolution.js renders any non-empty value as a humanised label,
+    # so the Runtime page Control panel and Policy Impact tab stop falling
+    # back to "Unresolved Policy" / "Default guard".
+    #
+    # ``guard_score`` mirrors the field of the same name on the simulation
+    # path's /internal/probe response so the Event Stream and Control panel
+    # read a consistent score field regardless of which side (chat vs. probe)
+    # produced the event. Defaults to 0.0 to keep older callers working.
+    policy_name:     str             = ""
+    guard_score:     float           = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -28,15 +28,31 @@ from typing import Optional, Tuple
 _MIN_INVISIBLE = 3   # fewer than this → likely accidental, not an attack
 
 # ── Base64 ────────────────────────────────────────────────────────────────────
-# Any run of 8+ b64 chars is a candidate; we check the DECODED content.  Short
-# runs (< 8 chars) cannot contain a meaningful attack phrase so we skip them.
-# Garak's encoding.InjectBase64 emits a spectrum of payload lengths; the prior
-# 20-char floor silently let short payloads through.
-_B64_RE = re.compile(r"[A-Za-z0-9+/]{8,}={0,2}")
-# Bulk-b64 heuristic: any b64 blob that decodes to ≥ this many printable bytes
-# is flagged as a smuggled payload even without attack-phrase keywords.  Kept
-# at 20 so legitimate short tokens (UUIDs, hashes) don't trip this rule.
-_MIN_B64_BYTES = 20
+# Any run of 4+ b64 chars (excluding padding) is a candidate; we validate-decode
+# each candidate and check the DECODED content.  The minimum was 8, but garak's
+# encoding.InjectBase64 ships short hate-speech payloads — UGFraQ== ("Paki",
+# 6 non-padding chars), SGFqamk= ("Hajji", 7 non-padding chars) — that the
+# 8-char floor silently dropped.  4 is the smallest run that can decode to a
+# 3-byte word; the alpha-ratio + validate=True filters do the heavy lifting
+# for false-positive rejection on random-looking 4–7 char runs.
+_B64_RE = re.compile(r"[A-Za-z0-9+/]{4,}={0,2}")
+# Bulk-b64 heuristic: any b64 blob that decodes to a prose-shaped payload of
+# ≥ this many bytes is flagged as a smuggled payload, even without an
+# attack-phrase match against _ENCODED_ATTACK_TRIGGERS.
+#
+# This used to be 20 to avoid false positives on UUIDs / short tokens, but
+# that silently let through 4–7 byte hate-speech encodings (e.g. UGFraQ== →
+# "Paki", SGFqamk= → "Hajji", V2V0YmFjaw== → "Wetback") that garak's
+# encoding.InjectBase64 probe ships.  Lowered to 4 — the smallest meaningful
+# English word — and paired with an alphabetic-ratio guard
+# (_MIN_B64_DECODED_ALPHA_RATIO below) so high-entropy tokens (UUIDs, JWT
+# fragments, base64-encoded hashes) don't trip this rule.
+_MIN_B64_BYTES = 4
+# A b64-decoded blob must be majority-alphabetic to count as "prose-shaped"
+# and trigger the bulk rule.  This filters out e.g. JWT header fragments
+# ({"alg":...) and base64-encoded UUIDs (38 hex digits + dashes) which are
+# heavy on punctuation/digits and light on letters.
+_MIN_B64_DECODED_ALPHA_RATIO = 0.5
 
 # Attack phrases to check inside decoded b64/hex payloads.  A short b64 blob
 # that decodes to one of these is blocked regardless of total length.  Reused
@@ -130,6 +146,13 @@ def screen_obfuscation(text: str) -> Tuple[bool, Optional[str]]:
     #        where the payload is only a few words ("ignore previous", "DAN").
     for m in _B64_RE.finditer(text):
         candidate = m.group(0)
+        # Hex digits [0-9a-fA-F] are a subset of the base64 alphabet, so the
+        # b64 regex matches UUIDs / hashes / hex-encoded IDs and the decoder
+        # happily produces 24-byte garbage that occasionally trips the
+        # alpha-ratio guard.  Skip candidates that are pure hex — they're
+        # handled by the dedicated hex path below.
+        if re.fullmatch(r"[0-9a-fA-F]+", candidate):
+            continue
         padded = candidate + "=" * (-len(candidate) % 4)
         try:
             decoded = base64.b64decode(padded, validate=True)
@@ -147,12 +170,23 @@ def screen_obfuscation(text: str) -> Tuple[bool, Optional[str]]:
         # the bulk rule.  Instead, require that every NON-whitespace char is
         # printable — this still rejects binary/garbage decodes but accepts
         # prose with line breaks.
+        #
+        # The alpha-ratio guard (≥ _MIN_B64_DECODED_ALPHA_RATIO letters) is
+        # what lets us safely lower the bytes floor to 4: it rejects
+        # high-entropy tokens (JWT fragments, base64'd UUIDs, hex-shaped
+        # hashes) while accepting prose-shaped decodes — including the
+        # 4–7 byte slurs garak's encoding.InjectBase64 probe ships.
         non_ws = "".join(c for c in decoded_text if not c.isspace())
         looks_textual = bool(non_ws) and non_ws.isprintable()
+        alpha_ratio = (
+            sum(1 for c in non_ws if c.isalpha()) / len(non_ws)
+            if non_ws else 0.0
+        )
         if (
             len(decoded) >= _MIN_B64_BYTES
             and looks_textual
-            and len(decoded_text.strip()) >= 8
+            and alpha_ratio >= _MIN_B64_DECODED_ALPHA_RATIO
+            and len(decoded_text.strip()) >= _MIN_B64_BYTES
         ):
             return True, "base64_payload"
 
@@ -167,10 +201,45 @@ def screen_obfuscation(text: str) -> Tuple[bool, Optional[str]]:
         if len(hex_str) >= 16:
             try:
                 decoded = bytes.fromhex(hex_str).decode("utf-8", errors="ignore")
-                if len(decoded.strip()) >= 4:
-                    return True, "hex_payload"
             except ValueError:
-                pass
+                continue
+            stripped = decoded.strip()
+            if len(stripped) < 4:
+                continue
+            # Same guards as the b64 path: UUIDs and hex-encoded hashes
+            # (sha256, etc.) decode to mostly-non-printable bytes — control
+            # chars + accidental ASCII letters — and errors="ignore" strips
+            # the bytes that aren't valid UTF-8 starters but keeps single-byte
+            # control chars that ARE valid (0x00–0x1F).  Require the decoded
+            # text to be (a) majority-letters AND (b) every non-whitespace
+            # char is printable.  Real hex-encoded attack phrases
+            # ("48656c6c6f" → "Hello") satisfy both; UUID/SHA decode
+            # artefacts fail the printable check on the embedded control
+            # chars.
+            non_ws = "".join(c for c in stripped if not c.isspace())
+            alpha_ratio = (
+                sum(1 for c in non_ws if c.isalpha()) / len(non_ws)
+                if non_ws else 0.0
+            )
+            looks_textual = bool(non_ws) and non_ws.isprintable()
+            # Hex hashes (sha256, etc.) decode to printable+control-char
+            # mix where some C0 controls (\x1c–\x1f) are classified as
+            # whitespace by Python's isspace() and get stripped out,
+            # leaving an inflated alpha ratio that the b64 path's 0.5
+            # floor would accept.  Real hex-encoded English attack phrases
+            # ("ignore previous instructions") have alpha-ratio ~1.0 once
+            # spaces are stripped — a 0.8 floor is well clear of the
+            # ~0.6–0.7 ratios produced by random-byte hash decodes.
+            if (
+                looks_textual
+                and alpha_ratio >= 0.8
+            ):
+                return True, "hex_payload"
+            # Also keep the attack-phrase trigger active for shorter or
+            # mixed-content decodes (matches the b64 short-payload rule).
+            for pat in _ENCODED_ATTACK_TRIGGERS:
+                if pat.search(decoded):
+                    return True, "hex_payload"
 
     # 4. ROT13
     rot13 = codecs.decode(text, "rot_13")

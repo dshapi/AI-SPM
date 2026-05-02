@@ -237,6 +237,12 @@ class SessionService:
                 reason=policy.reason,
                 policy_version=policy.policy_version,
                 risk_score_at_decision=risk.score,
+                # Forward named-policy + guard-score attribution from
+                # PolicyClient so the Runtime page renders a real policy
+                # label + score the rule used, instead of the "Unresolved
+                # Policy" + "v1.4.2 Allowed" fallback.
+                policy_name=policy.policy_name,
+                guard_score=policy.guard_score,
             ),
             correlation_id=trace_id,
         )

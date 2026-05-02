@@ -91,6 +91,17 @@ data:
     s3.secret-key: {{ .Values.flink.s3.secretKey }}
     {{- end }}
 
+    # ── JVM options — JDK 17+ + PyFlink/Apache-Beam compatibility ───────────────
+    # The actual flag set is defined in values.yaml under ``flink.jvmOpts``
+    # so operators can extend it via a values override without editing this
+    # template.  See the comment block on that key for the full rationale;
+    # short version: JDK 17 module boundaries break Beam's reflection-based
+    # serialization layer unless these ``--add-opens`` flags are passed,
+    # symptom is a TM crash loop on every checkpoint/flush.
+    #
+    # Wired into BOTH JobManager and TaskManager JVMs by ``env.java.opts.all``.
+    env.java.opts.all: {{ .Values.flink.jvmOpts | quote }}
+
     # ── Restart strategy ─────────────────────────────────────────────────────────
     restart-strategy.type: exponential-delay
     restart-strategy.exponential-delay.initial-backoff: 10s

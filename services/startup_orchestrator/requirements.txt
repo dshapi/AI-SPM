@@ -3,3 +3,7 @@ redis==5.2.1
 cryptography==43.0.3
 requests==2.32.3
 pydantic==2.9.2
+# Used by Step 7's read-only verification that platform models are
+# registered in spm-db (db-seed owns the writes; orchestrator only
+# checks). ~3MB; orchestrator image runs once at boot.
+psycopg2-binary==2.9.10

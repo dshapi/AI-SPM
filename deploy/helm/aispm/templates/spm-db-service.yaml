@@ -1,4 +1,27 @@
 # deploy/helm/aispm/templates/spm-db-service.yaml
+#
+# Two render modes, mutually exclusive:
+#
+#   1. spmDb.enabled=true  (default, single-node dev)
+#        Headless Service backed by the chart's spm-db StatefulSet pods.
+#
+#   2. spmDb.enabled=false AND spmDb.externalName set (multinode HA)
+#        ExternalName alias from `spm-db.<ns>.svc.cluster.local` to the
+#        external Postgres primary endpoint (e.g. CloudNativePG's
+#        `spm-db-rw` Service). This preserves the well-known
+#        `spm-db.aispm.svc.cluster.local` hostname every consumer's
+#        SPM_DB_URL hardcodes — without this alias every service that
+#        reads SPM_DB_URL would fail to resolve on a fresh multinode
+#        install because the chart correctly skips creating the
+#        StatefulSet + headless Service.
+#
+#        Failover-safe: ExternalName is a CNAME, so when CNPG promotes
+#        a new primary the underlying spm-db-rw retargets and our alias
+#        follows along without any service edits.
+#
+# Anything else (enabled=false AND no externalName) → no Service rendered.
+# Operators in that mode are responsible for providing connectivity
+# themselves (typically by overriding SPM_DB_URL via platformEnv).
 {{- if .Values.spmDb.enabled | default true }}
 apiVersion: v1
 kind: Service
@@ -12,4 +35,18 @@ spec:
   ports:
     - port: 5432
       targetPort: 5432
+{{- else if .Values.spmDb.externalName }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: spm-db
+  namespace: {{ .Values.global.namespace }}
+spec:
+  type: ExternalName
+  externalName: {{ .Values.spmDb.externalName }}
+  ports:
+    - port: 5432
+      targetPort: 5432
+      protocol: TCP
+      name: postgres
 {{- end }}

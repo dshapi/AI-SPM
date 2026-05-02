@@ -3,8 +3,21 @@ apiVersion: v2
 name: aispm
 description: AI Security Posture Management platform
 type: application
-version: 1.0.0
-appVersion: "3.0.0"
+# Chart version — bump for any chart-only change (template, values, default).
+# 1.1.0: pipeline-level jailbreak detection (BLACK ALERT / PERSONA= /
+# uncensored persona patterns in jailbreak_policy.rego); Flink JDK-17
+# `--add-opens` flags lifted into a `flink.jvmOpts` values knob and wired
+# into env.java.opts.all in flink-conf-configmap.yaml; dev-multinode
+# `ingress.host` override added so the chart matches /etc/hosts on kind.
+version: 1.1.0
+# appVersion — bump alongside services/api + services/garak image rebuilds.
+# 3.1.0: output_echo_screen module wired into /internal/probe (catches
+# model-regurgitates-prompt failures the secrets/PII scanner doesn't see);
+# expanded platform_shared/lexical_patterns.py jailbreak persona coverage;
+# Garak runner emits simulation.blocked for every probe attempt with
+# defense_outcome="stopped" or "missed" instead of routing low-severity
+# findings to simulation.allowed.
+appVersion: "3.1.0"
 icon: https://raw.githubusercontent.com/YOUR_ORG/aispm/main/docs/logo.png
 keywords:
   - ai-security

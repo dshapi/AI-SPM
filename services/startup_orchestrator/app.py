@@ -608,58 +608,56 @@ def validate_opa() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def register_cpm_models_with_spm() -> None:
-    """Self-register CPM's own models in spm-api.
+    """Verify the platform's own models are registered in spm-api.
 
-    spm-api is NOT in startup-orchestrator's depends_on (it starts in parallel).
-    This step retries for up to ~60s to give spm-api time to come up. If it
-    doesn't, we log a warning and continue — models can be registered later on
-    the next restart, and the warning makes it visible in logs.
+    Historical context: this step used to POST to ``spm-api /models`` to
+    self-register llama-guard-3 and output-guard-llm. That endpoint is
+    gated by ``Depends(require_admin)`` (JWT admin auth) and the
+    orchestrator has no admin JWT — so every boot logged
+    "spm-api returned 401 for llama-guard-3" 20 times before giving up,
+    even though everything was actually fine.
+
+    The actual registration now lives in
+    ``services/spm_api/seed_db.py:seed_models()`` which inserts the same
+    rows directly into ``model_registry`` from the db-seed Job. That
+    Job runs before any consumer, so by the time this orchestrator
+    runs, the models are already in the DB. We keep this step as a
+    *verification* — it queries the DB read-only and warns if either
+    expected model is missing (would indicate db-seed didn't run).
     """
-    log.info("── Step 7: Registering CPM models with AI SPM ──")
-    models = [
-        {
-            "name": "llama-guard-3", "version": "3.0.0",
-            "provider": "local", "purpose": "content_screening",
-            "risk_tier": "limited", "tenant_id": "global",
-            "status": "approved", "approved_by": "startup-orchestrator",
-        },
-        {
-            "name": "output-guard-llm", "version": SERVICE_VERSION,
-            "provider": "local", "purpose": "output_screening",
-            "risk_tier": "limited", "tenant_id": "global",
-            "status": "approved", "approved_by": "startup-orchestrator",
-        },
-    ]
-    max_attempts = 20  # ~60s at 3s sleep
-    for attempt in range(max_attempts):
-        try:
-            for model in models:
-                resp = requests.post(
-                    f"{SPM_API_URL}/models",
-                    json=model,
-                    timeout=5.0,
+    log.info("── Step 7: Verifying CPM model registration ──")
+    expected = ["llama-guard-3", "output-guard-llm"]
+    try:
+        import psycopg2  # already in orchestrator's requirements
+        from urllib.parse import urlparse, unquote
+
+        # Reuse the SPM_DB_URL the rest of the orchestrator uses.
+        url = os.getenv("SPM_DB_URL", "").strip()
+        if not url:
+            log.warning("  SPM_DB_URL not set — skipping verification")
+            return
+        # psycopg2 wants the sync scheme; strip asyncpg if present.
+        url = url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+        with psycopg2.connect(url) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM model_registry WHERE name = ANY(%s)",
+                    (expected,),
                 )
-                if resp.status_code in (200, 201, 409):  # 409 = already exists, ok
-                    log.info("  ✓ Registered: %s (HTTP %d)", model["name"], resp.status_code)
-                else:
-                    raise RuntimeError(
-                        f"spm-api returned {resp.status_code} for {model['name']}"
-                    )
-            return  # success
-        except Exception as e:
-            remaining = max_attempts - attempt - 1
-            if remaining > 0:
-                log.info(
-                    "  SPM registration attempt %d/%d failed: %s — retrying in 3s...",
-                    attempt + 1, max_attempts, e
-                )
-                time.sleep(3)
-            else:
-                log.warning(
-                    "  ✗ SPM registration failed after %d attempts: %s — "
-                    "models will be unregistered until the next restart",
-                    max_attempts, e
-                )
+                found = {row[0] for row in cur.fetchall()}
+        missing = [m for m in expected if m not in found]
+        if missing:
+            log.warning(
+                "  ⚠  Expected platform models missing from model_registry: %s — "
+                "did the db-seed Job run? Check seed_db.seed_models().",
+                missing,
+            )
+        else:
+            log.info("  ✓ Platform models registered: %s", expected)
+    except Exception as e:
+        # Verification failure is informational — never blocks startup.
+        log.warning("  Could not verify model registration: %s", e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
