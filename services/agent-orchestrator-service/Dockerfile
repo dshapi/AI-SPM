@@ -41,6 +41,13 @@ COPY --chown=appuser:appgroup platform_shared/ ./platform_shared/
 # Copy application source
 COPY --chown=appuser:appgroup services/agent-orchestrator-service/ .
 
+# Bundle the canonical OPA Rego policies so the policies-store seed can
+# ingest them at startup as the real Policy Library content (replacing the
+# hardcoded mock policies that used to seed the table). Source of truth is
+# deploy/helm/aispm/files/policies/ — the same directory the OPA ConfigMap
+# template renders from — so chart and DB never drift.
+COPY --chown=appuser:appgroup deploy/helm/aispm/files/policies/ ./_rego_seed/
+
 USER appuser
 
 # Expose service port

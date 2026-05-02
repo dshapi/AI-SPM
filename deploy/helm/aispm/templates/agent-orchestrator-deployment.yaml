@@ -14,6 +14,11 @@ spec:
     metadata:
       labels: { app: agent-orchestrator }
     spec:
+      # ServiceAccount with read+patch on the opa-policies ConfigMap, used
+      # by policies/opa_sync.activate_with_opa_sync when an operator
+      # promotes a policy version in the UI. Defined in
+      # templates/agent-orchestrator-rbac.yaml.
+      serviceAccountName: agent-orchestrator
       containers:
         - name: agent-orchestrator
           image: {{ include "aispm.image" .Values.images.agentOrchestrator }}

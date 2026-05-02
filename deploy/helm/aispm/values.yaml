@@ -95,6 +95,35 @@ kafka:
   storage: 10Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
   minInsyncReplicas: 2       # producer acks require 2/3 in-sync replicas
+  # ── Pod resources ──────────────────────────────────────────────────────
+  # Without these the StatefulSet runs as BestEffort QoS — kubelet's first
+  # choice when CPU pressure hits.  Under Flink CEP transaction-init storms
+  # the Raft heartbeat thread loses its scheduling slot, vote requests miss
+  # their (default 2s) deadline, leadership churns every few seconds, and
+  # the readiness probe falls over because the cluster is in constant
+  # metadata flux (observed 2026-05-02: epoch went 3219 → 3231 in 30s,
+  # all three brokers stayed 0/1 Ready for 26h).  Requesting 500m/1.5Gi
+  # makes the brokers Burstable so they get CFS shares ahead of best-effort
+  # pods; the 2 CPU / 2Gi limit covers the JVM heap + native overhead
+  # without exploding on a 4-node kind cluster (3 servers × 2-4 vCPU).
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1.5Gi"
+    limits:
+      cpu: "2"
+      memory: "2Gi"
+  # ── KRaft / controller timeouts ────────────────────────────────────────
+  # Defaults: requestTimeoutMs=2000, controllerQuorumElectionTimeoutMs=1000,
+  # controllerQuorumFetchTimeoutMs=2000.  On kind-on-Docker we routinely
+  # see 1-3s pauses from CRI-O scheduling + local-path fsync; raising these
+  # to 10s eliminates spurious leader churn without compromising failure
+  # detection (a real broker death still flips leadership in <30s).
+  controllerTimeouts:
+    request: 10000             # producer & inter-broker requests
+    quorumRequest: 10000       # KRaft RPC between voters
+    quorumElection: 10000      # how long a candidate waits for votes
+    quorumFetch: 10000         # how long a follower tolerates leader silence
 
 redis:
   image: redis

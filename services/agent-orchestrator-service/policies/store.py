@@ -735,6 +735,27 @@ def update_policy(policy_id: str, data: PolicyUpdate, actor: str = "api") -> Opt
         if data.exceptions is not None:
             row.exceptions = data.exceptions
         if data.logic_code is not None:
+            # Defense in depth: a buggy client (or curl typo) sending
+            # logic_code="" must NOT silently wipe the policy.  This is
+            # what caused the May-2-2026 incident where every UI "Save
+            # Draft" click pushed empty logic and bumped policies to
+            # v6/v11.  Empty/whitespace-only payloads now raise so the
+            # client is forced to handle the case explicitly.
+            #
+            # We still allow whitespace-only on policies whose
+            # logic_language is something other than rego/json-schema in
+            # case a future policy type genuinely has empty content —
+            # tighten if/when needed.
+            if not data.logic_code.strip():
+                from fastapi import HTTPException
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "logic_code cannot be empty. Refusing to wipe "
+                        "the existing policy. If you really mean to clear "
+                        "the logic, archive the policy via DELETE instead."
+                    ),
+                )
             row.logic_code = data.logic_code
             lang = data.logic_language or row.logic_language
             row.logic_language = lang

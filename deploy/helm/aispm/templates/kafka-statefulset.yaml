@@ -124,30 +124,64 @@ spec:
               value: {{ .Values.kafka.replicas | quote }}
             - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
               value: "true"
+            # ── KRaft / controller timeouts (values-driven) ───────────────
+            # The defaults (requestTimeoutMs=2000, quorumElection=1000,
+            # quorumFetch=2000) cause leader churn on kind-on-Docker the
+            # moment CFS throttling delays the Raft heartbeat thread by
+            # more than 2 seconds. Bumping all four to 10s rides through
+            # those pauses without masking real broker death — a hung
+            # broker still trips failureThreshold within ~30s.
+            - name: KAFKA_REQUEST_TIMEOUT_MS
+              value: {{ .Values.kafka.controllerTimeouts.request | default 10000 | quote }}
+            - name: KAFKA_CONTROLLER_QUORUM_REQUEST_TIMEOUT_MS
+              value: {{ .Values.kafka.controllerTimeouts.quorumRequest | default 10000 | quote }}
+            - name: KAFKA_CONTROLLER_QUORUM_ELECTION_TIMEOUT_MS
+              value: {{ .Values.kafka.controllerTimeouts.quorumElection | default 10000 | quote }}
+            - name: KAFKA_CONTROLLER_QUORUM_FETCH_TIMEOUT_MS
+              value: {{ .Values.kafka.controllerTimeouts.quorumFetch | default 10000 | quote }}
             - name: CLUSTER_ID
               value: {{ .Values.kafka.clusterId | quote }}
+          # ── Resource requests/limits ──────────────────────────────────────
+          # Promotes the pod from BestEffort QoS to Burstable so kubelet
+          # gives it CFS shares ahead of best-effort pods. Without this,
+          # under Flink CEP transaction-init storms the Raft heartbeat
+          # thread gets starved → leader churn → readiness probe failures
+          # → 26h of 0/1 Ready brokers (incident 2026-05-02).
+          {{- with .Values.kafka.resources }}
+          resources: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          # ── Readiness: TCP probe on 9092 ──────────────────────────────────
+          # Old probe (`kafka-broker-api-versions --bootstrap-server localhost:9092`)
+          # spins up a full JVM client (~3s startup) and walks the metadata
+          # protocol. Under metadata churn it consistently exceeds 5s
+          # timeoutSeconds and flips pods NotReady — exactly when the
+          # cluster needs them MOST visible to drain leader churn. A TCP
+          # check on the listener answers the only question that actually
+          # matters for reachability ("is the broker accepting
+          # connections?"), takes <50ms, and can't be confused by metadata
+          # state. A wedged broker that has the socket open but isn't
+          # serving requests is still detectable — it'll eventually hit
+          # the liveness probe and be restarted.
           readinessProbe:
-            exec:
-              command:
-                - sh
-                - -c
-                - "kafka-broker-api-versions --bootstrap-server localhost:9092"
+            tcpSocket:
+              port: 9092
             initialDelaySeconds: 30
             periodSeconds: 10
-            # k8s default timeoutSeconds is 1, which is way too tight
-            # for `kafka-broker-api-versions`: it spins up a JVM client,
-            # opens a TCP connection, sends a metadata request, and
-            # parses the response. Under modest load (e.g. lots of
-            # Flink CEP transaction-coordinator inits) the client
-            # sometimes takes 2-3s to complete. With timeoutSeconds=1
-            # the probe falsely fails, k8s flips the pod to NotReady,
-            # the headless DNS entry drops, and any caller doing a
-            # fresh hostname lookup (per-request producers in spm-api,
-            # tests) gets NXDOMAIN until the probe passes again.
-            # 5s gives the broker breathing room without masking real
-            # outages — actual broker hangs still trip failureThreshold.
+            timeoutSeconds: 3
+            failureThreshold: 6
+          # ── Liveness: same socket, longer leash ───────────────────────────
+          # Liveness only restarts the pod, so we want it to fire ONLY when
+          # the broker is well and truly hung — not during a 30s leader
+          # election. failureThreshold=12 × periodSeconds=15 = 3min before
+          # restart, which is comfortably longer than any normal Raft
+          # transition.
+          livenessProbe:
+            tcpSocket:
+              port: 9092
+            initialDelaySeconds: 90
+            periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 10
+            failureThreshold: 12
           volumeMounts:
             - name: data
               mountPath: /var/lib/kafka/data

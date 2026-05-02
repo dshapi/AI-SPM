@@ -1,0 +1,69 @@
+# deploy/helm/aispm/templates/agent-orchestrator-rbac.yaml
+#
+# RBAC for the agent-orchestrator service.
+#
+# Why this is needed:
+#   Phase 2 of the policies-page feature adds a transactional activate
+#   path (services/agent-orchestrator-service/policies/opa_sync.py)
+#   that PATCHes the opa-policies ConfigMap when an operator promotes
+#   a policy version in the UI. Without this RBAC, the patch returns
+#   403 Forbidden, the OPA-side enforcement never picks up the new
+#   .rego content, and the activate endpoint rolls back the DB change.
+#
+# What the Role grants:
+#   ConfigMaps (get/patch/update on the single ``opa-policies`` resource)
+#     — Read-modify-write of the opa-policies ConfigMap when activating
+#       a new policy version. ``get`` is needed to read the existing
+#       state; ``patch``/``update`` apply the new .rego content. We do
+#       NOT grant ``create``/``delete`` — the chart owns the lifecycle
+#       of that ConfigMap, the orchestrator only mutates its data field.
+#
+# Scope:
+#   - Namespaced Role (not ClusterRole) confined to the aispm namespace
+#     so the orchestrator can never touch ConfigMaps elsewhere.
+#   - resourceNames pinned to "opa-policies" so even within aispm the
+#     orchestrator cannot read or mutate any other ConfigMap (e.g.
+#     platform-env which holds non-secret config). Operators auditing
+#     the orchestrator's blast radius see exactly what it can touch.
+#
+# If we ever expose the same flow for additional ConfigMaps (e.g. a
+# separate "user-policies" ConfigMap), add the name to resourceNames here.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: agent-orchestrator
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: agent-orchestrator
+rules:
+  # Live OPA policy sync — read + patch the chart-rendered opa-policies
+  # ConfigMap when the UI activates a new policy version.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["opa-policies"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: agent-orchestrator
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: agent-orchestrator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: agent-orchestrator
+subjects:
+  - kind: ServiceAccount
+    name: agent-orchestrator
+    namespace: {{ .Values.global.namespace }}

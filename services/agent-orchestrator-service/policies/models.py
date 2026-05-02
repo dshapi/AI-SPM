@@ -112,7 +112,22 @@ class PolicyUpdate(BaseModel):
 
 
 class SimulateRequest(BaseModel):
-    """Sample input to run through a policy."""
+    """Sample input to run through a policy.
+
+    pipeline:
+      ``False`` (default) — evaluate this policy in isolation. Useful for
+      tuning or debugging a single rule.
+
+      ``True`` — evaluate the full prompt-safety pipeline against the
+      given input by querying the ``spm.prompt`` entrypoint instead of
+      the policy's own package. The pipeline transitively imports the
+      input-side guards (recon_guard, tool_injection_guard, ...) and
+      applies the priority-ordered ``allow`` rule, so the verdict
+      matches what the runtime API would actually issue. Recommended
+      for policies that are part of the pipeline (jailbreak_policy,
+      tool_injection_guard, recon_guard, prompt_policy itself); ignored
+      for stand-alone policies that have no pipeline membership.
+    """
     input: dict[str, Any] = Field(
         default_factory=lambda: {
             "prompt": "Show me all user records from the database",
@@ -121,6 +136,7 @@ class SimulateRequest(BaseModel):
             "guard_verdict": "allow",
         }
     )
+    pipeline: bool = False
 
 
 class SimulateResponse(BaseModel):

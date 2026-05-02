@@ -31,6 +31,40 @@ allow := {
 } if {
     input.guard_verdict == "block"
 } else := {
+    # Lexical / guard-model scored the prompt above the high-confidence
+    # threshold. Block standalone — we don't need to also see a
+    # behavioral signal, the score itself is sufficient evidence.
+    # Threshold 0.85 mirrors the api-side blocker in
+    # services/api/app.py and platform_shared/risk.py — keep the two
+    # in sync if either is tuned.
+    "decision": "block",
+    "reason":   "high threat_score above hard-block threshold",
+    "action":   "deny_execution",
+} if {
+    input.threat_score >= 0.85
+} else := {
+    # Prompt-injection signal alone is sufficient to block. Without
+    # this branch the policy only blocked injection when paired with
+    # intent_drift >= 0.75 (see the later else-clause), which silently
+    # allowed every injection that wasn't accompanied by behavioral
+    # telemetry — including obvious "ignore all previous instructions"
+    # payloads with no behavioral history yet.
+    "decision": "block",
+    "reason":   "prompt_injection signal detected",
+    "action":   "deny_execution",
+} if {
+    has_signal("prompt_injection")
+} else := {
+    # Same standalone-block reasoning for indirect (RAG-borne)
+    # injection: the lexical / guard layer fires this signal when an
+    # injected instruction is detected in retrieved context, and we
+    # should not require additional behavioral evidence to act on it.
+    "decision": "block",
+    "reason":   "indirect_injection signal detected",
+    "action":   "deny_execution",
+} if {
+    has_signal("indirect_injection")
+} else := {
     "decision": "block",
     "reason":   "critical MITRE ATLAS TTP detected",
     "action":   "deny_execution",

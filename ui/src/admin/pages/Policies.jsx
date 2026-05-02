@@ -141,12 +141,29 @@ const SAMPLE_INPUTS = {
   },
 }
 
+// Policy types whose Rego is part of the spm.prompt pipeline. For these we
+// default the "Simulate full pipeline" checkbox to ON, since the user
+// almost always wants the runtime verdict.  Anything else (output-validation,
+// rate-limit, etc.) is stand-alone — the checkbox starts OFF and pipeline
+// mode is essentially a no-op (the entrypoint just doesn't reference them).
+const PIPELINE_POLICY_TYPES = new Set([
+  'prompt-safety',
+  'tool-access',
+  'data-access',
+  'privacy',
+])
+
 function SimulateModal({ policy, onClose, onResult }) {
   const defaultInput = SAMPLE_INPUTS[policy.type] ?? { prompt: 'test', posture_score: 0.3, signals: [] }
   const [inputText, setInputText] = useState(JSON.stringify(defaultInput, null, 2))
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  // Default ON for any policy that participates in the prompt pipeline —
+  // matches the user mental model "what would actually happen at runtime?"
+  // and prevents the confusing single-policy-allow-but-runtime-blocks
+  // scenario that prompted this feature.
+  const [pipelineMode, setPipelineMode] = useState(PIPELINE_POLICY_TYPES.has(policy.type))
 
   async function run() {
     setLoading(true)
@@ -155,7 +172,7 @@ function SimulateModal({ policy, onClose, onResult }) {
       const parsed = JSON.parse(inputText)
       const res = await apiFetch(`/${policy.id}/simulate`, {
         method: 'POST',
-        body: JSON.stringify({ input: parsed }),
+        body: JSON.stringify({ input: parsed, pipeline: pipelineMode }),
       })
       setResult(res)
       onResult && onResult(res)
@@ -224,6 +241,13 @@ function SimulateModal({ policy, onClose, onResult }) {
                 <div className={cn('px-3 py-2 rounded-lg border text-[13px] font-bold text-center uppercase tracking-wide', DECISION_STYLE[result.decision] ?? 'bg-gray-50 border-gray-200 text-gray-700')}>
                   {result.decision}
                 </div>
+                {/* Pipeline badge — surfaces that this verdict came from
+                    the spm.prompt entrypoint, not just this one policy. */}
+                {result.details?.pipeline && (
+                  <div className="px-2 py-1 rounded-md bg-violet-50 border border-violet-200 text-violet-700 text-[10px] font-bold uppercase tracking-[0.08em] text-center">
+                    Pipeline · {result.details.entrypoint || 'spm.prompt.allow'}
+                  </div>
+                )}
                 <div className="bg-gray-50 border border-gray-100 rounded-lg px-3 py-2 space-y-1.5">
                   <p className="text-[10px] font-bold uppercase tracking-[0.07em] text-gray-400">Reason</p>
                   <p className="text-[11.5px] text-gray-700 leading-relaxed">{result.reason}</p>
@@ -235,6 +259,14 @@ function SimulateModal({ policy, onClose, onResult }) {
                   )}
                   <p className="text-[10px] font-bold uppercase tracking-[0.07em] text-gray-400 pt-1">Mode</p>
                   <p className="text-[11px] text-gray-600 capitalize">{result.details?.mode}</p>
+                  {/* Pipeline-mode caveat: the verdict came from currently-deployed
+                      policies, NOT from the unsaved code in the editor. */}
+                  {result.details?.pipeline && result.details?.note && (
+                    <>
+                      <p className="text-[10px] font-bold uppercase tracking-[0.07em] text-gray-400 pt-1">Note</p>
+                      <p className="text-[10.5px] text-gray-500 leading-relaxed italic">{result.details.note}</p>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -242,18 +274,42 @@ function SimulateModal({ policy, onClose, onResult }) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-100">
-          <button onClick={onClose} className="h-8 px-4 rounded-lg border border-gray-200 text-[12px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">
-            Close
-          </button>
-          <button
-            onClick={run}
-            disabled={loading}
-            className="h-8 px-4 rounded-lg bg-violet-600 text-white text-[12px] font-semibold hover:bg-violet-500 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+        <div className="flex items-center justify-between gap-2 px-5 py-3 border-t border-gray-100">
+          {/* Pipeline-mode toggle. Default ON for prompt-pipeline policy
+              types so the verdict matches the runtime. Stand-alone policies
+              start OFF — pipeline mode would just no-op for them. */}
+          <label
+            className="flex items-center gap-2 text-[11.5px] text-gray-600 cursor-pointer select-none"
+            title={
+              pipelineMode
+                ? 'Evaluating against the spm.prompt.allow entrypoint — verdict matches what the runtime API would issue. Unsaved edits are not reflected.'
+                : 'Evaluating this policy in isolation — verdict reflects ONLY this policy’s rules, not the full pipeline.'
+            }
           >
-            {loading ? <Loader2 size={12} className="animate-spin" /> : <Play size={11} strokeWidth={2.5} />}
-            Run
-          </button>
+            <input
+              type="checkbox"
+              checked={pipelineMode}
+              onChange={e => setPipelineMode(e.target.checked)}
+              className="h-3.5 w-3.5 accent-violet-600 cursor-pointer"
+            />
+            <span>
+              Simulate full pipeline
+              {pipelineMode && <span className="ml-1.5 text-[10px] font-semibold text-violet-600 uppercase tracking-wide">on</span>}
+            </span>
+          </label>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="h-8 px-4 rounded-lg border border-gray-200 text-[12px] font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+              Close
+            </button>
+            <button
+              onClick={run}
+              disabled={loading}
+              className="h-8 px-4 rounded-lg bg-violet-600 text-white text-[12px] font-semibold hover:bg-violet-500 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+            >
+              {loading ? <Loader2 size={12} className="animate-spin" /> : <Play size={11} strokeWidth={2.5} />}
+              Run
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -688,7 +744,21 @@ function DetailPanel({ policy, onUpdate, onDelete, onDuplicate, toast }) {
     }
   }
 
-  async function handleSaveDraft() {
+  // Internal helper — both Save&Activate and Save-as-Draft funnel through
+  // here.  Keeps the empty-PUT defense in one place and folds the
+  // mode-switch (Draft|Enforce) into the same single PUT so the operator
+  // can't end up in a half-saved state.
+  async function _doSave({ activate }) {
+    // Defense in depth: never PUT empty logic_code.  The bug that made
+    // every "Save Draft" click wipe a policy (and bump it to v6/v11/...)
+    // was an empty editCode getting sent because the button was reachable
+    // outside edit mode.  Even with the button now gated on editMode,
+    // keep this guard so any future regression that re-introduces the
+    // path also can't destroy data.
+    if (!editCode || !editCode.trim()) {
+      toast('Cannot save an empty policy. Edit the logic first.', 'warn')
+      return
+    }
     setSaving(true)
     try {
       const updated = await apiFetch(`/${policy.id}`, {
@@ -696,19 +766,34 @@ function DetailPanel({ policy, onUpdate, onDelete, onDuplicate, toast }) {
         body: JSON.stringify({
           logic_code: editCode,
           logic_language: policy.logic_language,
-          mode: 'Draft',
+          mode: activate ? 'Enforce' : 'Draft',
         }),
       })
       onUpdate(updated)
       setEditMode(false)
       setEditCode('')
       setValidateRes(null)
-      toast('Draft saved.', 'success')
+      toast(activate ? 'Saved and activated.' : 'Saved as draft.', 'success')
     } catch (e) {
       toast(`Save failed: ${e.message}`, 'error')
     } finally {
       setSaving(false)
     }
+  }
+
+  // Primary action — what the operator wants 95% of the time.  Folds
+  // save + activate into one click so a policy can never silently sit
+  // in Draft after the user thought they shipped it.
+  async function handleSaveAndActivate() {
+    return _doSave({ activate: true })
+  }
+
+  // Secondary action — explicit staging.  For the rare case where the
+  // operator wants to save WITHOUT enforcing (e.g. mid-review, waiting
+  // on an approval).  Kept distinct so the user has to consciously
+  // choose the staging path.
+  async function handleSaveDraft() {
+    return _doSave({ activate: false })
   }
 
   async function handleSaveEdit() {
@@ -1070,14 +1155,36 @@ function DetailPanel({ policy, onUpdate, onDelete, onDuplicate, toast }) {
               >
                 <Sparkles size={10} strokeWidth={2} /> Simulate
               </button>
-              <button
-                onClick={handleSaveDraft}
-                disabled={saving}
-                className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded bg-blue-600 border border-blue-500 text-[11px] text-white hover:bg-blue-500 transition-colors font-semibold ml-1 disabled:opacity-50"
-              >
-                {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} strokeWidth={2} />}
-                Save Draft
-              </button>
+              {/* Save controls — only visible inside edit mode (so an
+                  empty editCode can't be PUT by accident).  Primary
+                  action is "Save & Activate": save the new logic AND
+                  flip mode to Enforce in one click, so a freshly-edited
+                  policy can never silently sit in Draft because the
+                  operator forgot to hit Activate afterward.
+                  Secondary "Save as Draft" is icon-only to fit the
+                  tight toolbar — tooltip makes its purpose explicit. */}
+              {editMode && (
+                <>
+                  <button
+                    onClick={handleSaveDraft}
+                    disabled={saving || !editCode || !editCode.trim()}
+                    className="inline-flex items-center justify-center h-7 w-7 rounded bg-gray-800 border border-gray-700 text-gray-300 hover:bg-gray-700 hover:text-white transition-colors disabled:opacity-50 ml-1"
+                    title="Save as Draft only — keeps current mode, does not activate. Use only when intentionally staging."
+                    aria-label="Save as Draft only"
+                  >
+                    <Save size={11} strokeWidth={2} />
+                  </button>
+                  <button
+                    onClick={handleSaveAndActivate}
+                    disabled={saving || !editCode || !editCode.trim()}
+                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded bg-blue-600 border border-blue-500 text-[11px] text-white hover:bg-blue-500 transition-colors font-semibold disabled:opacity-50"
+                    title="Save the edited Rego and set mode to Enforce."
+                  >
+                    {saving ? <Loader2 size={10} className="animate-spin" /> : <ShieldCheck size={10} strokeWidth={2} />}
+                    Save & Activate
+                  </button>
+                </>
+              )}
             </div>
 
             {/* Editor area */}

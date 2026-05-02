@@ -306,11 +306,247 @@ def _run_backfill() -> None:
         import logging
         logging.getLogger(__name__).warning("backfill_policy_versions failed: %s", e)
 
+def _mock_policy_ids() -> set[str]:
+    """IDs of the legacy hardcoded mock policies. Used by the Phase 1
+    migration to detect a DB that was seeded against the pre-Phase-1
+    code and needs the mocks evicted before real policies can take
+    their place."""
+    return {row["id"] for row in _SEED_DATA}
+
+
+def _purge_mock_policies_if_present() -> int:
+    """One-time migration: delete any rows whose ID matches the known
+    mock seed.  Returns the count removed.
+
+    Why this exists:
+      Pre-Phase-1, ``seed_policies()`` populated the policies table from
+      ``_SEED_DATA`` — fictional policies (Prompt-Guard, Tool-Scope,
+      PII-Mask, etc.) used only for UI demos.  Phase 1 swaps that for
+      the real OPA policies bundled from the chart's
+      ``files/policies/*.rego``.  But ``seed_policies`` short-circuits
+      when the table is non-empty, so on existing dev clusters the mock
+      rows would block the real seed.
+
+      Pruning is keyed strictly on the mock ID list — any user-created
+      policy whose ID happens not to be in that set is left alone.
+
+    Idempotent: a second call after the mocks are already gone deletes
+    zero rows and returns 0.
+    """
+    mock_ids = _mock_policy_ids()
+    if not mock_ids:
+        return 0
+    # Use the store's own session helpers so we honour the "don't close the
+    # injected test session" contract — calling db.close() directly here
+    # would break unit tests that mount their own SQLAlchemy session via
+    # init_db_for_session().  ``_close()`` is the existing helper that
+    # close-or-skips correctly.
+    from .store import _get_session, _close
+    db = _get_session()
+    try:
+        from .db_models import PolicyORM
+        from sqlalchemy import select
+        rows = db.scalars(
+            select(PolicyORM).where(PolicyORM.policy_id.in_(mock_ids))
+        ).all()
+        n = 0
+        for row in rows:
+            db.delete(row)
+            n += 1
+        if n:
+            db.commit()
+        return n
+    finally:
+        _close(db)
+
+
+def _reconcile_real_policies_logic_code() -> int:
+    """Self-healing reconciliation between the bundled .rego files and the
+    catalog DB.  For every real-policy row, if its ``logic_code`` doesn't
+    match the bundled .rego content, update the row to match the bundle.
+
+    Returns the count of rows updated.
+
+    Why this exists:
+      The Phase 1 seed only runs when the policies table is empty.  Once
+      it's populated, every subsequent restart short-circuits.  That's
+      idempotent in the happy path, but it leaks one specific class of
+      bug: if a single .rego file was empty / unreadable / incomplete
+      during the very first seed, its row carries the empty value
+      forever.  We hit exactly this with ``pii_policy-v1`` — its row
+      was inserted with logic_code='' on an early deploy and the
+      idempotent seed never re-ran to fix it.
+
+      This reconciliation step closes the loop.  Each startup compares
+      every real-policy row's ``logic_code`` against the bundled file's
+      current content; any mismatch is updated in place.  ``user-edited
+      policies'' (those whose IDs aren't in the bundled set) are never
+      touched.
+
+    Operationally idempotent — when bundle and DB match, this does N
+    SELECTs and zero writes, finishing in <50ms even with hundreds of
+    policies.  Logs a warning per update so operators see when self-
+    heal kicks in.
+    """
+    from .rego_seed import load_real_policies
+    seeds = load_real_policies()
+    if not seeds:
+        return 0
+
+    bundled_by_id = {s["id"]: s for s in seeds}
+
+    from .store import _get_session, _close
+    db = _get_session()
+    try:
+        from .db_models import PolicyORM, PolicyVersionORM
+        from sqlalchemy import select, func
+        rows = db.scalars(
+            select(PolicyORM).where(
+                PolicyORM.policy_id.in_(list(bundled_by_id.keys()))
+            )
+        ).all()
+
+        # ── User-edit safety check ──────────────────────────────────────
+        # Reconciliation MUST NOT clobber operator edits.  When a user
+        # edits a policy via the UI (Phase 2), Phase 2's PUT /policies/
+        # {id} or its draft endpoint creates an additional PolicyVersionORM
+        # row beyond the seed's v1.  So we only reconcile rows whose
+        # version count is exactly 1 — meaning no operator edit has been
+        # saved yet, the row is still "as-shipped from the chart bundle"
+        # and safe to re-sync.  Any policy with 2+ versions is treated
+        # as user-owned and left alone.
+        version_counts = {
+            pid: count for pid, count in db.execute(
+                select(
+                    PolicyVersionORM.policy_id,
+                    func.count(PolicyVersionORM.id),
+                ).where(
+                    PolicyVersionORM.policy_id.in_(list(bundled_by_id.keys()))
+                ).group_by(PolicyVersionORM.policy_id)
+            ).all()
+        }
+
+        n_updated = 0
+        n_skipped_user_edited = 0
+        n_recovered_empty   = 0
+        for row in rows:
+            bundled = bundled_by_id[row.policy_id]
+            new_code = bundled["logic_code"]
+            if (row.logic_code or "") == new_code:
+                continue   # already matches — no work
+
+            current_is_empty = not (row.logic_code or "").strip()
+
+            # Two reconcile-eligible cases:
+            #
+            #  (a) version count == 1: still as-shipped from the bundle,
+            #      no operator edits yet → safe to re-sync to the bundle.
+            #
+            #  (b) current logic_code is empty/whitespace, REGARDLESS of
+            #      version count: this is the "wiped" state from the
+            #      May-2-2026 incident where every UI Save-Draft click
+            #      sent logic_code="" and silently bumped the row to
+            #      v6/v11/etc.  An empty body cannot represent a real
+            #      operator edit (the backend now refuses empty PUTs;
+            #      see policies/store.py:update_policy), so overwriting
+            #      empty with the bundle content can never destroy real
+            #      user work — it can only restore lost content.
+            #
+            # Anything else (current has content AND >1 version) is a
+            # genuine operator edit and stays untouched.
+            if current_is_empty:
+                row.logic_code = new_code
+                row.logic = _tokenise(new_code, bundled["logic_language"])
+                n_recovered_empty += 1
+                n_updated += 1
+                continue
+            if version_counts.get(row.policy_id, 1) > 1:
+                n_skipped_user_edited += 1
+                continue
+            row.logic_code = new_code
+            row.logic = _tokenise(new_code, bundled["logic_language"])
+            n_updated += 1
+
+        if n_updated:
+            db.commit()
+
+        if n_skipped_user_edited or n_recovered_empty:
+            import logging as _logging
+            _log = _logging.getLogger(__name__)
+            if n_recovered_empty:
+                _log.warning(
+                    "_reconcile: recovered %d policies with empty logic_code "
+                    "from chart bundle (likely victims of the empty-PUT bug)",
+                    n_recovered_empty,
+                )
+            if n_skipped_user_edited:
+                _log.info(
+                    "_reconcile: skipped %d policies with user edits (>1 version, non-empty)",
+                    n_skipped_user_edited,
+                )
+        return n_updated
+    finally:
+        _close(db)
+
+
 def seed_policies() -> None:
-    """Insert default policies if the table is empty. Idempotent."""
+    """Insert default policies if the table is empty. Idempotent.
+
+    Three-pass startup contract:
+      1. ``_purge_mock_policies_if_present()`` — evict pre-Phase-1 mock
+         rows by ID so the real seed can claim the table on existing
+         dev clusters.
+      2. ``_reconcile_real_policies_logic_code()`` — self-heal any
+         existing real-policy rows whose ``logic_code`` drifted from
+         the bundled .rego (insert-time bug, partial seed, etc.).
+         This runs on EVERY startup — DB and bundle stay in lockstep.
+      3. If the table is still empty, do the initial seed: real .rego
+         policies bundled from ``deploy/helm/aispm/files/policies/`` if
+         present, hardcoded mocks (``_SEED_DATA``) otherwise (used by
+         local dev / tests where the Dockerfile bundling didn't run).
+
+    User-created policies (any row whose ID isn't in the bundled real
+    set or the mock set) are never touched by any pass.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    # 1. Phase 1 migration — evict legacy mock rows so the real seed can run.
+    purged = _purge_mock_policies_if_present()
+    if purged:
+        _log.info("seed_policies: purged %d legacy mock rows", purged)
+
+    # 2. Self-heal: re-sync logic_code from the bundle when it drifted.
+    try:
+        n_recon = _reconcile_real_policies_logic_code()
+        if n_recon:
+            _log.warning(
+                "seed_policies: reconciled %d real-policy row(s) whose "
+                "logic_code drifted from the chart bundle (self-heal)",
+                n_recon,
+            )
+    except Exception as exc:
+        _log.warning("seed_policies: reconciliation failed (non-fatal): %s", exc)
+
     if list_policies():
         _run_backfill()
         return
+
+    # 3. Initial seed — real .rego policies first, mocks as fallback.
+    from .rego_seed import load_real_policies
+    real_seeds = load_real_policies()
+    if real_seeds:
+        for raw in real_seeds:
+            raw["logic"] = _tokenise(raw["logic_code"], raw["logic_language"])
+            create_policy_raw(raw)
+        _log.info(
+            "seed_policies: seeded %d real OPA policies from chart bundle",
+            len(real_seeds),
+        )
+        _run_backfill()
+        return
+
+    # Fallback — use the hardcoded mocks (local dev / tests).
     for raw in _SEED_DATA:
         raw = dict(raw)  # don't mutate the module-level constant
         raw["logic"] = _tokenise(raw["logic_code"], raw["logic_language"])
