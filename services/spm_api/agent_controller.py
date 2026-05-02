@@ -485,8 +485,19 @@ def _is_system_agent(agent) -> bool:
     system agent fails because there is no ``code_blob`` to mount as a
     ConfigMap, and even if one existed the chart-managed Deployment would
     fight the spawned Pod for the same role.
+
+    The ``isinstance(..., str)`` guard matters for tests: ``_fake_agent_row``
+    in tests/test_agent_controller.py builds a ``MagicMock`` and never
+    sets ``code_path``, so without the guard ``getattr`` would return a
+    MagicMock and ``MagicMock.startswith("k8s://")`` would return another
+    MagicMock — which is truthy — making every regular-agent test trip
+    the system-agent path and silently skip topics/spawn/wait-ready.
+    Real DB rows always have a string ``code_path``; the guard only ever
+    rejects test mocks that didn't explicitly set the attribute.
     """
-    code_path = getattr(agent, "code_path", "") or ""
+    code_path = getattr(agent, "code_path", "")
+    if not isinstance(code_path, str):
+        return False
     return code_path.startswith("k8s://")
 
 
