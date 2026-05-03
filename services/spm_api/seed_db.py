@@ -504,25 +504,74 @@ async def seed_system_agents(db) -> int:
 
 
 async def ensure_schema() -> None:
-    """Create all tables defined on `spm.db.models.Base` if they don't exist.
+    """Bring the database schema to head via Alembic — single source of truth.
 
-    The platform expects spm-api's lifespan to do `Base.metadata.create_all`
-    on first boot, but several services (api, agent-orchestrator, garak,
-    threat-hunting-agent, guard_model) call `hydrate_env_from_db()` at
-    module-import time and SELECT FROM `integrations` before spm-api has
-    ever started. In phased k8s rollouts that ordering breaks: db-seed
-    runs in `data-init`, those services start in `platform`, and spm-api's
-    lifespan only runs once spm-api itself is scheduled — which is too late.
-    Creating the schema here ensures every dependent service can import.
+    Alembic migrations live at `spm/alembic/versions/` and are the ONLY
+    blessed way to evolve the schema.  This function runs
+    `alembic upgrade head`, which is idempotent: if the DB is already at
+    head it's a no-op (one SELECT against alembic_version).
+
+    Why ensure_schema exists at all (rather than only running migrations
+    in the db-seed Job): several services (api, agent-orchestrator,
+    garak, threat-hunting-agent, guard_model) call `hydrate_env_from_db`
+    at module-import time and SELECT FROM `integrations` before spm-api's
+    lifespan has run.  In phased k8s rollouts the data-init Job runs
+    long before those services start, but on a clean dev cluster they
+    can race ahead.  Calling alembic from the lifespan + the db-seed Job
+    means whichever runs first brings the schema to head; the other
+    becomes a no-op.
+
+    Historical note (May 2026): this function used to call
+    `Base.metadata.create_all`, which silently diverged from the raw
+    bootstrap SQL because the SQLAlchemy model wasn't kept in sync with
+    the constraint definitions.  See `008_backfill_uq_snapshot.py` and
+    runbook §"posture_snapshots unique constraint backfill" for the
+    incident that motivated migrating to a single Alembic-canonical
+    bootstrap.  Do NOT add `Base.metadata.create_all` calls back into
+    any production code path — write a migration instead.
     """
-    from spm.db.session import get_engine
-    from spm.db.models import Base
+    import asyncio
+    import os
+    import pathlib
+    from alembic import command
+    from alembic.config import Config
 
-    log.info("── ensure_schema: creating tables (idempotent) ──")
-    engine = get_engine()
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all, checkfirst=True)
-    log.info("✓ schema ready")
+    # alembic.ini ships in the spm-api image as /app/spm/alembic.ini
+    # (see services/spm_api/Dockerfile: COPY spm/ ./spm/).  Resolve via
+    # the spm package root so this also works in dev (running from a
+    # checkout) and tests.
+    import spm  # noqa: F401  — used to resolve package path
+    spm_pkg_dir = pathlib.Path(__import__("spm").__file__).resolve().parent
+    ini_path = spm_pkg_dir / "alembic.ini"
+    if not ini_path.exists():
+        raise FileNotFoundError(
+            f"alembic.ini not found at {ini_path}; the spm package must "
+            "ship the migrations directory and ini file."
+        )
+
+    cfg = Config(str(ini_path))
+    # The script_location in alembic.ini is relative ("alembic"); make it
+    # absolute so alembic finds versions/ regardless of cwd.
+    cfg.set_main_option("script_location", str(spm_pkg_dir / "alembic"))
+
+    # SPM_DB_URL is honored by env.py (highest-priority after CLI -x), so
+    # we don't need to override it here.  Just log what alembic will see.
+    db_url_env = os.getenv("SPM_DB_URL", "(unset — using alembic.ini default)")
+    log.info("── ensure_schema: alembic upgrade head ── (db: %s)",
+             _redact_password(db_url_env))
+
+    # alembic.command.upgrade is synchronous (it builds its own engine
+    # via env.py and uses connection.connect()).  Run in the default
+    # executor so we don't block the event loop.
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, command.upgrade, cfg, "head")
+    log.info("✓ schema at head")
+
+
+def _redact_password(url: str) -> str:
+    """Hide :password@ in a SQLAlchemy URL for safe logging."""
+    import re
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)
 
 
 async def main() -> int:

@@ -148,9 +148,10 @@ jobs:
 
       # ── 5. Schema migration ───────────────────────────────────────────────
       #
-      # Migration 001 creates the base schema (CREATE … IF NOT EXISTS, so it
-      # is safe on databases already bootstrapped with 001_initial.sql).
-      # Migration 002+ applies delta changes on top.
+      # Alembic is the only schema bootstrap.  Migration 001 creates every
+      # base table (model_registry, posture_snapshots, compliance_evidence,
+      # audit_export, etc.); 002+ apply delta changes on top.  The CI test
+      # database is empty, so this runs the entire chain from scratch.
       - name: Run database migrations (alembic upgrade head)
         working-directory: spm
         run: alembic upgrade head

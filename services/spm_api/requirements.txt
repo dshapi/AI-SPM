@@ -4,6 +4,11 @@ uvicorn[standard]==0.32.1
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
 psycopg2-binary==2.9.9
+# Alembic is the canonical schema bootstrap. spm-api lifespan calls
+# `alembic upgrade head` via ensure_schema() at boot; the db-seed Job
+# runs the same command before its data-seeding pass.  Migrations live
+# at spm/alembic/versions/ — see spm/alembic.ini for the runtime config.
+alembic==1.14.0
 pyjwt[crypto]==2.10.1
 httpx==0.27.2
 requests==2.32.3

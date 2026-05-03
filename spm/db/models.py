@@ -133,6 +133,22 @@ class PostureSnapshot(Base):
     ttp_hit_count    = Column(Integer, default=0)
 
     __table_args__ = (
+        # Required by spm_aggregator.upsert_snapshot's
+        #   INSERT ... ON CONFLICT (model_id, tenant_id, snapshot_at) DO UPDATE
+        # which needs a unique constraint on exactly those columns.
+        # Matches 001_initial.sql:`uq_snapshot UNIQUE NULLS DISTINCT (...)`.
+        # NULLS DISTINCT is Postgres 15+ default — model_id IS NULL rows
+        # don't conflict with each other, so unknown-model snapshots are
+        # insert-only.  If aggregation across unknown-model rows is ever
+        # needed, switch to postgresql_nulls_not_distinct=True here AND in
+        # the bootstrap SQL.  Bug discovered May 2026 when a fresh cluster
+        # was bootstrapped via `Base.metadata.create_all` (which previously
+        # didn't include this constraint) instead of the raw SQL — the
+        # aggregator started erroring `42P10` on every snapshot insert.
+        UniqueConstraint(
+            "model_id", "tenant_id", "snapshot_at",
+            name="uq_snapshot",
+        ),
         Index("idx_snapshots_model_tenant_time", "model_id", "tenant_id", "snapshot_at"),
     )
 

@@ -341,9 +341,14 @@ async def _seed_system_agents_on_startup() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Create tables if they don't exist (fallback if migrations weren't run)
-    async with get_engine().begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Create tables + backfill any constraints/indexes the SQLAlchemy
+    # model added since the database was first bootstrapped. Routes
+    # through seed_db.ensure_schema so both the lifespan path and the
+    # data-init Job (db-seed) use the same backfill logic — see
+    # ensure_schema's docstring for the older-create_all rationale
+    # (e.g., posture_snapshots.uq_snapshot constraint, May 2026).
+    from seed_db import ensure_schema  # type: ignore
+    await ensure_schema()
     # Seed compliance evidence from mapping file
     await seed_compliance_evidence()
     # Auto-seed integrations table so the Integrations page is populated
