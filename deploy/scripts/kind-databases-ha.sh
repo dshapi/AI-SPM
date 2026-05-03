@@ -182,6 +182,7 @@ spec:
 EOF
 
   _log "  waiting for Postgres cluster to be healthy (~2-3 min)..."
+  local ready instances
   for i in $(seq 1 60); do
     ready=$(kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" \
               -o jsonpath='{.status.readyInstances}' 2>/dev/null || echo 0)
@@ -189,12 +190,45 @@ EOF
                   -o jsonpath='{.status.instances}' 2>/dev/null || echo 0)
     if [ "${ready:-0}" -ge "$PG_INSTANCES" ]; then
       _log "  ✓ ${ready}/${instances} Postgres instances Ready"
+      _grant_createrole_to_app_user
       return 0
     fi
     printf '\r    waiting (%s/60) — %s/%s Ready... ' "$i" "${ready:-0}" "${instances:-0}"
     sleep 10
   done
   _warn "Postgres cluster didn't reach ${PG_INSTANCES} Ready in 10 min"
+}
+
+# ── Grant CREATEROLE to the application user ─────────────────────────────
+# Alembic migration 003 (and a couple later) does
+#   `CREATE ROLE spm_ro NOLOGIN;` to provision a read-only role.  This
+# fails with `permission denied to create role` if the connecting user
+# (spm_rw, the CNPG-provisioned app owner) doesn't have the CREATEROLE
+# attribute.  CNPG creates app users without it by default.
+#
+# We grant CREATEROLE here, AFTER the cluster is Ready, BEFORE bootstrap
+# runs db-seed.  This keeps the privilege scope narrow (only the app
+# user has it; nothing else needs it).  Documented incident: May 2026
+# — db-seed silently failed in CrashLoop for hours because alembic
+# crashed mid-migration without logging the actual permission error.
+_grant_createrole_to_app_user() {
+  _log "  granting CREATEROLE to ${PG_DB_OWNER} (required by alembic migration 003+)"
+  local primary
+  primary=$(kubectl -n "$PG_NAMESPACE" get cluster "$PG_CLUSTER_NAME" \
+              -o jsonpath='{.status.currentPrimary}' 2>/dev/null)
+  if [ -z "$primary" ]; then
+    _warn "  could not find currentPrimary — skipping CREATEROLE grant."
+    _warn "  Migrations will fail until you run:"
+    _warn "    kubectl -n ${PG_NAMESPACE} exec <primary-pod> -c postgres -- psql -U postgres -c 'ALTER USER ${PG_DB_OWNER} CREATEROLE;'"
+    return 0
+  fi
+  if kubectl -n "$PG_NAMESPACE" exec "$primary" -c postgres -- \
+       psql -U postgres -d "$PG_DB_NAME" -c "ALTER USER ${PG_DB_OWNER} CREATEROLE;" \
+       >/dev/null 2>&1; then
+    _log "  ✓ CREATEROLE granted to ${PG_DB_OWNER} on ${primary}"
+  else
+    _warn "  ALTER USER … CREATEROLE failed (non-fatal but migrations may break)"
+  fi
 }
 
 # ── 2. Bitnami Redis with Sentinel ──────────────────────────────────────
@@ -301,13 +335,10 @@ cmd_up() {
   echo "    REDIS_URL=redis://redis.${REDIS_NAMESPACE}.svc.cluster.local:6379"
   echo "    SENTINEL_URL=redis://redis.${REDIS_NAMESPACE}.svc.cluster.local:26379"
   echo
-  echo "  Next steps:"
-  echo "    1. Set spmDb.enabled=false and redis.enabled=false in"
-  echo "       deploy/helm/aispm/values.dev-multinode.yaml so the chart"
-  echo "       doesn't try to deploy its built-in single-pod versions."
-  echo "    2. Override platformEnv.SPM_DB_URL / SPM_DB_URL_ASYNC / REDIS_URL"
-  echo "       in the same values file with the URLs above."
-  echo "    3. Run bootstrap-cluster.sh as usual."
+  echo "  Next step: run deploy/scripts/bootstrap-cluster.sh"
+  echo "  (the chart no longer ships built-in spm-db / redis StatefulSets;"
+  echo "   the spm-db ExternalName Service points at spm-db-rw,"
+  echo "   the values.dev-multinode.yaml overrides REDIS_URL/SENTINEL.)"
 }
 
 cmd_status() {

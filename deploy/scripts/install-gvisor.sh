@@ -25,8 +25,24 @@ set -euo pipefail
 log() { echo "$(date +%H:%M:%S) [gvisor] $*"; }
 err() { echo "$(date +%H:%M:%S) [gvisor] ERROR: $*" >&2; }
 
-# Detection: any container with the kind cluster label.
-KIND_NODES=$(docker ps --filter "label=io.x-k8s.kind.cluster" --format "{{.Names}}" 2>/dev/null || true)
+# Detection: only containers with kind role=control-plane (or =worker).
+# Filtering by `io.x-k8s.kind.cluster` alone matches the haproxy LB
+# container too, which has no `/usr/local/bin/` and no containerd —
+# trying to docker cp into it fails with "Could not find the file".
+# The LB has role=external-load-balancer; we exclude it by matching
+# specifically on control-plane / worker.
+KIND_NODES=$(docker ps \
+  --filter "label=io.x-k8s.kind.role=control-plane" \
+  --filter "label=io.x-k8s.kind.role=worker" \
+  --format "{{.Names}}" 2>/dev/null \
+  | sort -u)
+# Note: docker filter with multiple --filter is AND, not OR.  But since
+# a container only has ONE role label, the union of two single-filter
+# queries gives us the right set.  Re-do as two queries:
+KIND_NODES=$( {
+  docker ps --filter "label=io.x-k8s.kind.role=control-plane" --format "{{.Names}}"
+  docker ps --filter "label=io.x-k8s.kind.role=worker" --format "{{.Names}}"
+} 2>/dev/null | sort -u)
 
 if [[ -z "$KIND_NODES" ]]; then
   err "No kind cluster detected.  This script only supports kind."
@@ -76,8 +92,13 @@ for n in $KIND_NODES; do
   log "  patching $n ..."
 
   # Idempotency check — skip nodes that already have everything.
-  if docker exec "$n" test -x /usr/local/bin/runsc \
-     && docker exec "$n" test -f /etc/containerd/runsc.toml \
+  # Some kindest/node images don't ship `test` or `sh` as PATH-accessible
+  # binaries (only as shell built-ins).  Use `ls` to check existence and
+  # `stat` (which IS a binary on every kindest/node) to check
+  # executability.  Earlier `test -x` always failed with
+  # "executable file not found in $PATH" on those images.
+  if docker exec "$n" ls /usr/local/bin/runsc >/dev/null 2>&1 \
+     && docker exec "$n" ls /etc/containerd/runsc.toml >/dev/null 2>&1 \
      && [[ "$(docker exec "$n" grep -c 'runtimes\.runsc' /etc/containerd/config.toml 2>/dev/null || echo 0)" -ge 2 ]]; then
     echo "    already patched — skipping"
     continue

@@ -1,18 +1,11 @@
 # deploy/helm/aispm/templates/services.yaml
 # Aggregated ClusterIP services for all stateless services.
-# StatefulSets (spm-db, kafka, redis) have their own headless service files.
-{{- if .Values.redis.enabled | default true }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: {{ .Values.global.namespace }}
-spec:
-  selector: { app: redis }
-  ports:
-    - port: 6379
-{{- end }}
+# StatefulSets (kafka) have their own headless service file.  redis and
+# spm-db are owned by external operators (Bitnami chart for redis, CNPG
+# for spm-db) which create their own Services with proper helm metadata —
+# the chart used to render its own `redis` Service guarded by
+# `redis.enabled` but that conflicted with Bitnami's adoption (Helm
+# refused to import a non-helm-managed Service).  Removed May 2026.
 ---
 apiVersion: v1
 kind: Service

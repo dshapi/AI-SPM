@@ -386,32 +386,36 @@ grafana:
   storage: 2Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
 
-# ── Application-tier replica counts (HA-only) ──────────────────────────
-# Every entry below defaults to 2 in its template (`replicas: {{
-# .Values.<svc>.replicas | default 2 }}`).  Bump higher per-environment
-# under values.prod.yaml etc.; do NOT set below 2 — see HA-only contract
-# in runbook §"HA-only contract: single-instance modes removed".
+# ── Application-tier replica counts ────────────────────────────────────
+# Default to 1 to keep the resource budget realistic on a 24 GB / 12-core
+# dev machine.  HA (replicas: 2 + topology spread) is supported by every
+# template — opt in per-environment by overriding `<svc>.replicas: 2`
+# in values.prod.yaml or a values.dev-multinode-ha.yaml.  Topology spread
+# + anti-affinity stay configured in the templates so flipping the count
+# is a one-value change.
 #
-# Two services are intentionally absent because their template
-# hardcodes `replicas: 1` with a tracked SPOF follow-up: prometheus
-# (RWO TSDB needs Thanos) and grafana (SQLite needs CNPG-backed DB).
-agent:                { replicas: 2 }
-api:                  { replicas: 2 }
-spmApi:               { replicas: 2 }
-spmMcp:               { replicas: 2 }
-spmAggregator:        { replicas: 2 }
-spmLlmProxy:          { replicas: 2 }
-agentOrchestrator:    { replicas: 2 }
-freezeController:     { replicas: 2 }
-threatHuntingAgent:   { replicas: 2 }
-guardModel:           { replicas: 2 }
-outputGuard:          { replicas: 2 }
-policySimulator:      { replicas: 2 }
-policyDecider:        { replicas: 2 }
-retrievalGateway:     { replicas: 2 }
-processor:            { replicas: 2 }
-executor:             { replicas: 2 }
-garakRunner:          { replicas: 2 }
-memoryService:        { replicas: 2 }
-toolParser:           { replicas: 2 }
-ui:                   { replicas: 2 }
+# May 2026 incident: defaulting these to 2 stacked 22 services × 2
+# replicas × ~150 MB sidecar each on top of the stateful tier.  Total
+# memory requests exceeded the kind cluster's 20 GB allocation and the
+# entire api-server entered a death spiral.  Single-replica is the safe
+# baseline; HA is a deliberate per-environment choice.
+agent:                { replicas: 1 }
+api:                  { replicas: 1 }
+spmApi:               { replicas: 1 }
+spmMcp:               { replicas: 1 }
+spmAggregator:        { replicas: 1 }
+spmLlmProxy:          { replicas: 1 }
+agentOrchestrator:    { replicas: 1 }
+freezeController:     { replicas: 1 }
+threatHuntingAgent:   { replicas: 1 }
+guardModel:           { replicas: 1 }
+outputGuard:          { replicas: 1 }
+policySimulator:      { replicas: 1 }
+policyDecider:        { replicas: 1 }
+retrievalGateway:     { replicas: 1 }
+processor:            { replicas: 1 }
+executor:             { replicas: 1 }
+garakRunner:          { replicas: 1 }
+memoryService:        { replicas: 1 }
+toolParser:           { replicas: 1 }
+ui:                   { replicas: 1 }

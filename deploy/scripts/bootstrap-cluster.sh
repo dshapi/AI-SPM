@@ -1208,15 +1208,25 @@ spec:
         enabled: true
         namespace: istio-system
         k8s:
+          # NodePort with FIXED ports (30080/30443) so kind's
+          # extraPortMappings (host:30080->30080, host:30443->30443) keep
+          # working across rebuilds.  ClusterIP would mean nothing's
+          # reachable from the host — we lost an afternoon to that in
+          # May 2026.  pfctl on the Mac then redirects 443 → 30443 so the
+          # browser can hit https://aispm.local without a port suffix.
           service:
-            type: ClusterIP
+            type: NodePort
             ports:
               - port: 80
                 targetPort: 8080
+                nodePort: 30080
                 name: http2
+                protocol: TCP
               - port: 443
                 targetPort: 8443
+                nodePort: 30443
                 name: https
+                protocol: TCP
           resources:
             requests:
               cpu: 100m
@@ -1226,7 +1236,7 @@ spec:
               memory: 512Mi
           replicaCount: 1
 EOF
-  log "  applying IstioOperator (profile=default, gateway as ClusterIP)..."
+  log "  applying IstioOperator (profile=default, gateway NodePort 30080/30443)..."
   istioctl install -f "$_IOP_FILE" -y 2>&1 | sed 's/^/    /' \
     || die "  istioctl install failed — check the trace above"
 
@@ -1300,8 +1310,10 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   apply_tier infra
 
   # ── Phase 2: data plane ──────────────────────────────────────────────
-  # kafka, redis, spm-db StatefulSets. Hard gate: we DO NOT continue
-  # until all three are Ready.
+  # kafka StatefulSet (the chart's own — spm-db moved to CNPG and redis
+  # to Bitnami HA, both installed by kind-databases-ha.sh BEFORE this
+  # script runs).  Hard gate: we DO NOT continue until kafka is Ready
+  # AND we've verified the external CNPG + Bitnami stacks are healthy.
   #
   # RESET_KAFKA=1 wipes kafka's StatefulSet + PVCs before re-applying.
   # Use this when:
@@ -1322,32 +1334,47 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     kubectl -n aispm wait --for=delete statefulset/kafka --timeout=60s 2>/dev/null || true
   fi
 
-  log "  Phase 2: data plane (kafka, redis, spm-db)"
+  log "  Phase 2: data plane (kafka only — spm-db + redis are external operators)"
   apply_tier data
 
-  # ── 6.2a. In-place upgrade: force-restart sidecared data pods ────────
-  # Invariant 1: kafka/redis/spm-db pods MUST NOT have an istio-proxy
-  # sidecar (Envoy mangles binary protocols). The chart sets
+  # ── 6.2a. In-place upgrade: force-restart sidecared kafka pods ───────
+  # Invariant 1: kafka pods MUST NOT have an istio-proxy sidecar (Envoy
+  # mangles the Kafka wire protocol).  The chart sets
   # `sidecar.istio.io/inject: "false"` on the pod template, but pods
-  # created BEFORE that annotation existed keep their sidecars even
-  # after the StatefulSet template is updated — k8s doesn't auto-roll
-  # for annotation-only changes. We detect lingering istio-proxy
-  # containers and force a rolling restart, which is what makes the
-  # annotation actually take effect on existing clusters.
-  for sts in kafka redis spm-db; do
-    if kubectl -n aispm get pod -l app="$sts" \
-         -o jsonpath='{.items[*].spec.containers[*].name}' 2>/dev/null \
-         | tr ' ' '\n' | grep -q '^istio-proxy$'; then
-      log "    $sts has istio-proxy sidecar (pre-fix) — forcing rollout restart"
-      kubectl -n aispm rollout restart "statefulset/$sts" >/dev/null
-    fi
-  done
+  # created BEFORE that annotation existed keep their sidecars after
+  # template updates — k8s doesn't auto-roll for annotation-only changes.
+  # Same logic used to apply to redis + spm-db; both are now external
+  # (Bitnami chart for redis, CNPG for spm-db) with their own
+  # sidecar-exemption pattern, so they're not in this loop.
+  if kubectl -n aispm get pod -l app=kafka \
+       -o jsonpath='{.items[*].spec.containers[*].name}' 2>/dev/null \
+       | tr ' ' '\n' | grep -q '^istio-proxy$'; then
+    log "    kafka has istio-proxy sidecar (pre-fix) — forcing rollout restart"
+    kubectl -n aispm rollout restart statefulset/kafka >/dev/null
+  fi
 
-  log "    waiting for data tier to be Ready (3 StatefulSets, parallel)..."
-  bs_parallel "kafka"  kubectl -n aispm rollout status statefulset/kafka  --timeout=3m
-  bs_parallel "redis"  kubectl -n aispm rollout status statefulset/redis  --timeout=3m
-  bs_parallel "spm-db" kubectl -n aispm rollout status statefulset/spm-db --timeout=3m
+  log "    waiting for kafka StatefulSet to be Ready..."
+  bs_parallel "kafka" kubectl -n aispm rollout status statefulset/kafka --timeout=3m
   bs_wait_all "data tier"
+
+  # spm-db (CNPG) and Redis HA (Bitnami) were verified Ready by
+  # kind-databases-ha.sh BEFORE this script ran — that's the contract.
+  # Do a final sanity check here that they're still healthy; bail loudly
+  # if not, since the rest of the bootstrap will fail in confusing ways
+  # without a working DB.
+  log "    sanity-checking external data tier (spm-db CNPG + redis HA)..."
+  if ! kubectl -n aispm get cluster spm-db -o jsonpath='{.status.phase}' 2>/dev/null \
+       | grep -q "^Cluster in healthy state$"; then
+    err "  ✗ spm-db CNPG cluster is not healthy.  Run: kubectl -n aispm get cluster spm-db"
+    err "    kind-databases-ha.sh up should have left it in 'Cluster in healthy state' before bootstrap."
+    exit 1
+  fi
+  if ! kubectl -n aispm get statefulset redis-node >/dev/null 2>&1; then
+    err "  ✗ Bitnami redis StatefulSet (redis-node) not found.  Run: kubectl -n aispm get sts -l app.kubernetes.io/name=redis"
+    err "    kind-databases-ha.sh up should have installed it before bootstrap."
+    exit 1
+  fi
+  log "  ✓ external data tier healthy (spm-db CNPG + redis-node Bitnami)"
 
   # ── Phase 3: data-init ───────────────────────────────────────────────
   # db-seed (seeds Postgres) + startup-orchestrator (creates Kafka topics).

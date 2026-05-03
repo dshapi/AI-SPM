@@ -1,0 +1,42 @@
+# deploy/helm/aispm/templates/aispm-tls-certificate.yaml
+#
+# cert-manager Certificate that produces the `aispm-tls` Secret in the
+# istio-system namespace.  Istio's Gateway resource (aispm-gateway,
+# rendered separately) references that Secret via `credentialName:
+# aispm-tls`; without the Secret, envoy can't load a TLS listener for
+# port 8443 and HTTPS handshakes fail with "SSL connect error".
+#
+# Important: the Secret MUST live in istio-system (not aispm) because
+# Istio's Gateway always reads SDS credentials from the namespace where
+# the gateway proxy runs, which is istio-system.  cert-manager creates
+# the Secret in whatever namespace the Certificate lives in — so the
+# Certificate itself goes in istio-system too.
+#
+# Issuer: defaults to .Values.ingress.clusterIssuer (selfsigned for dev,
+# letsencrypt-staging / letsencrypt-prod for higher environments — all
+# rendered by templates/cert-manager-issuers.yaml).
+#
+# Documented incident: May 2026 — UI returned curl exit 35 ("SSL connect
+# error") after a kind rebuild because the cert Secret didn't exist.
+# Worked around by hand-generating an openssl cert; this Certificate
+# resource is the proper fix so the next rebuild produces a working
+# TLS endpoint without manual intervention.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: aispm-tls
+  namespace: istio-system
+spec:
+  secretName: aispm-tls
+  duration: 8760h  # 1 year — selfsigned doesn't have ACME rate limits
+  renewBefore: 720h  # 30 days
+  subject:
+    organizations:
+      - aispm-dev
+  commonName: {{ .Values.ingress.host | default "aispm.local" | quote }}
+  dnsNames:
+    - {{ .Values.ingress.host | default "aispm.local" | quote }}
+  issuerRef:
+    name: {{ .Values.ingress.clusterIssuer | default "selfsigned-cluster-issuer" }}
+    kind: ClusterIssuer
+    group: cert-manager.io

@@ -139,18 +139,27 @@ _install_metrics_server() {
 
 _wire_registry_into_nodes() {
   _log "registering localhost:${REGISTRY_PORT} as a containerd mirror on each node"
+  # We use `tee` rather than `sh -c 'cat > ...'` because some kindest/node
+  # images don't expose `sh` on PATH (we hit "exec: sh: executable file not
+  # found" during init).  `tee` is shipped under /usr/bin/tee on every
+  # kindest/node image.  The `capabilities = ["pull", "resolve"]` line is
+  # REQUIRED — without it containerd silently ignores the mirror config
+  # and falls back to localhost:5001 which is unreachable from inside the
+  # node (we lost an entire afternoon to this in May 2026).
   for node in $(kind get nodes --name "$CLUSTER_NAME"); do
     docker exec "$node" mkdir -p "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}"
-    docker exec "$node" sh -c "cat > /etc/containerd/certs.d/localhost:${REGISTRY_PORT}/hosts.toml <<EOF
-[host.\"http://${REGISTRY_NAME}:5000\"]
-EOF"
+    cat <<EOF | docker exec -i "$node" tee "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}/hosts.toml" >/dev/null
+[host."http://${REGISTRY_NAME}:5000"]
+  capabilities = ["pull", "resolve"]
+EOF
   done
 
   # Connect the registry container to the kind network so nodes can
-  # resolve "${REGISTRY_NAME}".
-  if ! docker network inspect kind | grep -q "\"Name\": \"${REGISTRY_NAME}\""; then
-    docker network connect "kind" "$REGISTRY_NAME" 2>/dev/null || true
-  fi
+  # resolve "${REGISTRY_NAME}".  The check below mis-greps on some
+  # docker versions (the network inspect of `kind` lists *containers*
+  # under .Containers, not under top-level "Name"); just always-attempt
+  # connect with a tolerant error, which is idempotent.
+  docker network connect "kind" "$REGISTRY_NAME" 2>/dev/null || true
 
   # Advertise the registry to the cluster (used by some tools).
   cat <<EOF | KUBECONFIG="$KUBECONFIG_PATH" kubectl apply -f -
@@ -191,12 +200,45 @@ cmd_init() {
 
   _wire_registry_into_nodes
 
+  # Wait for nodes to actually be Ready before issuing kubectl commands.
+  # `kind create cluster` returns once apiserver is reachable, but nodes
+  # may still be NotReady for ~20s while the CNI initializes.  Issuing
+  # taint/SC commands before nodes are Ready silently drops them.
+  _log "waiting for all nodes to be Ready..."
+  KUBECONFIG="$KUBECONFIG_PATH" kubectl wait --for=condition=Ready node --all --timeout=180s \
+    || _warn "some nodes still NotReady after 3min — continuing anyway, but expect issues"
+
   # kind HA mode taints all control-plane nodes NoSchedule by default;
   # with no workers, nothing schedules anywhere. Untaint so the 3 cp
-  # nodes also act as workers.
+  # nodes also act as workers.  Verify the taint is actually gone after
+  # the call — silent failure here cost us hours of debugging Pending
+  # pods that "should have scheduled" (May 2026).
   _log "removing control-plane NoSchedule taint (cp nodes also schedule workloads)"
   KUBECONFIG="$KUBECONFIG_PATH" kubectl taint nodes --all \
     node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true
+  if KUBECONFIG="$KUBECONFIG_PATH" kubectl get nodes -o jsonpath='{.items[*].spec.taints}' \
+       | grep -q 'node-role.kubernetes.io/control-plane'; then
+    _warn "control-plane taint NOT removed — workloads will Pending forever."
+    _warn "Re-run: kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule-"
+  else
+    _log "  ✓ taint removed on all nodes"
+  fi
+
+  # The chart's PVC templates hardcode `storageClass: local-path`, but
+  # kind's default provisioner ships a StorageClass named `standard`.
+  # Create an alias so chart PVCs bind without intervention.  Used to
+  # be a manual step in the runbook bring-up — moved here so a fresh
+  # init produces a working cluster end-to-end.
+  _log "applying local-path StorageClass alias (chart PVCs hardcode this name)"
+  cat <<EOF | KUBECONFIG="$KUBECONFIG_PATH" kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path
+provisioner: rancher.io/local-path
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+EOF
 
   _install_metrics_server
 
