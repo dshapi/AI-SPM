@@ -17,6 +17,17 @@ metadata:
   name: prometheus
   namespace: {{ .Values.global.namespace }}
 spec:
+  # KNOWN SPOF — single replica because the Prometheus TSDB is on a
+  # RWO PVC and only one pod can hold it.  Pod loss = ~30s
+  # observability blackout while kubelet reschedules; metrics scraped
+  # during the gap are missing forever.
+  #
+  # Real HA path requires a sidecar that ships TSDB blocks to MinIO
+  # (Thanos sidecar or Grafana Mimir) so multiple Prometheus replicas
+  # can scrape independently and queries can deduplicate at the
+  # Querier tier.  Until that lands, this is the only deployment in
+  # the chart that is intentionally NOT HA.  See follow-up "wire
+  # Prometheus to Thanos for true HA".
   replicas: 1
   strategy:
     type: Recreate   # required: RWO PVC cannot be held by two pods

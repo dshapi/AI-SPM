@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # deploy/scripts/aispm-cluster.sh
 # ──────────────────────────────────────────────────────────────────────
-# Day-to-day lifecycle helpers for the kind aispm cluster on Docker
-# Desktop. Companion to kind-cluster.sh (which handles init/destroy).
+# Day-to-day lifecycle helpers for the kind aispm cluster.  Companion
+# to kind-cluster.sh (which handles init/destroy).
 #
 # Subcommands:
 #   pause     docker pause all 4 kind containers. Cluster freezes in
 #             place — TCP connections preserved, leader leases hold,
-#             etcd doesn't notice. Run before stepping away when
-#             Docker Desktop will keep running.
+#             etcd doesn't notice. Run before stepping away when the
+#             Docker daemon will keep running.
 #
 #   resume    docker unpause same containers. Picks up exactly where
 #             paused. Survives Mac sleep/wake. Does NOT recover from
@@ -74,7 +74,7 @@ _assert_containers_exist() {
   command -v docker >/dev/null 2>&1 \
     || _die "docker not found on PATH (PATH=$PATH). If running from cron, set PATH at the top of the crontab or use the absolute path to this script."
   docker info >/dev/null 2>&1 \
-    || _die "docker daemon is not responding. Is Docker Desktop running?"
+    || _die "docker daemon is not responding. Start the Docker daemon and retry."
 
   local c
   for c in $(_all_containers); do

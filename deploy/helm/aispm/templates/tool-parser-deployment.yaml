@@ -5,7 +5,8 @@ metadata:
   name: tool-parser
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.toolParser.replicas | default 2 }}
   selector:
     matchLabels: { app: tool-parser }
   template:

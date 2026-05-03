@@ -5,7 +5,9 @@ metadata:
   name: opa
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  OPA is stateless: it
+  # bundles policies on its own filesystem and decisions are pure.
+  replicas: {{ .Values.opa.replicas | default 2 }}
   selector:
     matchLabels: { app: opa }
   template:

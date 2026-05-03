@@ -24,9 +24,11 @@ data:
   # NOTE: KAFKA_NUM_PARTITIONS already defined via .Values.platformEnv —
   # added there because spm-api needs it for create_agent_topics().
   # Don't redefine here or the configmap gets duplicate keys.
-  # min.insync.replicas — values-driven so prod can keep ISR=2 with RF=3
-  # while dev stays at 1.
-  KAFKA_MIN_INSYNC_REPLICAS: {{ .Values.kafka.minInsyncReplicas | default 1 | quote }}
+  # min.insync.replicas — defaults to 2 so a 3-broker cluster (the only
+  # supported topology since May 2026) tolerates 1 broker loss without
+  # dropping below the ISR threshold.  Override only if you really know
+  # what you're doing — RF=3, ISR=2 is the always-on contract.
+  KAFKA_MIN_INSYNC_REPLICAS: {{ .Values.kafka.minInsyncReplicas | default 2 | quote }}
   # Sentinel-aware Redis client config — replaces the haproxy-based
   # redis-master proxy that flapped under istio sidecar pooling. Each
   # redis-node pod runs a sentinel sidecar at port 26379. Listing all

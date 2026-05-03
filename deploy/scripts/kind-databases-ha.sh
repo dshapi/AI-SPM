@@ -149,7 +149,31 @@ spec:
       max_wal_size: "1GB"
       wal_keep_size: "512MB"
 
-  # Failover policy: primary unhealthy ≥ 30s → trigger switchover.
+  # Failover behavior:
+  #
+  # - failoverDelay: time (seconds) CNPG waits after detecting the
+  #   primary is unhealthy before promoting a standby.  Default is 0
+  #   (immediate), which on this kind cluster causes a runaway
+  #   ping-pong failover loop:
+  #     · CNPG instance-manager :8000 status port (TLS) intermittently
+  #       returns EOF / "tls: unrecognized name" / context-deadline
+  #       under Docker daemon CPU pressure or WAL replay bursts
+  #     · Each transient probe failure → immediate failover →
+  #       new WAL timeline → former primary stranded on a dead timeline
+  #     · After ~5 forks pg_rewind cannot bridge the divergence and
+  #       the stranded replica goes into permanent CrashLoopBackOff
+  #   Observed May 2026: 9-hour storm, replica stranded at TL21 vs
+  #   TL42 primary, required full re-clone via pg_basebackup.
+  #   60s absorbs every probe blip we've ever seen here while still
+  #   reacting to a real primary outage well within typical RTO.
+  #   See runbook §"CNPG failover storm + WAL timeline divergence".
+  failoverDelay: 60
+  #
+  # - primaryUpdateStrategy/primaryUpdateMethod control PLANNED updates
+  #   (minor pg version bump, pod template change), not failure-driven
+  #   failover.  unsupervised + switchover = CNPG can auto-promote a
+  #   standby during such updates via clean handoff, no manual
+  #   `kubectl cnpg promote` required.
   primaryUpdateStrategy: unsupervised
   primaryUpdateMethod: switchover
 

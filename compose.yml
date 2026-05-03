@@ -246,8 +246,8 @@ services:
       # Set GUARD_DEBUG=1 in .env to log every raw model response (diagnosing
       # JSON-schema drift, refusal loops, etc.).
       GUARD_DEBUG: ${GUARD_DEBUG:-}
-    # host.docker.internal resolves to the host gateway on Docker Desktop for
-    # Mac/Windows automatically. The mapping below is explicit so Linux hosts
+    # host.docker.internal resolves to the host gateway on most desktop
+    # docker setups automatically.  The mapping below is explicit so Linux hosts
     # also reach the host-side Ollama on :11434.
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -260,8 +260,6 @@ services:
       retries: 5
     depends_on:
       <<: *depends-platform
-      spm-db:
-        condition: service_healthy
 
   # ── garak red-team sidecar ──────────────────────────────────────────────────
   # garak carries heavy ML deps (torch, transformers, etc.) so it lives in its
@@ -316,9 +314,6 @@ services:
       retries: 8
       # garak imports torch/transformers on startup — give it time
       start_period: 90s
-    depends_on:
-      spm-db:
-        condition: service_healthy
     restart: unless-stopped
 
   api:
@@ -346,8 +341,6 @@ services:
       guard-model:
         condition: service_healthy
       garak-runner:
-        condition: service_healthy
-      spm-db:
         condition: service_healthy
 
   retrieval-gateway:
@@ -538,25 +531,13 @@ services:
 
   # ── AI SPM Platform ──────────────────────────────────────────────────────────
 
-  spm-db:
-    image: postgres:16-alpine
-    platform: linux/arm64/v8
-    container_name: cpm-spm-db
-    # Publish 5432 so host tooling (alembic, psql) can connect.
-    # If 5432 is already in use on the host, change the left side e.g. "5433:5432".
-    ports: ["5432:5432"]
-    environment:
-      POSTGRES_DB: spm
-      POSTGRES_USER: spm_rw
-      POSTGRES_PASSWORD: ${SPM_DB_PASSWORD:-spmpass}
-    volumes:
-      - ./DataVolumes/spm-db:/var/lib/postgresql/data
-      - ./spm/db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U spm_rw -d spm"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+  # spm-db (single-pod Postgres) was removed in May 2026.  CNPG (in
+  # the kind cluster) is the only Postgres backend; compose is now used
+  # only for `docker compose build` to produce service images that get
+  # pushed to localhost:5001 and pulled by kind.  Services below still
+  # carry SPM_DB_URL env vars pointing at `spm-db:5432` as documentation
+  # of the expected URL — those names won't resolve in a `compose up`,
+  # but `compose up` is not a supported workflow anymore.
 
   spm-api:
     build:
@@ -623,8 +604,8 @@ services:
       # path. Bind-mount the host directory.
       - ./DataVolumes/agents:/app/DataVolumes/agents
     # Integrations' Test-connection probe hits host-side Ollama at
-    # host.docker.internal:11434.  Docker Desktop auto-resolves this on
-    # Mac/Windows, but Linux needs the explicit host-gateway mapping.
+    # host.docker.internal:11434.  Most desktop docker setups auto-resolve
+    # this; Linux needs the explicit host-gateway mapping.
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -638,9 +619,6 @@ services:
     # homing spm-api on both networks lets the SDK reach it without
     # exposing it to the public internet from agent-net.
     networks: [default, agent-net]
-    depends_on:
-      spm-db:
-        condition: service_healthy
 
   spm-aggregator:
     build:
@@ -655,8 +633,6 @@ services:
       SPM_SNAPSHOT_INTERVAL_SEC: ${SPM_SNAPSHOT_INTERVAL_SEC:-300}
       SPM_ENFORCEMENT_WINDOW: ${SPM_ENFORCEMENT_WINDOW:-3}
     depends_on:
-      spm-db:
-        condition: service_healthy
       spm-api:
         condition: service_healthy
       <<: *depends-platform
@@ -712,8 +688,6 @@ services:
       retries: 5
     depends_on:
       <<: *depends-platform
-      spm-db:
-        condition: service_healthy
 
   threat-hunting-agent:
     build:
@@ -756,8 +730,6 @@ services:
         condition: service_started
       agent-orchestrator:
         condition: service_healthy
-      spm-db:
-        condition: service_healthy
       api:
         condition: service_healthy
     restart: unless-stopped
@@ -765,7 +737,7 @@ services:
   # ── LLM backend: host Ollama (not a compose service) ────────────────────
   # Guard + hunt both talk to Ollama running on the host via
   # host.docker.internal:11434/v1 (OpenAI-compatible surface).
-  # On Mac/Windows Docker Desktop this resolves automatically; on Linux the
+  # On most desktop docker setups this resolves automatically; on Linux the
   # extra_hosts: "host.docker.internal:host-gateway" mappings on guard-model
   # and threat-hunting-agent make it resolve too.
   #
@@ -801,7 +773,6 @@ services:
     ports: ["8500:8500"]
     networks: [default, agent-net]
     depends_on:
-      spm-db: { condition: service_healthy }
       kafka-1: { condition: service_healthy }
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8500/health', timeout=4)"]
@@ -820,8 +791,6 @@ services:
       SPM_DB_URL: postgresql+asyncpg://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
     ports: ["8501:8500"]
     networks: [default, agent-net]
-    depends_on:
-      spm-db: { condition: service_healthy }
     extra_hosts:
       # The default LLM upstream in dev is host Ollama.
       - "host.docker.internal:host-gateway"

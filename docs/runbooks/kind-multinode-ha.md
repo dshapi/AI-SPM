@@ -1,10 +1,13 @@
-# Multi-node HA Cluster (kind on Docker Desktop) — Runbook
+# Multi-node HA Cluster (kind on Docker) — Runbook
 
 This is the operational manual for the 3-node kind cluster that AISPM
-runs on locally. Every stateful layer is HA via application-level
+runs on locally.  kind on Docker is the only supported local
+topology since May 2026 — single-instance fallbacks have been removed
+from the chart (see "HA-only contract" under "Recent architectural
+changes" below).  Every stateful layer is HA via application-level
 replication; storage is local-path because no FUSE/iSCSI/RBD-based CSI
-driver works reliably on Docker Desktop's LinuxKit kernel — and we
-don't need replicated block storage anyway, since CNPG, Redis Sentinel,
+driver works reliably under the Docker engine's Linux kernel, and we
+don't need replicated block storage anyway since CNPG, Redis Sentinel,
 MinIO, and Kafka all replicate at the application layer.
 
 ## Architecture
@@ -332,9 +335,9 @@ Two distinct failures share this symptom. Diagnose before acting.
 
 **(a) Stale kubeconfig endpoint after Docker restart.** kind picks a
 random host port for the API server LB on each cluster create. After
-Docker Desktop restart, the LB container's host port may differ from
-what your kubeconfig expects. The `networking.apiServerPort: 6443` pin
-in `kind-cluster.sh` prevents this on new clusters; if the cluster
+the Docker daemon restarts, the LB container's host port may differ
+from what your kubeconfig expects. The `networking.apiServerPort: 6443`
+pin in `kind-cluster.sh` prevents this on new clusters; if the cluster
 predates that change, refresh the kubeconfig:
 
 ```bash
@@ -442,6 +445,97 @@ After this, pods first transition `0/2` → `1/2` (sidecar healthy, app
 still failing for its own reasons), then `2/2` as Postgres replicas
 finish WAL streaming and downstream services can connect.
 
+### CNPG failover storm + WAL timeline divergence
+
+Symptom cluster: `kubectl -n aispm get cluster spm-db` shows
+`phase: Failing over` even when `currentPrimary == targetPrimary`
+(state machine wedged); one pod in permanent CrashLoopBackOff with
+postgres logs containing `requested timeline N does not contain
+minimum recovery point ... on timeline M`; events show alternating
+`FailingOver` / `FailoverTarget` between two replicas every 15-30 min;
+`pg_controldata` on each replica returns wildly different
+`Latest checkpoint's TimeLineID` values.
+
+Root cause: chronic intermittent probe failures on the CNPG
+instance-manager status port (`:8000`) cause CNPG to ping-pong the
+primary. Each failover bumps the WAL timeline, and any replica that
+was previously a primary gets stranded on a now-dead timeline.
+Once divergence exceeds ~3-5 timelines, `pg_rewind` cannot bridge it
+and the stranded replica enters permanent CrashLoopBackOff. See the
+"Known issues" entry on `failoverDelay` for the underlying trigger
+and prevention.
+
+Recovery procedure (data-preserving, ~10-15 min, validated May 2026
+when divergence reached TL21 vs TL42):
+
+1.  Freeze the operator to stop the failover loop:
+    ```bash
+    kubectl -n cnpg-system scale deploy cnpg-controller-manager --replicas=0
+    ```
+    Wait 60s, then verify `kubectl -n aispm get events | grep FailingOver`
+    timestamps stop advancing.
+
+2.  Identify the live primary. The good replica has highest TimeLineID,
+    `cluster state: in production`, and `pg_is_in_recovery()=f`:
+    ```bash
+    for p in $(kubectl -n aispm get pods -l cnpg.io/cluster=spm-db -o name); do
+      pod=${p#pod/}
+      echo "--- $pod ---"
+      kubectl -n aispm exec "$pod" -c postgres -- bash -c \
+        'pg_controldata "$PGDATA"' | grep -E 'TimeLineID|cluster state'
+      kubectl -n aispm exec "$pod" -c postgres -- psql -U postgres -tAc \
+        "SELECT pg_is_in_recovery();" 2>/dev/null
+    done
+    ```
+
+3.  Take an insurance dump from the primary:
+    ```bash
+    PRIMARY=spm-db-N    # identified above
+    mkdir -p ~/.aispm/db-dumps
+    DUMP=~/.aispm/db-dumps/$PRIMARY-rescue-$(date -u +%Y%m%dT%H%M%SZ).sql
+    kubectl -n aispm exec "$PRIMARY" -c postgres -- pg_dumpall -U postgres \
+      --clean --if-exists > "$DUMP"
+    ls -lh "$DUMP" && tail -3 "$DUMP"   # verify "complete" trailer
+    ```
+
+4.  Quarantine each divergent replica (NOT the primary). For any replica
+    whose `TimeLineID` is below the primary's, delete pod and PVC:
+    ```bash
+    kubectl -n aispm delete pod spm-db-X --grace-period=0 --force
+    kubectl -n aispm delete pvc spm-db-X --wait=false
+    # If the PVC hangs in Terminating:
+    kubectl -n aispm patch pvc spm-db-X \
+      -p '{"metadata":{"finalizers":null}}' --type=merge
+    ```
+    Replicas that share the primary's TimeLineID and have caught-up
+    receive/replay LSNs do NOT need to be deleted.
+
+5.  Wake the operator. It detects missing instances and re-bootstraps
+    them via `pg_basebackup` from the primary. CNPG picks the next
+    available instance number rather than reusing the deleted one
+    (deleted `spm-db-1` returns as `spm-db-4`, etc.):
+    ```bash
+    kubectl -n cnpg-system scale deploy cnpg-controller-manager --replicas=1
+    kubectl -n cnpg-system rollout status deploy cnpg-controller-manager --timeout=120s
+    ```
+
+6.  Soak-test 2 min and verify healthy:
+    ```bash
+    kubectl -n aispm get cluster spm-db
+    sleep 120
+    kubectl -n aispm get cluster spm-db    # must still say "Cluster in healthy state"
+    kubectl -n aispm get pods -l cnpg.io/cluster=spm-db
+    kubectl -n aispm get events --sort-by=.lastTimestamp \
+      --field-selector involvedObject.kind=Cluster | tail -10
+    ```
+    Both `get cluster` calls must return `Cluster in healthy state`,
+    and no new `FailingOver` events should appear in the 2-min window.
+
+If step 5 immediately re-triggers the failover storm, scale the
+operator back to 0 and pivot to nuke-and-rebuild:
+`./deploy/scripts/kind-databases-ha.sh down && ./deploy/scripts/kind-databases-ha.sh up`,
+then restore the rescue dump.
+
 ### Static pod won't restart after manifest edit
 
 Symptom: you moved an `/etc/kubernetes/manifests/*.yaml` aside, then
@@ -470,11 +564,150 @@ script reinstalls it.
 
 ## Recent architectural changes
 
+### HA-only contract: single-instance modes removed (May 2026)
+
+The chart no longer supports any single-instance fallback for stateful
+infrastructure or application services.  Specifically:
+
+- `deploy/helm/aispm/templates/spm-db-statefulset.yaml` and
+  `redis-statefulset.yaml` were tombstoned (chart-built single-pod
+  Postgres / Redis).  CNPG (3-instance Postgres) and the Bitnami HA
+  Redis (1 master + 3 replicas + 3 sentinels) installed by
+  `kind-databases-ha.sh` are now the only backends.
+- `deploy/helm/aispm/templates/spm-db-init-configmap.yaml` was
+  tombstoned (raw-SQL bootstrap).  Schema is built exclusively by
+  Alembic (`spm/alembic/versions/`) — see the Alembic-canonical
+  bootstrap section below.
+- `spm/db/migrations/001_initial.sql` was tombstoned for the same
+  reason.
+- `compose.yml`'s spm-db service block was removed.  Compose is now
+  only used for `docker compose build` (image building); `compose up`
+  with a full local stack is no longer supported.
+- `values.yaml` defaults are HA: `kafka.replicas=3`,
+  `kafka.minInsyncReplicas=2`, `flink.jobmanager.replicas=2`,
+  `flink.taskmanager.replicas=2`, `redis.replicas=3`.  Never override
+  these below their HA-correct values.
+- `values.dev.yaml` no longer downgrades these (the old
+  single-broker / single-JM workarounds were removed).
+- `values.dev-multinode.yaml` no longer needs to re-set HA values
+  back up — the defaults already cover it; only environment-specific
+  storage class / s3 endpoint overrides remain.
+- All 22 application-tier Deployments were bumped from `replicas: 1`
+  to `replicas: 2` with topology spread.  Two are intentionally still
+  single-replica with explicit SPOF acknowledgment in their template
+  comments and tracked follow-ups: `prometheus` (TSDB on RWO PVC,
+  needs Thanos sidecar) and `grafana` (SQLite backing store, needs
+  CNPG-backed config DB).
+- The `api` Service uses `sessionAffinity: ClientIP` to pin
+  WebSocket connections to one pod across replicas; tracked
+  follow-up to extract WS state to Redis for true HA.
+- File deletions are committed as tombstones (file present, content
+  is a one-line "removed in May 2026" comment).  Run `git rm` on
+  them after the chart change is reviewed:
+    - `deploy/helm/aispm/templates/spm-db-statefulset.yaml`
+    - `deploy/helm/aispm/templates/spm-db-init-configmap.yaml`
+    - `deploy/helm/aispm/templates/redis-statefulset.yaml`
+    - `spm/db/migrations/001_initial.sql`
+
+### Alembic-canonical schema bootstrap (May 2026)
+
+Schema evolution is now exclusively driven by Alembic migrations under
+`spm/alembic/versions/`.  Three previous bootstrap paths (raw SQL via
+init configmap, `Base.metadata.create_all` from spm-api lifespan, raw
+SQL via Postgres `/docker-entrypoint-initdb.d/`) collapsed into one:
+
+- `services/spm_api/seed_db.py::ensure_schema()` runs
+  `alembic upgrade head` via the programmatic API (in an executor so
+  the async caller doesn't block).
+- `services/spm_api/app.py` lifespan calls `ensure_schema()` instead
+  of `Base.metadata.create_all` directly.
+- The chart's db-seed Job runs `python3 /app/seed_db.py`, which calls
+  `ensure_schema()` first → alembic.
+- The spm-api Docker image now ships the `alembic` Python package
+  (`services/spm_api/requirements.txt`) and the `spm/` package
+  including `alembic.ini` + `alembic/env.py`.
+
+This eliminates the constraint-drift class of bug that motivated the
+posture_snapshots `uq_snapshot` fix — schema is defined in one place
+(migrations) and applied identically everywhere.  The runbook's old
+"Bootstrap vs Alembic reconciliation" issue is closed.
+
+
+
 Stays here so the next person reading this runbook understands non-obvious
 design decisions made during incident response. Each section names the
 chokepoint code so you can grep without digging.
 
 
+
+### CNPG `failoverDelay: 60` to prevent failover storms
+
+CNPG defaults `failoverDelay: 0`, meaning *any* probe failure on the
+primary instantly triggers a failover. Combined with intermittent
+probe failures on the CNPG instance-manager `:8000` status port
+(observed under Docker daemon CPU pressure or WAL replay bursts —
+EOF, "tls: unrecognized name", context-deadline), this produces a
+ping-pong loop. Each failover bumps the WAL timeline; after ~5 forks
+`pg_rewind` cannot bridge the divergence and stranded replicas
+CrashLoopBackOff permanently.
+
+`deploy/scripts/kind-databases-ha.sh::_create_pg_cluster()` now sets
+`spec.failoverDelay: 60` in the Cluster CR. Any probe blip under 60s
+is absorbed; only a sustained primary outage promotes a standby. This
+single line is what prevents the 9-hour incident in §"CNPG failover
+storm" from recurring.
+
+A live cluster can be patched without a restart:
+```bash
+kubectl -n aispm patch cluster spm-db --type=merge \
+  -p '{"spec":{"failoverDelay":60}}'
+```
+
+### `posture_snapshots` unique constraint backfill
+
+The bootstrap SQL (`spm/db/migrations/001_initial.sql`), the Alembic
+baseline (`001_initial_baseline.py`), and the chart's init ConfigMap
+(`deploy/helm/aispm/templates/spm-db-init-configmap.yaml`) all declared
+`UNIQUE NULLS DISTINCT (model_id, tenant_id, snapshot_at)` on
+`posture_snapshots`. The SQLAlchemy model in `spm/db/models.py` did
+not. When any of the several services that call `Base.metadata.create_all`
+(spm-api lifespan, db-seed Job, hydrate-on-import paths) won the race
+against the raw SQL bootstrap, the table was created without the
+constraint. Result: every `INSERT ... ON CONFLICT (model_id, tenant_id,
+snapshot_at) DO UPDATE` in `spm_aggregator.upsert_snapshot` errored
+`42P10  there is no unique or exclusion constraint matching the
+ON CONFLICT specification`, silently failing every metric rollup.
+
+Fix landed in four places to make the repair stick across every
+deploy mode (fresh install, in-place upgrade, kind-databases-ha
+re-create, single-node chart, multinode chart):
+
+- `spm/db/models.py` — added `UniqueConstraint("model_id", "tenant_id",
+  "snapshot_at", name="uq_snapshot")` to `PostureSnapshot.__table_args__`.
+  Future fresh installs that hit `Base.metadata.create_all` first now
+  get the constraint regardless of which bootstrap path wins the race.
+- `services/spm_api/seed_db.py::ensure_schema()` — added a
+  pg_constraint-guarded `ALTER TABLE ... ADD CONSTRAINT uq_snapshot ...`
+  inside the same transaction as `create_all`. Self-heals on every
+  spm-api boot AND every db-seed Job run, so existing clusters that
+  were bootstrapped before the model fix get repaired automatically
+  on next deploy. Add new self-healing DDL fixes here as the model
+  evolves; always pg_constraint-guard them so re-runs are no-ops.
+- `services/spm_api/app.py` lifespan — refactored to call
+  `ensure_schema()` instead of calling `create_all` directly, so the
+  backfill block runs everywhere `create_all` does.
+- `spm/alembic/versions/008_backfill_uq_snapshot.py` — source-of-truth
+  Alembic migration with the same DDL. Lands when/if `alembic upgrade
+  head` is wired into the bootstrap chain (existing follow-up under
+  "Bootstrap vs Alembic reconciliation").
+
+Manual one-shot if needed (the runtime backfill above does this
+automatically on next spm-api restart):
+```bash
+kubectl -n aispm exec $(kubectl -n aispm get pod -l cnpg.io/instanceRole=primary -o name | head -1 | sed 's|^pod/||') \
+  -c postgres -- psql -U postgres -d spm -c \
+  "ALTER TABLE posture_snapshots ADD CONSTRAINT uq_snapshot UNIQUE NULLS DISTINCT (model_id, tenant_id, snapshot_at);"
+```
 
 ### Image deployment quirk on kind
 
@@ -679,24 +912,13 @@ Action items:
 - [ ] Existing live cluster: the bump only affects new pods.  After
       this change lands, run `kubectl -n aispm-data delete pod -l app.kubernetes.io/name=redis` to recycle the existing pods so they pick up the new timeout.
 
-### Bootstrap vs Alembic reconciliation
+### Bootstrap vs Alembic reconciliation — RESOLVED (May 2026)
 
-Fresh installs apply ``spm/db/migrations/001_initial.sql`` to
-bootstrap the schema, then never run the Alembic migration chain.
-Migrations after 001 (e.g. ``002_add_session_id_to_audit_export``)
-exist and are correct, but a fresh cluster starts in the post-001
-state — missing every column added by 002+. The
-threat-hunting-agent's ``session_id`` failure was the visible
-symptom; there are likely more silent ones.
-
-Action items:
-
-- [ ] Either backport every Alembic migration into ``001_initial.sql``
-      (single source of truth at bootstrap time), or
-- [ ] Make the bootstrap path always run ``alembic upgrade head``
-      after applying 001 (preserves migration history).
-- [ ] Add a CI check that ``alembic upgrade head`` from a freshly
-      bootstrapped DB is a no-op — proves 001 + Alembic are aligned.
+Closed: see "Alembic-canonical schema bootstrap (May 2026)" under
+"Recent architectural changes".  The raw-SQL `001_initial.sql` and
+`spm-db-init-configmap.yaml` paths were tombstoned; every code path
+now goes through `alembic upgrade head` via
+`services/spm_api/seed_db.py::ensure_schema()`.
 
 ## What's NOT installed (and why)
 

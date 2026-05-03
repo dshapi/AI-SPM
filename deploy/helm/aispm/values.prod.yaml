@@ -27,9 +27,9 @@ global:
   imagePullPolicy: IfNotPresent
 
 # ── Storage — Longhorn for replicated, snapshottable PVCs ──────────────────
-spmDb:
-  storageClass: longhorn
-  storage: 100Gi
+# spm-db storage is no longer chart-managed: CNPG owns the PVCs.  Set the
+# storage class / size on the CNPG Cluster CR (deploy/scripts/kind-databases-ha.sh
+# or wherever CNPG is provisioned in the prod environment).
 
 kafka:
   storageClass: longhorn

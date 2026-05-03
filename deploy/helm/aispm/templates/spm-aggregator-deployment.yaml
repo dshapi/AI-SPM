@@ -5,7 +5,11 @@ metadata:
   name: spm-aggregator
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Reads from Kafka in a
+  # consumer-group; partition assignment splits work across replicas.
+  # Writes to Postgres are now ON-CONFLICT-safe (uq_snapshot constraint
+  # added May 2026), so concurrent writes from both replicas converge.
+  replicas: {{ .Values.spmAggregator.replicas | default 2 }}
   selector:
     matchLabels: { app: spm-aggregator }
   template:

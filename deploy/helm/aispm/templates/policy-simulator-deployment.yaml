@@ -5,7 +5,10 @@ metadata:
   name: policy-simulator
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF: 1-pod loss leaves the
+  # service serving from the other replica on a different node.
+  # Override via `.Values.policySimulator.replicas` if you need more.
+  replicas: {{ .Values.policySimulator.replicas | default 2 }}
   selector:
     matchLabels: { app: policy-simulator }
   template:

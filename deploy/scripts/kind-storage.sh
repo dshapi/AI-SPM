@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # deploy/scripts/kind-storage.sh
 # ─────────────────────────────────────────────────────────────────────────
-# Storage layer for the kind cluster on Docker Desktop.
+# Storage layer for the kind cluster.
 #
 # Why no Longhorn / Ceph / SeaweedFS:
-#   Docker Desktop's LinuxKit kernel lacks `iscsi_tcp` and other modules
-#   these CSI drivers need. Same wall we hit on OrbStack. After enough
-#   debugging we realized: replicated block storage isn't actually
-#   needed for our workloads. Every stateful app we run (CNPG Postgres,
-#   Redis Sentinel, MinIO, Kafka) does its OWN replication at the
-#   application level — each replica wants its own local PVC, period.
+#   The Docker engine's Linux kernel underneath kind lacks `iscsi_tcp`
+#   and other modules these CSI drivers need.  Replicated block storage
+#   isn't actually needed for our workloads anyway: every stateful app
+#   (CNPG Postgres, Redis Sentinel, MinIO, Kafka) does its OWN
+#   replication at the application level — each replica wants its own
+#   local PVC, period.
 #
 # Architecture:
 #   - local-path (kind's default `standard` StorageClass) for every

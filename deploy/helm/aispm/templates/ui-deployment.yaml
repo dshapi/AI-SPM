@@ -5,7 +5,9 @@ metadata:
   name: ui
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Static frontend, fully
+  # stateless behind the ingress.
+  replicas: {{ .Values.ui.replicas | default 2 }}
   selector:
     matchLabels: { app: ui }
   template:

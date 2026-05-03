@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # deploy/scripts/build-images.sh
-# Build all AISPM service images into k3s containerd via nerdctl.
+# Build all AISPM service images via docker, ready to be pushed to the
+# kind-side registry at localhost:5001 (see kind-cluster.sh).
 # Run from ANYWHERE — the script always resolves the repo root itself.
 #
 # Usage:
@@ -10,18 +11,13 @@
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
-# Auto-detect builder. nerdctl works on Rancher Desktop; docker works
-# on OrbStack / Docker Desktop / colima. Override with BUILDER env var.
-if [ -n "${BUILDER:-}" ]; then
-  :  # use whatever the operator set
-elif command -v nerdctl >/dev/null 2>&1 && nerdctl info >/dev/null 2>&1; then
-  BUILDER="nerdctl --namespace k8s.io"
-elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  BUILDER="docker"
-else
-  echo "ERROR: no working builder found (tried nerdctl, docker)" >&2
-  exit 1
-fi
+# docker is the only supported builder.  Override with BUILDER env var
+# if you have a docker-compatible CLI under a different name.
+BUILDER="${BUILDER:-docker}"
+command -v "$(echo "$BUILDER" | awk '{print $1}')" >/dev/null 2>&1 \
+  || { echo "ERROR: builder '$BUILDER' not found on PATH" >&2; exit 1; }
+$BUILDER info >/dev/null 2>&1 \
+  || { echo "ERROR: '$BUILDER info' failed — is the docker daemon running?" >&2; exit 1; }
 echo "$(date +%H:%M:%S) [INFO]  using builder: $BUILDER"
 NERDCTL="$BUILDER"
 TARGET="${1:-}"   # optional: only build this image name

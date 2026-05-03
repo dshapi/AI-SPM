@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # deploy/scripts/kind-cluster.sh
 # ─────────────────────────────────────────────────────────────────────────
-# Lifecycle helper for a 3-control-plane kind cluster on Docker Desktop.
-# Drop-in replacement for orb-k3s.sh after the move off OrbStack.
+# Lifecycle helper for a 3-control-plane kind cluster.
 #
 # Why this design:
 #   - 3 control-plane nodes give HA api-server + etcd quorum (tolerates
@@ -30,7 +29,7 @@ set -euo pipefail
 CLUSTER_NAME="${CLUSTER_NAME:-aispm}"
 KIND_NODE_IMAGE="${KIND_NODE_IMAGE:-kindest/node:v1.31.0}"
 REGISTRY_NAME="${REGISTRY_NAME:-aispm-registry}"
-REGISTRY_PORT="${REGISTRY_PORT:-5001}"   # NOT 5000 — Docker Desktop hijacks 5000.
+REGISTRY_PORT="${REGISTRY_PORT:-5001}"   # 5001 because 5000 is often already in use on the host.
 KUBECONFIG_PATH="${KUBECONFIG_PATH:-${HOME}/.kube/kind-aispm.yaml}"
 HOST_VOLUMES_ROOT="${HOST_VOLUMES_ROOT:-/tmp/kind-vols}"
 
@@ -74,7 +73,7 @@ apiVersion: kind.x-k8s.io/v1alpha4
 name: ${CLUSTER_NAME}
 
 # Pin the API-server LB port so the kubeconfig endpoint survives
-# Docker Desktop restarts (otherwise kind picks a random host port
+# Docker daemon restarts (otherwise kind picks a random host port
 # each time and 'kubectl' breaks until 'kind export kubeconfig').
 networking:
   apiServerAddress: 127.0.0.1

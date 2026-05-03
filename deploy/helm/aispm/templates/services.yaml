@@ -58,6 +58,16 @@ metadata:
   namespace: {{ .Values.global.namespace }}
 spec:
   selector: { app: api }
+  # ClientIP sessionAffinity pins each WebSocket connection to one pod,
+  # required because the api currently keeps WS state in process memory
+  # (see api-deployment.yaml + follow-up "extract WS state to Redis").
+  # Pod loss disconnects users hashed to that pod; they reconnect and
+  # the affinity table updates them onto the surviving pod.  10800s =
+  # default 3h Kubernetes timeout.
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
   ports:
     - port: 8080
 ---

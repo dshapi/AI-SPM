@@ -17,7 +17,7 @@ Design rules
        peers reaching us through a waypoint).
      - source.namespaces only → matches ambient peers reaching the
        destination sidecar without an mTLS principal (gVisor + ztunnel
-       on Rancher Desktop / OrbStack dev clusters).
+       on the kind dev cluster).
 
    In either mode, NetworkPolicy at L3/L4 already restricts which Pods
    can even initiate the connection. The principal/namespace check is

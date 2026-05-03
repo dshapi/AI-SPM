@@ -1,6 +1,6 @@
 # deploy/helm/aispm/values.dev-multinode.yaml
 # ─────────────────────────────────────────────────────────────────────────
-# Override layer for the multi-node kind cluster on Docker Desktop.
+# Override layer for the 3-node kind cluster.
 # Apply on top of values.dev.yaml so the dev defaults (PERMISSIVE mTLS,
 # tightened guard threshold, Tetragon enabled, etc.) are inherited and
 # only the HA-relevant fields change.
@@ -47,29 +47,20 @@
 ingress:
   host: aispm.local
 
-# ── Kafka — full KRaft quorum across 3 nodes ────────────────────────────
+# ── Kafka — only `storageClass` differs from the HA-by-default values.yaml
+# (kind's local-path provisioner is named `standard`, prod uses longhorn).
+# Replicas + ISR are 3/2 by default — never override below that.
 kafka:
-  replicas: 3
-  minInsyncReplicas: 2
   storageClass: standard
 
-# ── Postgres + Redis: HA via external operators (NOT chart-builtin) ─────
-# kind-databases-ha.sh installs CloudNativePG (3-instance Postgres with
-# streaming replication, Service spm-db-rw follows the primary) and
-# Bitnami Redis (replication + sentinel, Service `redis` is sentinel-
-# aware). The chart's built-in single-pod StatefulSets are skipped.
-spmDb:
-  enabled: false
-  # External Postgres lives outside the chart (CNPG-managed HA cluster
-  # created by deploy/scripts/kind-databases-ha.sh). The chart still
-  # renders an ExternalName Service named `spm-db` that aliases the
-  # well-known hostname every consumer's SPM_DB_URL hardcodes
-  # (`spm-db.aispm.svc.cluster.local`) to the CNPG read-write endpoint.
-  # When CNPG promotes a new primary, spm-db-rw retargets automatically
-  # and this alias follows along — failover-safe with no chart edits.
-  externalName: spm-db-rw.aispm.svc.cluster.local
-redis:
-  enabled: false
+# ── Postgres + Redis: HA via external operators ────────────────────────
+# kind-databases-ha.sh installs CloudNativePG (3-instance Postgres,
+# Service spm-db-rw follows the primary on failover) and Bitnami Redis
+# in replication + sentinel mode (1 master + 3 replicas + 3 sentinels,
+# Service `redis` is sentinel-aware).  Chart no longer ships built-in
+# single-pod versions of either, so no `enabled: false` override is
+# needed here — see runbook §"Recent architectural changes" for the
+# May 2026 removal.
 
 # Override the connection URLs that AISPM services read from
 # platform-secrets / platform-env. These point at the HA endpoints
@@ -120,10 +111,10 @@ platformEnv:
 agentRuntime:
   runtimeClassName: gvisor
 
-# ── Per-image registry overrides (Mac Docker → kind nodes) ──────────────
+# ── Per-image registry overrides (host Docker → kind nodes) ─────────────
 # kind nodes pull from the local registry on the host at localhost:5001
-# (Docker Desktop hijacks 5000). The kind-cluster.sh init wires this up
-# as a containerd mirror on every node.
+# (5000 is often already in use; we standardise on 5001).
+# kind-cluster.sh init wires this up as a containerd mirror on every node.
 images:
   api:               { repository: localhost:5001/aispm-api,                  tag: latest }
   guardModel:        { repository: localhost:5001/aispm-guard-model,          tag: latest }
@@ -154,11 +145,12 @@ images:
 falco:
   enabled: false
 
-# ── Flink — 2-JM HA via MinIO/S3 (no shared filesystem) ─────────────────
-# Both JMs and TMs can run on any node because all shared state (HA blob
-# store, checkpoints) lives in MinIO via s3://. The s3:// prefix makes
-# flink-pvc.yaml + flink-jobmanager-statefulset.yaml skip rendering the
-# unused flink-ha + flink-checkpoints RWX PVCs and their mounts.
+# ── Flink — only the s3:// state-store URIs differ from values.yaml.
+# 2 JMs / 2 TMs are the HA-by-default in values.yaml — never override
+# below that.  The s3:// prefix makes flink-pvc.yaml +
+# flink-jobmanager-statefulset.yaml skip rendering the unused flink-ha +
+# flink-checkpoints RWX PVCs and their mounts (state lives in MinIO,
+# not on local-path PVCs that can't be shared across nodes).
 flink:
   checkpointsDir: s3://flink/checkpoints
   savepointsDir:  s3://flink/savepoints
@@ -168,7 +160,3 @@ flink:
     accessKey:       minioadmin
     secretKey:       minioadmin
     pathStyleAccess: true
-  jobmanager:
-    replicas: 2
-  taskmanager:
-    replicas: 2

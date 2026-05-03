@@ -5,7 +5,8 @@ metadata:
   name: spm-mcp
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.spmMcp.replicas | default 2 }}
   selector:
     matchLabels: { app: spm-mcp }
   template:

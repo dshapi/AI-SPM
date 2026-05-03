@@ -409,8 +409,8 @@ Features not yet implemented — candidates for the next sprint:
 
 | Tool | Minimum version | Notes |
 |---|---|---|
-| **Docker Desktop** | 4.25+ | Enable "Use containerd for pulling and storing images" for best performance |
-| **Docker Compose** | v2.20+ | Bundled with Docker Desktop |
+| **Docker** | 24+ | The kind cluster runs as Docker containers; any Docker daemon works (Docker Desktop, OrbStack, Colima, native dockerd on Linux). |
+| **Docker Compose** | v2.20+ | Used for `docker compose build` to produce service images that get pushed to the kind-side registry. |
 | **Git** | any | To clone the repo |
 | **Make** | any | `brew install make` (macOS) / `apt install make` (Linux) |
 | **4 GB free RAM** | — | Kafka + all services |
@@ -770,8 +770,8 @@ make clean           # Wipe all data and keys
 
 | Tool | Minimum version | Notes |
 |---|---|---|
-| **Docker Desktop** | 4.25+ | Enable "Use containerd for pulling and storing images" for best performance |
-| **Docker Compose** | v2.20+ | Bundled with Docker Desktop |
+| **Docker** | 24+ | The kind cluster runs as Docker containers; any Docker daemon works (Docker Desktop, OrbStack, Colima, native dockerd on Linux). |
+| **Docker Compose** | v2.20+ | Used for `docker compose build` to produce service images that get pushed to the kind-side registry. |
 | **Git** | any | To clone the repo |
 | **Make** | any | `brew install make` (macOS) / `apt install make` (Linux) |
 | **4 GB free RAM** | — | Kafka + all services |

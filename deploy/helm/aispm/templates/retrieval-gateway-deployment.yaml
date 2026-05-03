@@ -5,7 +5,8 @@ metadata:
   name: retrieval-gateway
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.retrievalGateway.replicas | default 2 }}
   selector:
     matchLabels: { app: retrieval-gateway }
   template:

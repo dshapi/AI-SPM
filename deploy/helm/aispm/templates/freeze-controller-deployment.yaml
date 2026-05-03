@@ -5,7 +5,13 @@ metadata:
   name: freeze-controller
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Reads/writes flag state
+  # from Postgres (HA via CNPG); both replicas can independently
+  # process the same freeze decision because the underlying UPDATE is
+  # idempotent (sets the same freeze flag).  If concurrent writes ever
+  # produce non-idempotent side effects, add a Kubernetes-lease leader
+  # election on top.
+  replicas: {{ .Values.freezeController.replicas | default 2 }}
   selector:
     matchLabels: { app: freeze-controller }
   template:

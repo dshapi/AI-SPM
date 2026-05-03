@@ -5,7 +5,11 @@ metadata:
   name: flink-taskmanager
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: {{ .Values.flink.taskmanager.replicas | default 1 }}
+  # Default 2 TMs so slot capacity survives a 1-node loss (the JM still
+  # has slots from the surviving TM and can re-issue tasks).  Single-TM
+  # deployments are not supported since May 2026 — match the JM's HA
+  # contract (2 JMs leader-electing) at the worker tier.
+  replicas: {{ .Values.flink.taskmanager.replicas | default 2 }}
   strategy:
     type: Recreate
   selector:

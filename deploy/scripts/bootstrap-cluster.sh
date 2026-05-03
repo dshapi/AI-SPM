@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # deploy/scripts/bootstrap-cluster.sh
 #
-# Bootstraps the AISPM Kubernetes stack on a running cluster (OrbStack for
-# local dev; kubeadm/GKE/EKS for staging/prod). The script assumes kubectl
-# can reach a cluster — that's the whole premise. If you don't have a
-# cluster, this isn't the script you're looking for.
+# Bootstraps the AISPM Kubernetes stack on a running cluster (kind for
+# local dev — see deploy/scripts/kind-cluster.sh; kubeadm/GKE/EKS for
+# staging/prod).  The script assumes kubectl can reach a cluster —
+# that's the whole premise. If you don't have a cluster, this isn't
+# the script you're looking for.
 #
 # ── INVARIANTS LEARNED THE HARD WAY ─────────────────────────────────────────
 # Each item below cost real debugging time. Re-read the corresponding
@@ -256,11 +257,11 @@
 #                      printed to stdout as a `BOOTSTRAP_SUMMARY: { … }` line.
 #   SKIP_INGRESS=1           skip ingress-nginx
 #   SKIP_CERT_MANAGER=1      skip cert-manager
-#   INSTALL_GVISOR=1         install gVisor runsc (off by default — needs
-#                            containerd; doesn't work on Docker-based OrbStack)
+#   INSTALL_GVISOR=1         install gVisor runsc into every kind node
+#                            (off by default — see install-gvisor.sh)
 #   ENABLE_ISTIO_CNI=1       install istio-cni (off by default — corrupts
-#                            pod networking on OrbStack and many local k8s
-#                            providers; use only on prod kubeadm/GKE)
+#                            pod networking in some kind topologies; use
+#                            only on prod kubeadm/GKE)
 #   INSTALL_ISTIO_GATEWAY=1  install Istio's ingressgateway helm chart
 #                            (off by default — chart 1.24.3 has a values-
 #                            schema bug; use istioctl install instead)
@@ -337,7 +338,7 @@ if [ "$DRY_RUN" != "1" ]; then
   if ! kubectl cluster-info >/dev/null 2>&1; then
     echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl cannot reach a cluster" >&2
     echo "$(date +%H:%M:%S) [bootstrap]   check: kubectl config current-context && kubectl cluster-info" >&2
-    echo "$(date +%H:%M:%S) [bootstrap]   for OrbStack: open OrbStack and ensure Kubernetes is enabled" >&2
+    echo "$(date +%H:%M:%S) [bootstrap]   for kind: 'deploy/scripts/kind-cluster.sh init' brings up a fresh 3-node cluster" >&2
     exit 1
   fi
 fi
@@ -690,8 +691,7 @@ NODE_RUNTIME="$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.contai
 log "container runtime: ${NODE_RUNTIME:-unknown}"
 
 case "$NODE_RUNTIME" in
-  containerd*) log "  ok — containerd is supported";;
-  docker*)     log "  ok — docker (OrbStack) ships containerd internally; gvisor in-cluster Job handles its config";;
+  containerd*) log "  ok — containerd is supported (kind nodes use containerd)";;
   *)           warn "  unrecognized runtime ($NODE_RUNTIME) — proceeding anyway";;
 esac
 
@@ -943,11 +943,10 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "images" ]; then
 fi
 
 # ── 3.5. kube-dns IPv4 only ──────────────────────────────────────────────
-# OrbStack's k8s is dual-stack. kube-dns ends up dual-stack too, but its
-# IPv6 ClusterIP isn't actually routable, which makes Go-based clients
-# (falcoctl, anything resolving via Go's net package) randomly fail with
-# "connection refused" on the IPv6 nameserver. Force IPv4-only — saw it
-# the hard way today.
+# Some kind setups end up with a dual-stack kube-dns whose IPv6
+# ClusterIP isn't actually routable, which makes Go-based clients
+# (falcoctl, anything resolving via Go's net package) randomly fail
+# with "connection refused" on the IPv6 nameserver.  Force IPv4-only.
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
   section "Step 3.5: kube-dns IPv4 SingleStack"
   CURRENT_FAMILIES=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.ipFamilyPolicy}' 2>/dev/null || true)
@@ -966,22 +965,10 @@ fi
 section "Step 4: gVisor runtime"
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "gvisor" ]; then
   if [ "${INSTALL_GVISOR:-0}" != "1" ]; then
-    log "  gVisor skipped (set INSTALL_GVISOR=1 to install — requires containerd cluster)"
-  elif printf '%s' "$NODE_RUNTIME" | grep -qi '^docker'; then
-    # OrbStack and Docker Desktop k8s use Docker as the CRI. Docker
-    # doesn't dispatch RuntimeClass to extra runtimes — it needs
-    # /etc/docker/daemon.json edits that OrbStack doesn't expose.
-    # We confirmed empirically: the in-cluster installer Job lays
-    # down runsc but pod admission fails with "RuntimeHandler
-    # 'runsc' not supported".
-    warn "  Docker-based runtime detected — gVisor is unreachable on this cluster."
-    warn "  Skipping. Defense-in-depth still applies (Restricted PSS,"
-    warn "  NetworkPolicy, AuthorizationPolicy, Tetragon, Falco)."
-    warn "  In prod set ENABLE_GVISOR=1 on a containerd cluster (kubeadm/GKE/EKS)."
+    log "  gVisor skipped (set INSTALL_GVISOR=1 to install)"
   else
-    # Containerd cluster: try host-side script first (works on
-    # Rancher Desktop / Lima). Fall back to in-cluster Job for
-    # any provider the script can't detect.
+    # kind nodes use containerd; install-gvisor.sh iterates them via
+    # docker exec.  Falls back to in-cluster Job if not running on kind.
     if ! bash "$DEPLOY/scripts/install-gvisor.sh" 2>/dev/null; then
       warn "  host-side gvisor install failed — falling back to in-cluster Job"
       if [ -f "$DEPLOY/k8s/runtime/gvisor-installer-job.yaml" ]; then
@@ -1140,12 +1127,12 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
         --wait --timeout=5m
   fi
 
-  # tetragon (always installed). SKIP_TETRAGON=1 bypass for OrbStack dev
-  # — same class of issue as falco: needs `mount --make-rshared /sys`
-  # inside the VM which OrbStack doesn't expose, so the DaemonSet pod
-  # times out. Default behavior unchanged on real prod kernels.
+  # tetragon (always installed by default).  SKIP_TETRAGON=1 bypass
+  # for environments where the kernel doesn't expose the required eBPF
+  # mounts (`mount --make-rshared /sys`).  Default behavior unchanged
+  # on real prod kernels.
   if [ "${SKIP_TETRAGON:-0}" = "1" ]; then
-    log "    tetragon SKIPPED (SKIP_TETRAGON=1) — eBPF mount issue on OrbStack VM"
+    log "    tetragon SKIPPED (SKIP_TETRAGON=1) — eBPF mount unavailable"
   else
     bs_parallel "tetragon" \
       helm upgrade --install tetragon cilium/tetragon \
@@ -1155,17 +1142,16 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
         --wait --timeout=5m
   fi
 
-  # kyverno (always installed). SKIP_KYVERNO=1 bypass for OrbStack dev —
-  # kyverno's chart has multiple lifecycle hooks (kyverno-scale-to-zero
-  # pre-delete, kyverno-clean-reports post-upgrade) that hang on arm64 /
-  # OrbStack because the helper images don't always pull cleanly. The
-  # actual kyverno controllers install fine; only the hooks misbehave.
-  # If kyverno is already deployed and you just want to keep moving, set
-  # SKIP_KYVERNO=1 and the helm upgrade is skipped (existing kyverno
-  # stays running). Default behavior unchanged on real prod kernels.
+  # kyverno (always installed by default).  SKIP_KYVERNO=1 bypass for
+  # environments where kyverno's chart hooks misbehave — chart 3.3.7
+  # has lifecycle hooks (kyverno-scale-to-zero pre-delete,
+  # kyverno-clean-reports post-upgrade) that can hang when the helper
+  # images don't pull cleanly.  The actual kyverno controllers install
+  # fine; only the hooks misbehave.  Setting SKIP_KYVERNO=1 leaves any
+  # existing kyverno pods running.
   if [ "${SKIP_KYVERNO:-0}" = "1" ]; then
     log "    kyverno SKIPPED (SKIP_KYVERNO=1) — chart 3.3.7 lifecycle hooks"
-    log "    hang on arm64 / OrbStack. Existing kyverno pods (if any) stay running."
+    log "    can hang on slow registries.  Existing kyverno pods stay running."
   else
     bs_parallel "kyverno" \
       helm upgrade --install kyverno kyverno/kyverno \

@@ -1,12 +1,20 @@
 # deploy/helm/aispm/templates/api-deployment.yaml
-# Single worker required — see Dockerfile NOTE about WebSocket/BackgroundTask state sharing.
+#
+# 2 replicas + topology spread = no SPOF.  WebSocket sessions are
+# pinned to one pod via the Service's `sessionAffinity: ClientIP` —
+# a pod loss disconnects only the users whose ClientIP hashed to that
+# pod (clients then reconnect, the affinity table updates, and they
+# land on the surviving pod).  BackgroundTasks that mutate per-pod
+# state are still a known SPOF for individual in-flight tasks; track
+# the follow-up "extract WS state to Redis" before promoting the api
+# beyond a soft-real-time best-effort tier.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: api
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  replicas: {{ .Values.api.replicas | default 2 }}
   selector:
     matchLabels: { app: api }
   template:

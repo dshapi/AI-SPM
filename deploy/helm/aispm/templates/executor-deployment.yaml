@@ -5,7 +5,9 @@ metadata:
   name: executor
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Kafka consumer-group
+  # splits partitions across replicas; safe to scale.
+  replicas: {{ .Values.executor.replicas | default 2 }}
   selector:
     matchLabels: { app: executor }
   template:

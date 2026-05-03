@@ -5,9 +5,19 @@ metadata:
   name: agent-orchestrator
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Both replicas consume from
+  # the chat.in topic in the same Kafka consumer-group, so partition
+  # assignment splits sessions across them automatically — no leader
+  # election needed.  Pod-spawn requests are idempotent (the
+  # agent_controller checks for an existing Pod before creating).
+  # If you observe double-spawn races in the future, switch this
+  # service to a leader-elected pattern (Kubernetes lease).
+  replicas: {{ .Values.agentOrchestrator.replicas | default 2 }}
   strategy:
-    type: Recreate
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels: { app: agent-orchestrator }
   template:

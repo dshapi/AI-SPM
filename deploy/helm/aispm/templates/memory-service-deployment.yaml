@@ -5,7 +5,9 @@ metadata:
   name: memory-service
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  State lives in Redis (HA),
+  # so replicas are interchangeable.
+  replicas: {{ .Values.memoryService.replicas | default 2 }}
   selector:
     matchLabels: { app: memory-service }
   template:

@@ -5,7 +5,11 @@ metadata:
   name: agent
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  This is the static `agent`
+  # service Deployment, NOT the per-agent runtime pods spawned by
+  # agent-orchestrator (those are dynamic, one pod per registered agent
+  # CR, and don't go through this template).
+  replicas: {{ .Values.agent.replicas | default 2 }}
   selector:
     matchLabels: { app: agent }
   template:

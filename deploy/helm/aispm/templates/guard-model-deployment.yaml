@@ -5,7 +5,8 @@ metadata:
   name: guard-model
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.guardModel.replicas | default 2 }}
   selector:
     matchLabels: { app: guard-model }
   template:

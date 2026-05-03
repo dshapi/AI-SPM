@@ -5,12 +5,11 @@
 #   flink-checkpoints (ReadWriteMany):
 #     Both JM replicas mount this PVC. The active JM writes checkpoint
 #     metadata; the standby must be able to read it during recovery.
-#     Requires a RWX-capable StorageClass (Longhorn, NFS, CephFS).
-#     Dev caveat: local-path does NOT support RWX. In a single-node dev
-#     cluster (Rancher Desktop / OrbStack), both JM pods land on the
-#     same node so the OS-level RWO constraint is not violated — both
-#     pods can mount the same local-path PVC concurrently on one node.
-#     Multi-node dev or prod MUST use a RWX-capable StorageClass.
+#     Requires a RWX-capable StorageClass (Longhorn, NFS, CephFS) on
+#     multi-node clusters.  On the kind dev cluster this PVC is not
+#     rendered at all because flink.haStorageDir is set to s3:// (MinIO);
+#     state is backed by erasure-coded MinIO instead of a shared PVC.
+#     See values.dev-multinode.yaml + flink-conf-configmap.yaml.
 #
 #   flink-ha (ReadWriteMany):
 #     Holds JobGraph blobs and HA metadata published by the leader.
@@ -39,10 +38,7 @@ file-system PVCs when the chart is actually using filesystem storage.
 #   prod (.Values.flink.sharedAccessMode = ReadWriteMany) — both JM
 #     replicas mount this PVC; active writes, standby reads on recovery.
 #     Requires a RWX-capable StorageClass (longhorn / NFS / CephFS).
-#   dev  (.Values.flink.sharedAccessMode = ReadWriteOnce)  — local-path
-#     does NOT support RWX (the provisioner rejects the binding outright,
-#     not just at mount time). On dev we run a single JM (replicas: 1),
-#     so RWO is correct and the PVC actually binds.
+#   dev/kind — checkpoints live in MinIO via s3:// (no PVC rendered).
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:

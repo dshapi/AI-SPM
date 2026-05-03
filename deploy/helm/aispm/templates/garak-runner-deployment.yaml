@@ -5,7 +5,8 @@ metadata:
   name: garak-runner
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.garakRunner.replicas | default 2 }}
   selector:
     matchLabels: { app: garak-runner }
   template:

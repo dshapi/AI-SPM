@@ -7,7 +7,7 @@ namespace-scoped) so they're shared across `aispm`, `aispm-agents`, and
 them by name.
 
 Naming convention is the cert-manager community-standard:
-    selfsigned-cluster-issuer  →  for dev / local / OrbStack (no ACME)
+    selfsigned-cluster-issuer  →  for dev / local kind (no ACME)
     letsencrypt-staging        →  for prod-staging (low rate-limit, browser
                                   warns; use this until DNS is verified)
     letsencrypt-prod           →  for prod-go-live (real cert; rate-limit

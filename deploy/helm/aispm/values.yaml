@@ -35,9 +35,9 @@ flink:
   image: flink
   tag: "1.18-scala_2.12"
   # Resource requests/limits for JobManager and TaskManager pods.
-  # These defaults are sized for a single-node dev cluster (OrbStack / Rancher
-  # Desktop). For production increase limits to match flink-conf.yaml memory
-  # settings: JM=1600m process size → 2Gi limit; TM=2048m → 3Gi limit.
+  # Sized for the 3-node kind dev cluster.  For production, raise limits
+  # to match flink-conf.yaml memory settings: JM=1600m process size →
+  # 2Gi limit; TM=2048m → 3Gi limit.
   jobmanager:
     # 2 replicas for k8s-native HA: one active leader, one hot standby.
     # Leader election uses Kubernetes ConfigMaps/Leases (flink-rbac.yaml).
@@ -52,6 +52,10 @@ flink:
         cpu: "1"
         memory: "2Gi"
   taskmanager:
+    # 2 TMs is the always-on default since May 2026 — slot capacity must
+    # survive a 1-node loss without falling to zero.  Matches the JM's
+    # HA contract (2 JMs leader-electing).  Do NOT set this below 2.
+    replicas: 2
     resources:
       requests:
         cpu: "500m"
@@ -89,12 +93,14 @@ flink:
 kafka:
   image: confluentinc/cp-kafka
   tag: "7.6.1"
-  replicas: 3                # 3-node KRaft quorum: tolerates 1 broker failure
-  minInsyncReplicas: 2       # consumer of replication factor; dev overrides to 1
+  # 3-broker KRaft quorum is the only supported topology since May 2026:
+  # tolerates 1 broker loss without dropping below ISR=2.  Do NOT downgrade
+  # `replicas` below 3 anywhere — RF=3, ISR=2 is an always-on contract.
+  replicas: 3
+  minInsyncReplicas: 2
   clusterId: q1Enf0NkTvaBgXGsKZoeRA
   storage: 10Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
-  minInsyncReplicas: 2       # producer acks require 2/3 in-sync replicas
   # ── Pod resources ──────────────────────────────────────────────────────
   # Without these the StatefulSet runs as BestEffort QoS — kubelet's first
   # choice when CPU pressure hits.  Under Flink CEP transaction-init storms
@@ -126,23 +132,36 @@ kafka:
     quorumFetch: 10000         # how long a follower tolerates leader silence
 
 redis:
-  image: redis
-  tag: "7-alpine"
-  storage: 1Gi
-  storageClass: local-path   # dev: local-path; prod: longhorn
-  maxmemory: 512mb
+  # Bitnami Redis HA (1 master + 3 replicas + 3 sentinels) is the only
+  # Redis backend since May 2026 — see kind-databases-ha.sh.  The chart
+  # no longer ships a built-in single-pod StatefulSet.
+  #
+  # Values below feed the configmap-platform-env REDIS_SENTINEL_HOSTS /
+  # REDIS_SENTINEL_MASTER keys that every service uses through
+  # platform_shared/redis.py:get_redis_client() to discover the current
+  # master via Sentinel.  Do NOT set replicas below 3 — Sentinel quorum
+  # requires at least 2 sentinels online to elect a new master, and 3
+  # gives 1-node-loss tolerance.
+  replicas: 3
+  sentinelMasterName: "mymaster"
 
 opa:
   image: openpolicyagent/opa
-  tag: "0.70.0-static"   # static build avoids automaxprocs SIGSEGV under Lima/k3s
+  tag: "0.70.0-static"   # static build avoids automaxprocs SIGSEGV under some Linux kernels
 
 spmDb:
-  image: postgres
-  tag: "16-alpine"
-  storage: 20Gi
-  storageClass: local-path   # dev: local-path; prod: longhorn
+  # CNPG (CloudNativePG) is the only Postgres backend.  The chart no
+  # longer ships a built-in StatefulSet — see kind-databases-ha.sh for
+  # the cluster definition.  These values feed:
+  #   - SPM_DB_URL construction in db-seed-job, secrets, and the
+  #     agent-orchestrator / spm-aggregator deployments
+  #   - the ExternalName Service that aliases spm-db → CNPG primary
   database: spm
   user: spm_rw
+  # ExternalName the chart's spm-db Service points at.  Default targets
+  # the CNPG read-write Service (`spm-db-rw`) in the same namespace.
+  # Override per-environment if your CNPG cluster lives elsewhere.
+  externalName: spm-db-rw.aispm.svc.cluster.local
 
 # ── Platform env (non-secret) ────────────────────────────────────────────────
 # Mirrors x-common-env in compose.yml — keep these in sync.
@@ -213,8 +232,8 @@ platformEnv:
   # Left empty here — guard-model hydrates GROQ_BASE_URL from the Ollama
   # integration config in spm-db at startup (int-017.config.base_url).
   # Override in values.prod.yaml or via --set for clusters with a known
-  # in-cluster Ollama endpoint.  DO NOT use host.docker.internal — that is
-  # a Docker Desktop alias that has no meaning in a k8s network.
+  # in-cluster Ollama endpoint.  Don't use host-only aliases like
+  # host.docker.internal — they have no meaning inside a k8s network.
   GROQ_BASE_URL: ""
 
 # ── Agent runtime ────────────────────────────────────────────────────────────
@@ -224,7 +243,7 @@ agentRuntime:
   # "use the cluster's default OCI runtime" — cheap, but agents share
   # the host kernel. Set this to a registered RuntimeClass:
   #   - kata    (RKE2 prod with Kata Containers installed)
-  #   - gvisor  (anywhere — Mac/Lima/Linux; user-space sentry instead
+  #   - gvisor  (kind, GKE, EKS, kubeadm — user-space sentry instead
   #             of microVM, ~95% Linux ABI, real kernel boundary)
   # Override per-environment:
   #   values.dev.yaml  → "gvisor"
@@ -336,7 +355,7 @@ ingress:
   httpsRedirect: true   # 80 → 443 redirect at the Ingress
   # cert-manager ClusterIssuer name used by both ui-ingress (annotation)
   # and the Certificate resource. One of:
-  #   selfsigned-cluster-issuer  — dev / OrbStack; browser will warn
+  #   selfsigned-cluster-issuer  — dev / kind; browser will warn
   #   letsencrypt-staging        — pre-prod; real ACME, untrusted CA
   #   letsencrypt-prod           — production; trusted, strict rate-limit
   # All three are rendered by templates/cert-manager-issuers.yaml. Default
@@ -348,7 +367,9 @@ ingress:
 # ── Runtime Security ─────────────────────────────────────────────────────────
 # Set falco.enabled=true only when Falco is installed (namespace falco must exist).
 # Set tetragon.enabled=true only when Tetragon DaemonSet is healthy.
-# Both blocked on Rancher Desktop / Lima VM — require shared /sys/fs/bpf mount.
+# Both require a kernel that exposes /sys/fs/bpf mounts — kind nodes
+# do, but if you see DaemonSet pods crashlooping with eBPF mount errors
+# in some other dev setup, leave both disabled.
 falco:
   enabled: false   # prod: true (after: helm install falco falcosecurity/falco -n falco)
 
@@ -364,3 +385,33 @@ grafana:
   adminPasswordSecret: grafana-secret
   storage: 2Gi
   storageClass: local-path   # dev: local-path; prod: longhorn
+
+# ── Application-tier replica counts (HA-only) ──────────────────────────
+# Every entry below defaults to 2 in its template (`replicas: {{
+# .Values.<svc>.replicas | default 2 }}`).  Bump higher per-environment
+# under values.prod.yaml etc.; do NOT set below 2 — see HA-only contract
+# in runbook §"HA-only contract: single-instance modes removed".
+#
+# Two services are intentionally absent because their template
+# hardcodes `replicas: 1` with a tracked SPOF follow-up: prometheus
+# (RWO TSDB needs Thanos) and grafana (SQLite needs CNPG-backed DB).
+agent:                { replicas: 2 }
+api:                  { replicas: 2 }
+spmApi:               { replicas: 2 }
+spmMcp:               { replicas: 2 }
+spmAggregator:        { replicas: 2 }
+spmLlmProxy:          { replicas: 2 }
+agentOrchestrator:    { replicas: 2 }
+freezeController:     { replicas: 2 }
+threatHuntingAgent:   { replicas: 2 }
+guardModel:           { replicas: 2 }
+outputGuard:          { replicas: 2 }
+policySimulator:      { replicas: 2 }
+policyDecider:        { replicas: 2 }
+retrievalGateway:     { replicas: 2 }
+processor:            { replicas: 2 }
+executor:             { replicas: 2 }
+garakRunner:          { replicas: 2 }
+memoryService:        { replicas: 2 }
+toolParser:           { replicas: 2 }
+ui:                   { replicas: 2 }

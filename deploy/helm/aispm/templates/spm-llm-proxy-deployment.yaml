@@ -5,7 +5,8 @@ metadata:
   name: spm-llm-proxy
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.
+  replicas: {{ .Values.spmLlmProxy.replicas | default 2 }}
   selector:
     matchLabels: { app: spm-llm-proxy }
   template:

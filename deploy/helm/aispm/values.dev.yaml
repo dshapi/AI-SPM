@@ -1,5 +1,8 @@
 # deploy/helm/aispm/values.dev.yaml
-# Rancher Desktop / local k3s overrides.
+# Dev overrides on top of values.yaml.  Always layered with
+# values.dev-multinode.yaml when running against the 3-node kind cluster
+# (the only supported dev topology since May 2026 — see runbook
+# §"Architecture").
 #
 # Usage: helm upgrade aispm deploy/helm/aispm/ -n aispm \
 #          -f deploy/helm/aispm/values.yaml \
@@ -17,10 +20,8 @@
 
 ingress:
   host: aispm.local
-  # OrbStack ships ingress-nginx (which the bootstrap script installs);
-  # Rancher Desktop shipped traefik. We pick nginx for the dev default
-  # so the same chart renders work on either provider — install
-  # whichever IngressClass you prefer and update this if needed.
+  # ingress-nginx is the only supported dev IngressClass — installed by
+  # bootstrap-cluster.sh against the kind cluster.
   className: nginx
   # Dev runs full HTTPS via cert-manager's selfsigned ClusterIssuer (one
   # of the three rendered by templates/cert-manager-issuers.yaml). The
@@ -63,21 +64,17 @@ prometheus:
 grafana:
   storageClass: local-path
 
-# Kafka: single-broker on dev. The chart's default is 3 brokers (KRaft
-# quorum tolerating 1 failure) but anti-affinity rules make pods 2 and 3
-# Pending forever on a single-node OrbStack cluster, which times out the
-# StatefulSet rollout. Single broker is fine for dev correctness; in
-# prod values.prod.yaml keeps replicas: 3.
-kafka:
-  replicas: 1
-  minInsyncReplicas: 1
+# Kafka: single-broker dev mode was REMOVED in May 2026.  AISPM is HA-only
+# now — every dev cluster runs the 3-node kind topology (kind-cluster.sh
+# init).  The single-node anti-affinity workaround that used to be here
+# is incompatible with the no-SPOF contract.
 
 agentRuntime:
-  # gVisor (runsc). Requires a containerd-based cluster (Rancher
-  # Desktop in containerd mode, Lima, kubeadm, GKE, EKS). Does NOT
-  # work on OrbStack — that uses Docker (cri-dockerd) as its CRI
-  # and runsc registration there requires editing dockerd config
-  # which OrbStack doesn't expose. Set to "" to disable on dev.
+  # gVisor (runsc).  Installed into every kind node by
+  # deploy/scripts/install-gvisor.sh during cluster bring-up; the
+  # `gvisor` RuntimeClass is then applied to user-uploaded agents only
+  # (system agents stay on the host runtime — see runbook §"Custom
+  # agents now run under gVisor").  Override to "" to disable.
   runtimeClassName: ""
 
   # Per-container max — must allow the istio-proxy sidecar's 2 vCPU
@@ -132,14 +129,9 @@ platformEnv:
   GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
   GROQ_MODEL: "llama-guard3"
 
-# Flink: single-JobManager on dev. Production runs replicas=2 with RWX
-# checkpoint/HA storage (longhorn / NFS); dev's local-path provisioner
-# only supports RWO and rejects RWX bindings outright, leaving the
-# flink-checkpoints / flink-ha PVCs in Pending forever and the
-# JobManager pod stuck PreBind. RWO + 1 replica is the dev-correct
-# combination: there's no second JM to read the volume anyway.
-flink:
-  sharedAccessMode: ReadWriteOnce
-  storageClass: local-path
-  jobmanager:
-    replicas: 1
+# Flink: single-JobManager dev mode was REMOVED in May 2026.  HA-only
+# (2 JMs, 2 TMs).  Checkpoint + HA storage now live on MinIO via
+# s3:// URIs (see values.dev-multinode.yaml::flink.checkpointsDir /
+# haStorageDir), eliminating the local-path RWX problem that motivated
+# the old single-JM workaround.  Local-path PVCs are not used by Flink
+# anywhere in HA-only mode.

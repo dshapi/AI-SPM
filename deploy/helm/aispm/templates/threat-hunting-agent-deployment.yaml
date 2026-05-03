@@ -5,7 +5,9 @@ metadata:
   name: threat-hunting-agent
   namespace: {{ .Values.global.namespace }}
 spec:
-  replicas: 1
+  # 2 replicas + topology spread = no SPOF.  Each replica connects to
+  # Kafka via consumer-group, so partition assignment splits work.
+  replicas: {{ .Values.threatHuntingAgent.replicas | default 2 }}
   selector:
     matchLabels: { app: threat-hunting-agent }
   template:
