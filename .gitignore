@@ -79,3 +79,8 @@ keys/*.key
 /aispm.local*.pem
 /*.crt
 /*.key
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key

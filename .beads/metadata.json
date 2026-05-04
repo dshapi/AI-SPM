@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "AISPM",
+  "project_id": "6e1e7417-71ec-471d-aabd-6e7a06fb6f34"
+}
