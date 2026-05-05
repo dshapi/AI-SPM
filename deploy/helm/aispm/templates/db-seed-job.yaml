@@ -1,8 +1,14 @@
 # deploy/helm/aispm/templates/db-seed-job.yaml
 #
-# Idempotent DB seed Job. Runs `python3 /app/seed_db.py` against the spm-db
-# Postgres instance to populate models, posture history, integrations,
+# Idempotent DB seed Job. Runs `python3 /app/seed_all.py db` against the
+# spm-db Postgres instance to populate models, posture history, integrations,
 # cases, alerts, and policies.
+#
+# scripts/seed_all.py is the single canonical seeder for the platform —
+# the spm-api Dockerfile flat-COPYs it into /app/seed_all.py. This is the
+# ONLY Job that seeds the DB; the orchestrator-db gets its demo data from
+# the orchestrator's own startup lifespan via the same scripts/seed_all.py
+# module (`seed_demo_data` callable), not via a separate K8s Job.
 #
 # Why a hook instead of doing it from bootstrap-cluster.sh:
 #   - Removes runtime coupling: the bootstrap script no longer needs to
@@ -36,10 +42,13 @@ metadata:
   # `data-init` tier — so the annotations were just confusing. Removed.
 spec:
   backoffLimit: 3
-  # Hard deadline for the whole Job. seed_db.py is idempotent and should
-  # complete in seconds; if it's still going after 5 minutes something is
-  # wrong with the database connection.
-  activeDeadlineSeconds: 300
+  # Hard deadline for the whole Job. seed_all.py is idempotent and
+  # should complete in seconds. We give it 15min (not the old 5min) so
+  # the pod is still around for the bootstrap's _wait_for_job to grab
+  # logs when the bootstrap-side 300s timeout fires — otherwise the
+  # pod is killed at the same moment we want to inspect it and we get
+  # zero diagnostic data.
+  activeDeadlineSeconds: 900
   template:
     metadata:
       annotations:
@@ -60,21 +69,38 @@ spec:
             - -c
             - |
               set -eu
-              DB_HOST="spm-db.{{ .Values.global.namespace }}.svc.cluster.local"
+              # Probe BOTH the CNPG primary Service directly AND the chart's
+              # ExternalName alias. Whichever resolves first wins. The
+              # direct CNPG name avoids busybox 1.36 nc's flaky CNAME-
+              # follow behaviour (which made the Job hang for 5min until
+              # the activeDeadlineSeconds killed it on dev clusters).
+              DB_PRIMARY="{{ .Values.spmDb.externalName }}"
+              DB_ALIAS="spm-db.{{ .Values.global.namespace }}.svc.cluster.local"
               DB_PORT="5432"
-              MAX_ATTEMPTS=120
+              MAX_ATTEMPTS=60   # 60 × 2s = 2 min; CNPG normally up in <30s
               attempt=0
-              echo "Waiting for spm-db at ${DB_HOST}:${DB_PORT} (max ${MAX_ATTEMPTS} attempts)..."
-              until nc -z "${DB_HOST}" "${DB_PORT}" 2>/dev/null; do
+              echo "Waiting for Postgres at ${DB_PRIMARY}:${DB_PORT} (or fallback ${DB_ALIAS})..."
+              while :; do
+                if nc -z "${DB_PRIMARY}" "${DB_PORT}" 2>/dev/null; then
+                  echo "✓ ${DB_PRIMARY}:${DB_PORT} open."
+                  exit 0
+                fi
+                if nc -z "${DB_ALIAS}" "${DB_PORT}" 2>/dev/null; then
+                  echo "✓ ${DB_ALIAS}:${DB_PORT} open (via ExternalName alias)."
+                  exit 0
+                fi
                 attempt=$(( attempt + 1 ))
                 if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
-                  echo "ERROR: spm-db not reachable after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS}x2s). Giving up."
+                  echo "ERROR: Postgres not reachable after ${MAX_ATTEMPTS} attempts."
+                  echo "  tried ${DB_PRIMARY}:${DB_PORT}"
+                  echo "  tried ${DB_ALIAS}:${DB_PORT}"
+                  echo "  check that CNPG cluster 'spm-db' is healthy:"
+                  echo "    kubectl -n {{ .Values.global.namespace }} get cluster.postgresql.cnpg.io"
                   exit 1
                 fi
-                echo "  attempt ${attempt}/${MAX_ATTEMPTS}: spm-db not ready — sleeping 2s..."
+                echo "  attempt ${attempt}/${MAX_ATTEMPTS}: Postgres not ready — sleeping 2s..."
                 sleep 2
               done
-              echo "spm-db TCP port open."
           resources:
             requests:
               cpu: "50m"
@@ -85,20 +111,45 @@ spec:
       containers:
         - name: db-seed
           image: {{ include "aispm.image" .Values.images.spmApi }}
-          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command: ["python3", "/app/seed_db.py"]
+          # ALWAYS — not IfNotPresent — because the dev image tag is
+          # `:latest` and we'd silently keep using the old cached layer
+          # on kind nodes after a fresh build+push. Re-pulling on every
+          # Job recreation is cheap (1-2s after first pull) and is the
+          # only way the Job actually picks up freshly-built code.
+          imagePullPolicy: Always
+          # `python3 -u` forces stdin/stdout/stderr to be unbuffered so
+          # we see the actual error in kubectl logs even when the
+          # container is SIGKILL'd (OOMKilled, evicted, etc). Without
+          # this, alembic's traceback was getting lost in stdout's 4KB
+          # block buffer and the pod just looked like it "stopped" after
+          # "Will assume transactional DDL.".
+          command: ["python3", "-u", "/app/seed_all.py", "db"]
           envFrom:
             - configMapRef:
                 name: platform-env
             - secretRef:
                 name: platform-secrets
           env:
+            # Belt-and-suspenders for the unbuffering above (covers libs
+            # that re-init logging streams instead of using sys.stdout).
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            # Hits the CNPG primary directly via spmDb.externalName so we
+            # bypass the chart's spm-db ExternalName CNAME (which has been
+            # flaky for the init container's nc probe and which we'd
+            # rather not depend on for the actual seed connection either).
             - name: SPM_DB_URL
-              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@{{ .Values.spmDb.externalName }}:5432/{{ .Values.spmDb.database }}"
+          # Bumped from 256Mi → 1Gi after seeing the seed pod silently
+          # die right after "Will assume transactional DDL." with no
+          # traceback. Loading the spm package (SQLAlchemy + asyncpg +
+          # all of seed_all's demo data) plus running alembic upgrade
+          # head is comfortably over 256Mi at peak; the small dev pod
+          # was getting OOMKilled mid-migration with no chance to log.
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "200m"
+              memory: "512Mi"
             limits:
-              cpu: "500m"
-              memory: "256Mi"
+              cpu: "2"
+              memory: "2Gi"

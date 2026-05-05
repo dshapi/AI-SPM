@@ -1,0 +1,27 @@
+# deploy/helm/aispm/templates/spm-api-pvc.yaml
+#
+# PVC for spm-api model storage. Mounted at /app/models inside the
+# spm-api container. Used to cache downloaded model files so they
+# survive pod restarts without re-downloading.
+#
+# IMPORTANT: PVC spec is IMMUTABLE on bound claims (k8s rejects any
+# change to storageClassName, requests.storage shrink, accessModes,
+# etc). If you change either of the values below across deploys, the
+# next `kubectl apply` will fail with "spec is immutable" — recover by:
+#   kubectl -n aispm delete pvc spm-api-models
+# (no data loss; the PVC is just model-download cache.)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: spm-api-models
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  # Independent of kafka.storageClass on purpose — historically this
+  # template re-used kafka.storageClass which silently flipped from
+  # `local-path` to `standard` when the multinode overlay was layered
+  # in, causing exactly the immutable-PVC error described above.
+  storageClassName: {{ .Values.spmApi.modelsStorageClass | default "standard" }}
+  resources:
+    requests:
+      storage: {{ .Values.spmApi.modelsStorageSize | default "1Gi" }}

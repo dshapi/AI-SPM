@@ -58,23 +58,35 @@ ingress:
   httpsRedirect: true
   clusterIssuer: selfsigned-cluster-issuer
 
-prometheus:
-  storageClass: local-path
-
-grafana:
-  storageClass: local-path
-
 # Kafka: single-broker dev mode was REMOVED in May 2026.  AISPM is HA-only
 # now — every dev cluster runs the 3-node kind topology (kind-cluster.sh
 # init).  The single-node anti-affinity workaround that used to be here
 # is incompatible with the no-SPOF contract.
 
 agentRuntime:
-  # gVisor (runsc).  Installed into every kind node by
-  # deploy/scripts/install-gvisor.sh during cluster bring-up; the
-  # `gvisor` RuntimeClass is then applied to user-uploaded agents only
-  # (system agents stay on the host runtime — see runbook §"Custom
-  # agents now run under gVisor").  Override to "" to disable.
+  # gVisor (runsc) is set as the default in values.yaml because it's
+  # the right answer for prod (per-pod sandboxing for untrusted
+  # customer agent code). On macOS dev (kind running on Docker
+  # Desktop), gVisor's runsc binary is installed in the kind nodes by
+  # install-gvisor.sh but FAILS at sandbox-init time:
+  #
+  #     FailedCreatePodSandBox: runsc did not terminate successfully
+  #     (unable to retrieve OCI runtime error: open .../log.json:
+  #     no such file or directory)
+  #
+  # Root cause: kind nodes run on Docker Desktop's Linuxkit kernel
+  # (6.x-linuxkit), which doesn't expose the syscalls/cgroups gVisor
+  # needs for its ptrace platform. runsc crashes before it even
+  # writes its first log line. There is no Docker Desktop config that
+  # fixes this — gVisor genuinely requires a real Linux kernel.
+  #
+  # On Linux dev hosts (and in prod), gVisor works — keep this empty
+  # override commented out there so the values.yaml default applies.
+  # On macOS dev: leave runtimeClassName="" so agent pods use the
+  # default containerd runc and actually start. This trades the
+  # per-pod sandboxing isolation for the ability to test the agent
+  # lifecycle locally; mTLS + AuthZ policies + network isolation are
+  # still in place. Documented incident: May 2026.
   runtimeClassName: ""
 
   # Per-container max — must allow the istio-proxy sidecar's 2 vCPU
@@ -89,16 +101,6 @@ agentRuntime:
   # filter, so STRICT would block them. NetworkPolicy + Restricted
   # PSS + gVisor sentry + non-root + caps drop still defend.
   mtlsMode: PERMISSIVE
-
-# Tetragon enabled in dev — TracingPolicies enforce inline kills for
-# forbidden syscalls in agent pods.
-tetragon:
-  enabled: true
-
-# Falco enabled on dev. Bootstrap pins to falco helm chart 4.20.5
-# (falco 0.42.x) to avoid the 0.43.x duplicate-container-plugin bug.
-falco:
-  enabled: true
 
 # Tighten LlamaGuard's allow→block escalation threshold for dev so the
 # Simulator catches low-confidence prompt-injection / tool-abuse probes
@@ -129,9 +131,25 @@ platformEnv:
   GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
   GROQ_MODEL: "llama-guard3"
 
-# Flink: single-JobManager dev mode was REMOVED in May 2026.  HA-only
-# (2 JMs, 2 TMs).  Checkpoint + HA storage now live on MinIO via
-# s3:// URIs (see values.dev-multinode.yaml::flink.checkpointsDir /
-# haStorageDir), eliminating the local-path RWX problem that motivated
-# the old single-JM workaround.  Local-path PVCs are not used by Flink
-# anywhere in HA-only mode.
+# ── Flink: 1 JM + 1 TM in dev ────────────────────────────────────────────────
+# Overrides the chart defaults of replicas=2 in values.yaml. Dev runs on a
+# laptop / 3-node kind cluster where the second JM is just heat — leader
+# election still works with a single JM (it's leader-of-one), and 1 TM gives
+# us enough slot capacity for the CEP PyFlink job + the manual ad-hoc jobs
+# operators submit during testing. Checkpoint + HA storage already moved to
+# MinIO (see values.dev-multinode.yaml::flink.checkpointsDir / haStorageDir),
+# so the old local-path RWX problem that originally forced HA-only doesn't
+# apply.
+#
+# TRADE-OFFS WORTH KNOWING (this is why values.yaml says "Do NOT set below 2"):
+#   - Losing the JM pod stops all running Flink jobs until it restarts (no
+#     hot standby).
+#   - Losing the TM pod drops slot capacity to zero; jobs fail until k8s
+#     reschedules.
+# Both are acceptable in dev; do NOT carry these overrides into a prod
+# values file.
+flink:
+  jobmanager:
+    replicas: 1
+  taskmanager:
+    replicas: 1

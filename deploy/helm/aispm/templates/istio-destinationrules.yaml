@@ -1,0 +1,34 @@
+# deploy/helm/aispm/templates/istio-destinationrules.yaml
+#
+# DestinationRules that modify Istio's default traffic behaviour for
+# specific services in the aispm namespace.
+#
+# Istio is always installed by the bootstrap script.
+{{- if .Values.ingress.enabled }}
+---
+# ── api: disable HTTP/2 upgrade for WebSocket compatibility ──────────────
+# By default Istio upgrades HTTP/1.1 connections to h2 between sidecars.
+# WebSocket requires the HTTP/1.1 Upgrade handshake; h2 multiplexes frames
+# differently and browsers see the connection close before the 101 response
+# ("WebSocket is closed before the connection is established").
+#
+# DO_NOT_UPGRADE tells Envoy to keep the connection as HTTP/1.1 for every
+# request to the api service — including /ws/sessions/* and /ws/sim/*.
+# Documented incident: May 2026 — Simulator and Chat WebSocket tabs showed
+# "reconnecting..." forever; root cause was this h2 upgrade killing the
+# handshake at the sidecar-to-sidecar hop.
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: api-http1
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: aispm
+spec:
+  host: api.{{ .Values.global.namespace }}.svc.cluster.local
+  trafficPolicy:
+    connectionPool:
+      http:
+        h2UpgradePolicy: DO_NOT_UPGRADE
+{{- end }}

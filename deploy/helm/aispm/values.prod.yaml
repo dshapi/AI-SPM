@@ -16,8 +16,6 @@
 #     STRICT mTLS while the agent ns runs Ambient)
 #   - Kata Containers installed on every worker node + RuntimeClass
 #     `kata` registered (deploy/k8s/runtime/kata-runtimeclass.yaml)
-#   - Falco + Tetragon (deploy/scripts/install-prod-addons.sh)
-#   - Kyverno + the policy bundle in deploy/k8s/kyverno/
 
 # ── Image registry ──────────────────────────────────────────────────────────
 # Push images to the registry (deploy/scripts/push-images.sh — to be added)
@@ -48,13 +46,6 @@ flink:
 redis:
   storageClass: longhorn
   storage: 5Gi
-
-prometheus:
-  storageClass: longhorn
-  storage: 50Gi
-
-grafana:
-  storageClass: longhorn
 
 # ── Ingress ─────────────────────────────────────────────────────────────────
 ingress:
@@ -126,22 +117,6 @@ agentRuntime:
   # without breaking ambient peers.
   mtlsMode: STRICT
 
-# ── Observability + runtime security ────────────────────────────────────────
-falco:
-  enabled: true             # behavioural alerts → Kafka via falcosidekick
-
-tetragon:
-  enabled: true             # eBPF inline syscall enforcement
-
-# ── Image signing — Cosign verifyImages enforced ────────────────────────────
-# Build pipeline must sign agent runtime images with the matching private
-# key (see deploy/cosign/aispm-images.key, kept out of git):
-#   cosign sign --key deploy/cosign/aispm-images.key "$IMAGE:$TAG"
-kyverno:
-  verifyImages:
-    enabled: true
-    mode: Enforce
-
 # ── Secrets — DO NOT COMMIT real values ─────────────────────────────────────
 # Production should source these from an external secret manager
 # (Vault, AWS Secrets Manager, GCP Secret Manager) via External Secrets
@@ -155,4 +130,3 @@ secrets:
   tavilyApiKey: ""
   garakInternalSecret: ""
   spmInternalBootstrapSecret: ""
-  grafanaAdminPassword: ""    # MUST be set at deploy

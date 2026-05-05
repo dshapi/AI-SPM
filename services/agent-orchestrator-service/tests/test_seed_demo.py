@@ -1,6 +1,6 @@
 """
-Tests for services/agent-orchestrator-service/seed_demo.py
-===========================================================
+Tests for the orchestrator-db seeder in scripts/seed_all.py
+============================================================
 
 seed_demo_data() is an async function that accepts an async_sessionmaker.
 The orchestrator ORM models use SQLite-compatible types (String, Float, …)
@@ -14,9 +14,12 @@ Two important quirks in seed_demo_data() that the tests must handle:
     dict in-place on the first call.
 
 The ``restore_demo_data`` autouse fixture deep-copies all three module-level
-lists (DEMO_SESSIONS, DEMO_CASES, DEMO_FINDINGS) onto seed_demo's namespace
+lists (DEMO_SESSIONS, DEMO_CASES, DEMO_FINDINGS) onto seed_all's namespace
 before each test via monkeypatch, so mutations in one test never leak into
 the next.
+
+(File name preserved as test_seed_demo.py for git history continuity even
+though seed_demo.py is gone — these are still the "demo data seeder" tests.)
 """
 from __future__ import annotations
 
@@ -29,11 +32,15 @@ import pytest_asyncio
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-# ── sys.path: make the service root and repo root importable ─────────────────
+# ── sys.path: make service root, repo root, AND scripts/ importable ──────────
+# scripts/seed_all.py is the canonical seed module; the orchestrator's
+# Dockerfile COPYs it alongside the service source, but in tests we add
+# the repo's scripts/ dir to sys.path explicitly.
 _SVC_ROOT  = Path(__file__).parents[1]   # services/agent-orchestrator-service/
 _REPO_ROOT = _SVC_ROOT.parents[1]        # repo root
+_SCRIPTS   = _REPO_ROOT / "scripts"
 
-for _p in (str(_SVC_ROOT), str(_REPO_ROOT)):
+for _p in (str(_SVC_ROOT), str(_REPO_ROOT), str(_SCRIPTS)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -46,8 +53,8 @@ from db.models import (  # noqa: E402, F401 — registers all tables with Base.m
     ThreatFindingORM,
 )
 
-import seed_demo  # noqa: E402
-from seed_demo import (  # noqa: E402
+import seed_all  # noqa: E402
+from seed_all import (  # noqa: E402
     DEMO_CASES,
     DEMO_FINDINGS,
     DEMO_SESSIONS,
@@ -83,9 +90,9 @@ def restore_demo_data(monkeypatch):
     deep copy BEFORE each test, then monkeypatch restores the originals after
     each test.  Tests are therefore fully isolated from one another.
     """
-    monkeypatch.setattr(seed_demo, "DEMO_SESSIONS", copy.deepcopy(seed_demo.DEMO_SESSIONS))
-    monkeypatch.setattr(seed_demo, "DEMO_FINDINGS", copy.deepcopy(seed_demo.DEMO_FINDINGS))
-    monkeypatch.setattr(seed_demo, "DEMO_CASES",    copy.deepcopy(seed_demo.DEMO_CASES))
+    monkeypatch.setattr(seed_all, "DEMO_SESSIONS", copy.deepcopy(seed_all.DEMO_SESSIONS))
+    monkeypatch.setattr(seed_all, "DEMO_FINDINGS", copy.deepcopy(seed_all.DEMO_FINDINGS))
+    monkeypatch.setattr(seed_all, "DEMO_CASES",    copy.deepcopy(seed_all.DEMO_CASES))
 
 
 # ── Helper ────────────────────────────────────────────────────────────────────

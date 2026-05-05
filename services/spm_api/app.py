@@ -279,7 +279,7 @@ async def _seed_demo_models() -> None:
     Non-fatal — a failure here never blocks API startup.
     """
     try:
-        from seed_db import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
+        from seed_all import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
         from spm.db.session import get_session_factory
 
         factory = get_session_factory()
@@ -325,7 +325,7 @@ async def _seed_system_agents_on_startup() -> None:
     functional via the other two.
     """
     try:
-        from seed_db import seed_system_agents  # type: ignore
+        from seed_all import seed_system_agents  # type: ignore
         from spm.db.session import get_session_factory
 
         factory = get_session_factory()
@@ -343,11 +343,12 @@ async def _seed_system_agents_on_startup() -> None:
 async def lifespan(app: FastAPI):
     # Create tables + backfill any constraints/indexes the SQLAlchemy
     # model added since the database was first bootstrapped. Routes
-    # through seed_db.ensure_schema so both the lifespan path and the
-    # data-init Job (db-seed) use the same backfill logic — see
-    # ensure_schema's docstring for the older-create_all rationale
-    # (e.g., posture_snapshots.uq_snapshot constraint, May 2026).
-    from seed_db import ensure_schema  # type: ignore
+    # through seed_all.ensure_schema so both the lifespan path and the
+    # data-init Job (db-seed, which runs `python3 /app/seed_all.py db`)
+    # use the same backfill logic — see ensure_schema's docstring for
+    # the older-create_all rationale (e.g., posture_snapshots.uq_snapshot
+    # constraint, May 2026).
+    from seed_all import ensure_schema  # type: ignore
     await ensure_schema()
     # Seed compliance evidence from mapping file
     await seed_compliance_evidence()

@@ -21,6 +21,20 @@
 # Worked around by hand-generating an openssl cert; this Certificate
 # resource is the proper fix so the next rebuild produces a working
 # TLS endpoint without manual intervention.
+#
+# Second incident, May 2026 — WSS handshake failed in Safari with
+# "certificate for this server is invalid". Root cause: this Certificate
+# was rendered UNCONDITIONALLY (no certManager guard), so even when
+# values.dev.yaml sets ingress.certManager=false (dev mode, where the
+# bootstrap script populates aispm-tls from mkcert), cert-manager would
+# notice the Certificate, immediately mint a fresh selfsigned cert, and
+# OVERWRITE the mkcert-issued Secret. The bootstrap deletes the stale
+# Certificate in its mkcert step but the chart re-applies it on the next
+# `helm template | kubectl apply`, restarting the overwrite cycle.
+# Guard added to match templates/cert-manager-certificate.yaml — when
+# certManager=false, this template no-ops and the bootstrap's
+# mkcert-managed Secret survives.
+{{- if and .Values.ingress.enabled .Values.ingress.tls .Values.ingress.certManager }}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -40,3 +54,4 @@ spec:
     name: {{ .Values.ingress.clusterIssuer | default "selfsigned-cluster-issuer" }}
     kind: ClusterIssuer
     group: cert-manager.io
+{{- end }}

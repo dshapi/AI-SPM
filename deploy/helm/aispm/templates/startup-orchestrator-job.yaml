@@ -105,7 +105,10 @@ spec:
       containers:
         - name: startup-orchestrator
           image: {{ include "aispm.image" .Values.images.startupOrch }}
-          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # ALWAYS — see db-seed-job.yaml comment. Same `:latest` tag +
+          # cache problem on kind nodes; force a re-pull on each Job
+          # recreation so dev-loop changes actually land.
+          imagePullPolicy: Always
           envFrom:
             - configMapRef:
                 name: platform-env

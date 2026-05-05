@@ -220,9 +220,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_session_factory = session_factory
     logger.info("Database engine initialised: %s", db_url)
 
-    # Seed demo data on first boot (no-op if DB already has sessions)
+    # Seed demo data on first boot (no-op if DB already has sessions).
+    # The orchestrator container's Dockerfile COPYs scripts/seed_all.py
+    # alongside the service source, so the bare `import seed_all` matches
+    # what runs in production.
     try:
-        from seed_demo import seed_demo_data
+        from seed_all import seed_demo_data
         await seed_demo_data(session_factory)
     except Exception as _seed_err:
         logger.warning("seed_demo: skipped — %s", _seed_err)

@@ -20,7 +20,7 @@ between phases):
                    plane (seed Postgres, create Kafka topics).
                    Wait gate: both Jobs Complete.
 
-    platform     → 22 backend Deployments (api, spm-api, opa, guard-model,
+    platform     → 20 backend Deployments (api, spm-api, opa, guard-model,
                    processor, agent, executor, etc.). Everything that
                    talks to the data plane.
                    Wait gate: all Deployment rollouts Ready.
@@ -110,7 +110,6 @@ _INFRA_KINDS = {
     "PeerAuthentication",
     "AuthorizationPolicy",
     "TracingPolicy",
-    "ClusterPolicy",
     "ResourceQuota",
     "PodDisruptionBudget",
     "PriorityClass",

@@ -477,7 +477,7 @@ def _is_system_agent(agent) -> bool:
     System agents (e.g. ``Threat-Hunting-Agent``) ship as ordinary k8s
     Deployments managed by the Helm chart, NOT as user-uploaded agent
     Pods spawned from a DB-stored ``code_blob``.  Their ``code_path`` is
-    set to ``k8s://<deployment-name>`` by ``services/spm_api/seed_db.py:
+    set to ``k8s://<deployment-name>`` by ``scripts/seed_all.py:
     SYSTEM_AGENTS`` to encode this contract.
 
     The lifecycle endpoints (``deploy_agent`` / ``start_agent`` / ``stop_agent``)
