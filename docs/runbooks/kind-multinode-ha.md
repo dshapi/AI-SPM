@@ -40,17 +40,16 @@ chunks, or in MinIO via Flink's s3-fs-hadoop plugin.
 | `deploy/helm/aispm/values.dev-multinode.yaml`   | Chart overrides for this cluster              |
 | `~/.aispm/snapshots/etcd-*.db`                  | etcd snapshots (cron, every 10 min)           |
 
-## Bring-up (clean cluster)
+## Bring-up (clean cluster / recreate)
 
-Run from `/Users/danyshapiro/PycharmProjects/AISPM`. Each step is idempotent.
+Run from ./AISPM`. Each step is idempotent.
 
 ```bash
 export KUBECONFIG=$HOME/.kube/kind-aispm.yaml
 
-./deploy/scripts/kind-cluster.sh init           # cluster + registry + metrics-server
-./deploy/scripts/kind-storage.sh up             # MinIO + flink bucket
-./deploy/scripts/kind-databases-ha.sh up        # CNPG + Bitnami Redis Sentinel
+./deploy/scripts/bootstrap-cluster.sh
 
+# ony is needed
 # Push AISPM service images to the local registry the kind nodes pull from:
 docker compose build
 docker images --format '{{.Repository}}' | grep '^aispm-' | sort -u | while read img; do
@@ -58,33 +57,13 @@ docker images --format '{{.Repository}}' | grep '^aispm-' | sort -u | while read
   docker push "localhost:5001/${img}:latest"
 done
 
-# Alias for chart templates that hardcode `local-path`:
-cat <<'EOF' | kubectl apply -f -
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: local-path
-provisioner: rancher.io/local-path
-reclaimPolicy: Delete
-volumeBindingMode: WaitForFirstConsumer
-EOF
 
-SKIP_FALCO=1 SKIP_KYVERNO=1 \
-  VALUES_EXTRA=deploy/helm/aispm/values.dev-multinode.yaml \
-  ./deploy/scripts/bootstrap-cluster.sh
 ```
 
 End-to-end on a fresh machine: about 20 minutes. Subsequent runs that
 only re-deploy the AISPM chart take about 5 minutes.
 
-## Tear-down
 
-```bash
-./deploy/scripts/kind-cluster.sh destroy
-```
-
-Removes the kind containers, the registry container, the kubeconfig,
-and `/tmp/kind-vols`. The Docker images you built (`aispm-*`) are kept.
 
 ## Day-to-day operations
 
