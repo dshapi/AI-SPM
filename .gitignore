@@ -79,3 +79,6 @@ keys/*.key
 /aispm.local*.pem
 /*.crt
 /*.key
+
+# bd (issue tracker) local state — Dolt server, lock files, credentials
+.beads/
