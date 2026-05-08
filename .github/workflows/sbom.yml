@@ -106,8 +106,12 @@ jobs:
           file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.ref.outputs.image_ref }}
-          cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+          # cache scope bumped to v2 after switching to repo-root build context;
+          # old v1 cache entries reference paths from the per-service context
+          # and cause "failed to compute cache key" errors. Bump again on any
+          # future context-shape change.
+          cache-from: type=gha,scope=${{ matrix.image }}-v2
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}-v2
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -135,14 +139,26 @@ jobs:
             "${{ steps.ref.outputs.image_ref }}@${{ steps.build.outputs.digest }}"
 
       # ── Grype: vulnerability report from the SBOM ─────────────────────────
+      # We install grype directly rather than using anchore/scan-action because
+      # the action's --output-file parameter is unreliable for JSON output;
+      # running the binary writes to a path we control deterministically.
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin
+
       - name: Vulnerability scan (Grype)
-        uses: anchore/scan-action@v3
         id: grype
-        with:
-          sbom: sbom-${{ matrix.image }}.spdx.json
-          fail-build: false           # don't block pipeline on CVEs (yet)
-          output-format: json
-          output-file: vuln-${{ matrix.image }}.json
+        run: |
+          grype "sbom:sbom-${{ matrix.image }}.spdx.json" \
+            -o json \
+            --file "vuln-${{ matrix.image }}.json"
+          # Show a quick severity summary in the log
+          jq '.matches | group_by(.vulnerability.severity)
+              | map({severity: .[0].vulnerability.severity, count: length})' \
+            "vuln-${{ matrix.image }}.json"
+          # Defensive: confirm the file actually exists for the next step
+          ls -la "vuln-${{ matrix.image }}.json"
 
       - name: Attest vuln report to image
         run: |
