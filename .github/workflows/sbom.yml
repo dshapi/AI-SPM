@@ -81,12 +81,18 @@ jobs:
         uses: actions/checkout@v4
 
       # GHCR repository paths must be lowercase. Normalise once and reuse.
+      # We emit two outputs:
+      #   image_ref   → ghcr.io/owner/image:<sha>   used by docker/cosign
+      #   image_repo  → ghcr.io/owner/image         used by actions/attest-*
+      #                 (those actions reject any tag/digest in subject-name)
       - name: Compute image ref
         id: ref
         run: |
           OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
-          REF="${REGISTRY}/${OWNER_LC}/${{ matrix.image }}:${{ github.sha }}"
-          echo "image_ref=${REF}" >> "$GITHUB_OUTPUT"
+          REPO="${REGISTRY}/${OWNER_LC}/${{ matrix.image }}"
+          REF="${REPO}:${{ github.sha }}"
+          echo "image_repo=${REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_ref=${REF}"   >> "$GITHUB_OUTPUT"
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -171,7 +177,9 @@ jobs:
       - name: GitHub build provenance attestation
         uses: actions/attest-build-provenance@v2
         with:
-          subject-name: ${{ steps.ref.outputs.image_ref }}
+          # subject-name must be the bare repo (no tag/digest) — the action
+          # rejects "ghcr.io/owner/image:tag" with "Invalid image name".
+          subject-name: ${{ steps.ref.outputs.image_repo }}
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
 
