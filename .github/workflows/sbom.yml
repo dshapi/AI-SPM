@@ -47,30 +47,35 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Image names mirror deploy/helm/aispm/values.yaml `images.*.repository`
-          - { image: aispm-api,               context: services/api,                          dockerfile: services/api/Dockerfile }
-          - { image: aispm-guard-model,       context: services/guard_model,                  dockerfile: services/guard_model/Dockerfile }
-          - { image: aispm-garak-runner,      context: services/garak,                        dockerfile: services/garak/Dockerfile }
-          - { image: aispm-retrieval-gw,      context: services/retrieval_gateway,            dockerfile: services/retrieval_gateway/Dockerfile }
-          - { image: aispm-processor,         context: services/processor,                    dockerfile: services/processor/Dockerfile }
-          - { image: aispm-policy-decider,    context: services/policy_decider,               dockerfile: services/policy_decider/Dockerfile }
-          - { image: aispm-agent,             context: services/agent,                        dockerfile: services/agent/Dockerfile }
-          - { image: aispm-memory,            context: services/memory_service,               dockerfile: services/memory_service/Dockerfile }
-          - { image: aispm-executor,          context: services/executor,                     dockerfile: services/executor/Dockerfile }
-          - { image: aispm-tool-parser,       context: services/tool_parser,                  dockerfile: services/tool_parser/Dockerfile }
-          - { image: aispm-output-guard,      context: services/output_guard,                 dockerfile: services/output_guard/Dockerfile }
-          - { image: aispm-freeze-ctrl,       context: services/freeze_controller,            dockerfile: services/freeze_controller/Dockerfile }
-          - { image: aispm-policy-sim,        context: services/policy_simulator,             dockerfile: services/policy_simulator/Dockerfile }
-          - { image: aispm-spm-api,           context: services/spm_api,                      dockerfile: services/spm_api/Dockerfile }
-          - { image: aispm-spm-mcp,           context: services/spm_mcp,                      dockerfile: services/spm_mcp/Dockerfile }
-          - { image: aispm-spm-llm-proxy,     context: services/spm_llm_proxy,                dockerfile: services/spm_llm_proxy/Dockerfile }
-          - { image: aispm-spm-aggregator,    context: services/spm_aggregator,               dockerfile: services/spm_aggregator/Dockerfile }
-          - { image: aispm-agent-orchestrator, context: services/agent-orchestrator-service,  dockerfile: services/agent-orchestrator-service/Dockerfile }
-          - { image: aispm-threat-hunter,     context: services/threat-hunting-agent,         dockerfile: services/threat-hunting-agent/Dockerfile }
-          - { image: aispm-ui,                context: ui,                                    dockerfile: ui/Dockerfile }
-          - { image: aispm-startup-orch,      context: services/startup_orchestrator,         dockerfile: services/startup_orchestrator/Dockerfile }
-          - { image: aispm-flink-pyjob,       context: services/flink_pyjob,                  dockerfile: services/flink_pyjob/Dockerfile }
-          - { image: aispm-agent-runtime,     context: agent_runtime,                         dockerfile: agent_runtime/Dockerfile }
+          # Image names mirror deploy/helm/aispm/values.yaml `images.*.repository`.
+          # Build context is repo root (.) for every service whose Dockerfile uses
+          # repo-rooted COPY paths like `COPY services/api/...`. See the comment
+          # in deploy/scripts/build-images.sh — same invariant applies here.
+          # Only `ui` uses a local context because its Dockerfile uses paths
+          # relative to ui/ (`COPY package.json ./`).
+          - { image: aispm-api,                context: .,  dockerfile: services/api/Dockerfile }
+          - { image: aispm-guard-model,        context: .,  dockerfile: services/guard_model/Dockerfile }
+          - { image: aispm-garak-runner,       context: .,  dockerfile: services/garak/Dockerfile }
+          - { image: aispm-retrieval-gw,       context: .,  dockerfile: services/retrieval_gateway/Dockerfile }
+          - { image: aispm-processor,          context: .,  dockerfile: services/processor/Dockerfile }
+          - { image: aispm-policy-decider,     context: .,  dockerfile: services/policy_decider/Dockerfile }
+          - { image: aispm-agent,              context: .,  dockerfile: services/agent/Dockerfile }
+          - { image: aispm-memory,             context: .,  dockerfile: services/memory_service/Dockerfile }
+          - { image: aispm-executor,           context: .,  dockerfile: services/executor/Dockerfile }
+          - { image: aispm-tool-parser,        context: .,  dockerfile: services/tool_parser/Dockerfile }
+          - { image: aispm-output-guard,       context: .,  dockerfile: services/output_guard/Dockerfile }
+          - { image: aispm-freeze-ctrl,        context: .,  dockerfile: services/freeze_controller/Dockerfile }
+          - { image: aispm-policy-sim,         context: .,  dockerfile: services/policy_simulator/Dockerfile }
+          - { image: aispm-spm-api,            context: .,  dockerfile: services/spm_api/Dockerfile }
+          - { image: aispm-spm-mcp,            context: .,  dockerfile: services/spm_mcp/Dockerfile }
+          - { image: aispm-spm-llm-proxy,      context: .,  dockerfile: services/spm_llm_proxy/Dockerfile }
+          - { image: aispm-spm-aggregator,     context: .,  dockerfile: services/spm_aggregator/Dockerfile }
+          - { image: aispm-agent-orchestrator, context: .,  dockerfile: services/agent-orchestrator-service/Dockerfile }
+          - { image: aispm-threat-hunter,      context: .,  dockerfile: services/threat-hunting-agent/Dockerfile }
+          - { image: aispm-ui,                 context: ui, dockerfile: ui/Dockerfile }
+          - { image: aispm-startup-orch,       context: .,  dockerfile: services/startup_orchestrator/Dockerfile }
+          - { image: aispm-flink-pyjob,        context: .,  dockerfile: services/flink_pyjob/Dockerfile }
+          - { image: aispm-agent-runtime,      context: .,  dockerfile: agent_runtime/Dockerfile }
     steps:
       - name: Checkout
         uses: actions/checkout@v4
