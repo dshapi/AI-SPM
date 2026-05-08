@@ -82,3 +82,8 @@ keys/*.key
 
 # bd (issue tracker) local state — Dolt server, lock files, credentials
 .beads/
+/deploy/audit-reports/
+deploy/cosign/cosign.key
+deploy/sbom/
+deploy/audit-reports/
+/deploy/cosign/cosign.pub

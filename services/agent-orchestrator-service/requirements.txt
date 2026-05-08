@@ -1,34 +1,39 @@
 # ─── Web framework ───────────────────────────────────────────────────────────
-fastapi==0.115.6
-uvicorn[standard]==0.32.1        # ASGI server with websockets + uvloop
-
+fastapi>=0.121.0
+uvicorn[standard]==0.32.1
+# ASGI server with websockets + uvloop
 # ─── Data validation ─────────────────────────────────────────────────────────
-pydantic==2.9.2
-pydantic-settings==2.6.1        # Settings management from env / .env
-
+pydantic>=2.11.0
+pydantic-settings==2.6.1
+# Settings management from env / .env
 # ─── Database ────────────────────────────────────────────────────────────────
-sqlalchemy[asyncio]==2.0.36     # Async ORM — replaces raw aiosqlite calls
-aiosqlite>=0.20.0               # Async SQLite driver for SQLAlchemy
-alembic>=1.13.3                 # Schema migration tool
-psycopg2-binary>=2.9.9          # Sync PostgreSQL driver for policies store
-
+sqlalchemy[asyncio]==2.0.36
+# Async ORM — replaces raw aiosqlite calls
+aiosqlite>=0.20.0
+# Async SQLite driver for SQLAlchemy
+alembic>=1.13.3
+# Schema migration tool
+psycopg2-binary>=2.9.9
+# Sync PostgreSQL driver for policies store
 # ─── Kafka ───────────────────────────────────────────────────────────────────
-aiokafka==0.11.0                # Async Kafka producer/consumer
-
+aiokafka==0.11.0
+# Async Kafka producer/consumer
 # ─── HTTP client (for real PolicyClient / JWKS fetch in prod) ────────────────
 httpx==0.27.2
-
 # ─── Auth (production JWT verification) ──────────────────────────────────────
-python-jose[cryptography]==3.3.0
-
+python-jose[cryptography]>=3.5.0
 # ─── Observability ───────────────────────────────────────────────────────────
 # structlog==24.4.0             # Uncomment for structured JSON logs
 # opentelemetry-sdk             # Uncomment for OTLP tracing
-
 # ─── Dev / local ─────────────────────────────────────────────────────────────
-python-dotenv==1.0.1            # Load .env in local dev
-
+python-dotenv==1.2.2
+# Load .env in local dev
 # ─── Testing ─────────────────────────────────────────────────────────────────
 pytest>=8.3.4
-pytest-asyncio>=0.24.0          # Async test support
-anyio[trio]>=4.6.2              # pytest-asyncio backend
+pytest-asyncio>=0.24.0
+# Async test support
+anyio[trio]>=4.6.2
+# pytest-asyncio backend
+
+# pyasn1>=0.6.3 — CVE-2026-30922 DoS via ASN.1 recursion (transitive via python-jose)
+pyasn1>=0.6.3
