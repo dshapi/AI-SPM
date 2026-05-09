@@ -133,3 +133,5 @@ keys/*.key
 /deploy/sbom/vuln-aispm-threat-hunter.json
 /deploy/sbom/vuln-aispm-tool-parser.json
 /deploy/sbom/vuln-aispm-ui.json
+/.beads/
+/.claude/
