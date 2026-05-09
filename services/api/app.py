@@ -1993,36 +1993,3 @@ async def simulation_screen(
         correlation_id = result.correlation_id,
         signals        = result.signals,
     )
-
-
-@app.get("/dev-token")
-async def dev_token():
-    """Generate a 24-hour demo JWT for the UI. Uses the platform RS256 private key."""
-    try:
-        import jwt as pyjwt
-        key_path = os.getenv("JWT_PRIVATE_KEY_PATH", "/keys/private.pem")
-        issuer   = os.getenv("JWT_ISSUER", "cpm-platform")
-        with open(key_path) as f:
-            private_key = f.read()
-        now = int(time.time())
-        payload = {
-            "sub": "dany.shapiro",
-            "iss": issuer,
-            "iat": now,
-            "exp": now + 86400,
-            "tenant_id": "t1",
-            "email": "dany.shapiro@gmail.com",
-            "name": "Dany Shapiro",
-            "roles": ["admin", "spm:admin", "spm:auditor"],
-            "groups": [],
-            "scopes": [
-                "calendar:read", "calendar:write",
-                "gmail:read", "gmail:send",
-                "memory:read", "memory:write",
-                "file:read", "db:read",
-            ],
-        }
-        token = pyjwt.encode(payload, private_key, algorithm="RS256")
-        return {"token": token, "expires_in": 86400}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")

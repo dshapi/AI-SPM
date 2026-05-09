@@ -1,21 +1,57 @@
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
-let _token = null
-let _tokenExpiry = 0
+const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || 'http://keycloak.local:8180'
+const KC_REALM     = import.meta.env.VITE_KC_REALM     || 'aispm'
+const KC_CLIENT_ID = import.meta.env.VITE_KC_CLIENT_ID || 'aispm-ui'
 
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
-  try {
-    const res = await fetch(`${BASE}/dev-token`)
-    if (!res.ok) throw new Error('Token fetch failed')
-    const data = await res.json()
-    _token = data.token
-    _tokenExpiry = now + (data.expires_in || 86400)
-    return _token
-  } catch {
-    return null
-  }
+let _token        = null
+let _tokenExpiry  = 0
+let _refreshToken = null
+
+export async function login(username, password) {
+  const url = `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/token`
+  const body = new URLSearchParams({
+    grant_type: 'password',
+    client_id: KC_CLIENT_ID,
+    username,
+    password,
+  })
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  })
+  if (!resp.ok) throw new Error('Login failed')
+  const data = await resp.json()
+  _token        = data.access_token
+  _refreshToken = data.refresh_token
+  _tokenExpiry  = Date.now() + (data.expires_in - 30) * 1000
+}
+
+async function _refreshAccessToken() {
+  const url = `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/token`
+  const body = new URLSearchParams({
+    grant_type: 'refresh_token',
+    client_id: KC_CLIENT_ID,
+    refresh_token: _refreshToken,
+  })
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  })
+  if (!resp.ok) { _token = null; _tokenExpiry = 0; _refreshToken = null; return null }
+  const data = await resp.json()
+  _token        = data.access_token
+  _refreshToken = data.refresh_token
+  _tokenExpiry  = Date.now() + (data.expires_in - 30) * 1000
+  return _token
+}
+
+export async function getToken() {
+  if (_token && Date.now() < _tokenExpiry) return _token
+  if (_refreshToken) return _refreshAccessToken()
+  return null
 }
 
 export async function sendMessage(prompt, sessionId) {
@@ -72,7 +108,7 @@ export async function sendMessageStream(prompt, sessionId, { onToken, onBadge, o
 
   const token = await getToken()
   if (!token) {
-    // /dev-token is unreachable — surface a clear error instead of posting
+    // No valid token — surface a clear error instead of posting
     // Bearer null and getting an opaque 401 or hang.
     fireError(new Error('API unreachable — could not obtain auth token. Check that the api service is running.'))
     return
@@ -323,18 +359,10 @@ export async function fetchSessionEvents(sessionId) {
  * endpoint (or /login as a fallback when VITE_KEYCLOAK_URL is not set).
  */
 export function logout() {
-  _token = null
-  _tokenExpiry = 0
-
-  const keycloakBase = import.meta.env.VITE_KEYCLOAK_URL
-  if (keycloakBase) {
-    const KEYCLOAK_LOGOUT =
-      `${keycloakBase}/realms/aispm/protocol/openid-connect/logout` +
-      `?redirect_uri=${encodeURIComponent(window.location.origin)}`
-    window.location.href = KEYCLOAK_LOGOUT
-  } else {
-    window.location.href = '/login'
-  }
+  _token = null; _tokenExpiry = 0; _refreshToken = null
+  const redir = encodeURIComponent(window.location.origin)
+  window.location.href =
+    `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/logout?redirect_uri=${redir}`
 }
 
 // ── Mock responses for offline / no-API mode ─────────────────────────────────
