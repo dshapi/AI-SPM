@@ -146,12 +146,36 @@ _wire_registry_into_nodes() {
   # REQUIRED — without it containerd silently ignores the mirror config
   # and falls back to localhost:5001 which is unreachable from inside the
   # node (we lost an entire afternoon to this in May 2026).
-  for node in $(kind get nodes --name "$CLUSTER_NAME"); do
-    docker exec "$node" mkdir -p "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}"
-    cat <<EOF | docker exec -i "$node" tee "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}/hosts.toml" >/dev/null
-[host."http://${REGISTRY_NAME}:5000"]
-  capabilities = ["pull", "resolve"]
-EOF
+  #
+  # `kind get nodes` can transiently return nothing or exit non-zero
+  # immediately after cluster creation while the node containers are still
+  # starting.  Retry up to 30s before giving up.
+  local nodes=""
+  local node_retries=0
+  local node_max_retries=15   # 15 × 2s = 30s
+  until nodes=$(kind get nodes --name "$CLUSTER_NAME" 2>/dev/null) && [ -n "$nodes" ]; do
+    node_retries=$((node_retries + 1))
+    if [ "$node_retries" -ge "$node_max_retries" ]; then
+      echo "ERROR: 'kind get nodes --name $CLUSTER_NAME' returned nothing after $((node_max_retries * 2))s — aborting." >&2
+      exit 1
+    fi
+    sleep 2
+  done
+
+  for node in $nodes; do
+    _log "  wiring registry mirror into node: $node"
+    local exec_retries=0
+    local exec_max_retries=10   # 10 × 2s = 20s per node
+    until docker exec "$node" mkdir -p "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}" 2>/dev/null; do
+      exec_retries=$((exec_retries + 1))
+      if [ "$exec_retries" -ge "$exec_max_retries" ]; then
+        echo "ERROR: docker exec into $node failed after $((exec_max_retries * 2))s — node may not be running." >&2
+        exit 1
+      fi
+      sleep 2
+    done
+    printf '[host."http://%s:5000"]\n  capabilities = ["pull", "resolve"]\n' "$REGISTRY_NAME" \
+      | docker exec -i "$node" tee "/etc/containerd/certs.d/localhost:${REGISTRY_PORT}/hosts.toml" >/dev/null
   done
 
   # Connect the registry container to the kind network so nodes can
@@ -162,7 +186,11 @@ EOF
   docker network connect "kind" "$REGISTRY_NAME" 2>/dev/null || true
 
   # Advertise the registry to the cluster (used by some tools).
-  cat <<EOF | KUBECONFIG="$KUBECONFIG_PATH" kubectl apply -f -
+  # Retry the kubectl apply — the apiserver may not yet accept requests
+  # immediately after `kind create cluster` returns.
+  local cm_retries=0
+  local cm_max_retries=15   # 15 × 2s = 30s
+  until KUBECONFIG="$KUBECONFIG_PATH" kubectl apply -f - <<EOF 2>/dev/null
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -173,6 +201,16 @@ data:
     host: "localhost:${REGISTRY_PORT}"
     help: "https://kind.sigs.k8s.io/docs/user/local-registry/"
 EOF
+  do
+    cm_retries=$((cm_retries + 1))
+    if [ "$cm_retries" -ge "$cm_max_retries" ]; then
+      echo "ERROR: kubectl apply for local-registry-hosting ConfigMap failed after $((cm_max_retries * 2))s." >&2
+      exit 1
+    fi
+    _warn "  kubectl apply not ready yet (attempt $cm_retries/$cm_max_retries) — retrying in 2s..."
+    sleep 2
+  done
+  _log "  ✓ registry mirror configured on all nodes"
 }
 
 # ── Subcommands ─────────────────────────────────────────────────────────
