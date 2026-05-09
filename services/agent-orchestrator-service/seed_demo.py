@@ -32,6 +32,11 @@ except ModuleNotFoundError:
     if _scripts_dir not in sys.path:
         sys.path.insert(0, _scripts_dir)
 
-# `seed_demo_data` is a back-compat alias for `seed_orchestrator_db`
-# already exported by seed_all.py (see seed_all.py module-tail).
-from seed_all import seed_demo_data, seed_orchestrator_db  # noqa: F401
+# Re-export everything tests and callers import from this shim.
+from seed_all import (  # noqa: F401
+    seed_demo_data,
+    seed_orchestrator_db,
+    DEMO_SESSIONS,
+    DEMO_CASES,
+    DEMO_FINDINGS,
+)

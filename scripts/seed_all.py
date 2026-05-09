@@ -1436,8 +1436,9 @@ async def seed_orchestrator_db(session_factory) -> None:
         else:
             log.info("seed_demo: DB is empty — inserting %d demo sessions", len(DEMO_SESSIONS))
             for s in DEMO_SESSIONS:
-                events = s.pop("events")
-                db.add(AgentSessionORM(**s))
+                events = s["events"]
+                session_data = {k: v for k, v in s.items() if k != "events"}
+                db.add(AgentSessionORM(**session_data))
                 for event_type, ts, payload in events:
                     db.add(SessionEventORM(
                         id=str(uuid.uuid4()),
@@ -1490,10 +1491,11 @@ async def seed_orchestrator_db(session_factory) -> None:
         else:
             log.info("seed_demo: inserting %d missing demo findings", len(missing_findings))
             for f in missing_findings:
-                offset = f.pop("created_at_offset")
+                offset = f["created_at_offset"]
                 ts_iso = _ts(offset).isoformat()
+                finding_data = {k: v for k, v in f.items() if k != "created_at_offset"}
                 db.add(ThreatFindingORM(
-                    **f,
+                    **finding_data,
                     created_at=ts_iso,
                     updated_at=ts_iso,
                 ))
