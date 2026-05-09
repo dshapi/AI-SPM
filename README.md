@@ -214,6 +214,14 @@ Click **Sign In** on either page — a demo JWT is minted automatically, no acco
 | **Multi-Model Support** | Swap between Claude Haiku, Sonnet, Opus via `ANTHROPIC_MODEL` env var. Architecture supports any OpenAI-compatible endpoint. | CPM API |
 | **Model Freeze** | Freeze controller suspends a model from serving traffic in real time via Kafka `freeze_control` topic. | Freeze Controller |
 
+### Agent Posture Drift
+
+| Feature | Description | Component |
+|---|---|---|
+| **Baseline vs Current Comparison** | Compares approved agent posture snapshots with current runtime state to detect model, tool, identity, runtime, RAG, and guardrail drift. | `platform_shared.posture_drift` |
+| **Risk-Based Reapproval** | Classifies drift as low, medium, high, or critical and recommends accept, re-review, rollback, or disable actions. | SPM API / Agent Control Plane |
+| **Evidence Hashing** | Produces stable evidence hashes for audit records and compliance reporting. | Audit / Compliance |
+
 ### Agentic Tools
 
 | Feature | Description | Component |

@@ -43,11 +43,10 @@ def upgrade() -> None:
     Idempotent — ``create_all`` skips tables that already exist, so this
     migration is safe to re-apply against a partially-bootstrapped DB.
     """
-    # Lazy import: spm.db.models pulls in SQLAlchemy + the full model
-    # tree; keeping it inside upgrade() means alembic's `revision`
-    # subcommand (which imports every versions/*.py) doesn't pay the
-    # import cost when scaffolding a new migration.
-    from spm.db.models import Base  # type: ignore
+    # Lazy import: env.py inserts spm/ into sys.path, so the correct
+    # import is `db.models` (not `spm.db.models`, which requires the
+    # project root on sys.path instead of the spm/ dir itself).
+    from db.models import Base  # type: ignore
 
     bind = op.get_bind()
     Base.metadata.create_all(bind=bind)
@@ -60,7 +59,7 @@ def downgrade() -> None:
     we recreate the cluster instead, but the inverse keeps alembic's
     downgrade chain intact.
     """
-    from spm.db.models import Base  # type: ignore
+    from db.models import Base  # type: ignore
 
     bind = op.get_bind()
     Base.metadata.drop_all(bind=bind)
