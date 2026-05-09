@@ -316,6 +316,27 @@ export async function fetchSessionEvents(sessionId) {
   }
 }
 
+// ── Logout ────────────────────────────────────────────────────────────────────
+
+/**
+ * logout() — clears the in-memory token and redirects to Keycloak's logout
+ * endpoint (or /login as a fallback when VITE_KEYCLOAK_URL is not set).
+ */
+export function logout() {
+  _token = null
+  _tokenExpiry = 0
+
+  const keycloakBase = import.meta.env.VITE_KEYCLOAK_URL
+  if (keycloakBase) {
+    const KEYCLOAK_LOGOUT =
+      `${keycloakBase}/realms/aispm/protocol/openid-connect/logout` +
+      `?redirect_uri=${encodeURIComponent(window.location.origin)}`
+    window.location.href = KEYCLOAK_LOGOUT
+  } else {
+    window.location.href = '/login'
+  }
+}
+
 // ── Mock responses for offline / no-API mode ─────────────────────────────────
 const MOCK = [
   "I'm here to help. What would you like to know?",

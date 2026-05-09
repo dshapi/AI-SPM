@@ -1,10 +1,12 @@
+import { useState, useEffect, useRef } from 'react'
 import {
   PanelLeftClose, PanelLeftOpen,
   CalendarDays, ChevronDown,
-  CircleHelp, Settings,
+  CircleHelp, Settings, LogOut,
 } from 'lucide-react'
 import SearchInput          from './components/SearchInput.jsx'
 import NotificationDropdown from './components/NotificationDropdown.jsx'
+import { logout }           from '../../api.js'
 
 /**
  * Topbar — global horizontal navigation bar.
@@ -65,15 +67,57 @@ function IconButton({ icon: Icon, title }) {
   )
 }
 
-// ── Avatar button ─────────────────────────────────────────────────────────
-function AvatarButton() {
+// ── Avatar menu ───────────────────────────────────────────────────────────
+function AvatarMenu() {
+  const [open, setOpen] = useState(false)
+  const ref = useRef(null)
+
+  // Close when clicking outside the menu
+  useEffect(() => {
+    if (!open) return
+    function handleClickOutside(e) {
+      if (ref.current && !ref.current.contains(e.target)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [open])
+
   return (
-    <button
-      className="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 text-[13px] font-bold text-white shrink-0 hover:opacity-90 transition-opacity duration-150"
-      title="Account"
-    >
-      A
-    </button>
+    <div ref={ref} className="relative shrink-0">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 text-[13px] font-bold text-white shrink-0 hover:opacity-90 transition-opacity duration-150"
+        title="Account"
+        aria-haspopup="true"
+        aria-expanded={open}
+      >
+        D
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-12 z-50 w-56 bg-white border border-gray-200 rounded-lg shadow-sm py-1">
+          {/* User info */}
+          <div className="px-4 py-3">
+            <p className="text-[13px] font-semibold text-gray-700 leading-tight">Dany Shapiro</p>
+            <p className="text-[12px] text-gray-400 leading-tight mt-0.5">dany.shapiro@gmail.com</p>
+          </div>
+
+          {/* Divider */}
+          <div className="h-px bg-gray-200 mx-1 my-1" />
+
+          {/* Log out */}
+          <button
+            onClick={() => { setOpen(false); logout() }}
+            className="flex items-center gap-2.5 w-full px-4 py-2 text-[13px] text-gray-600 hover:bg-gray-50 hover:text-gray-900 transition-colors duration-150"
+          >
+            <LogOut size={14} strokeWidth={1.75} className="text-gray-400 shrink-0" />
+            Log out
+          </button>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -124,7 +168,7 @@ export default function Topbar({ collapsed, onToggle }) {
 
         <Sep />
 
-        <AvatarButton />
+        <AvatarMenu />
 
       </div>
 
