@@ -328,6 +328,11 @@ services:
       SPM_DB_URL: postgresql://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
       LLM_MODEL_ID: ${LLM_MODEL_ID:-}
       GARAK_RUNNER_URL: http://garak-runner:8099
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://keycloak.local:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
     volumes: *key-vol
     ports: ["8080:8080"]
     healthcheck:
@@ -586,6 +591,12 @@ services:
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-}
       GARAK_INTERNAL_SECRET: ${GARAK_INTERNAL_SECRET:-}
       SPM_INTERNAL_BOOTSTRAP_SECRET: ${SPM_INTERNAL_BOOTSTRAP_SECRET:-}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://keycloak.local:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
+      INTERNAL_SERVICE_SECRET: internal-secret-changeme
     volumes:
       - ./keys:/keys:ro
       # Persist uploaded model artefacts on the host (listed in .gitignore).
@@ -632,6 +643,7 @@ services:
       SPM_MODEL_BLOCK_THRESHOLD: ${SPM_MODEL_BLOCK_THRESHOLD:-0.85}
       SPM_SNAPSHOT_INTERVAL_SEC: ${SPM_SNAPSHOT_INTERVAL_SEC:-300}
       SPM_ENFORCEMENT_WINDOW: ${SPM_ENFORCEMENT_WINDOW:-3}
+      INTERNAL_SERVICE_SECRET: internal-secret-changeme
     depends_on:
       spm-api:
         condition: service_healthy
@@ -679,6 +691,11 @@ services:
       LOG_LEVEL: INFO
       KAFKA_BOOTSTRAP_SERVERS: kafka-1:9092,kafka-2:9092,kafka-3:9092
       POLICY_DB_URL: postgresql+psycopg2://spm_rw:${SPM_DB_PASSWORD:-spmpass}@spm-db:5432/spm
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KEYCLOAK_JWKS_URL: http://keycloak:8080/realms/aispm/protocol/openid-connect/certs
+      JWT_ISSUER: http://keycloak.local:8180/realms/aispm
+      JWT_AUDIENCE: aispm-ui
     volumes:
       - ./DataVolumes/agent-orchestrator:/data
     healthcheck:
@@ -713,6 +730,11 @@ services:
       # LLM backend. Blank = Groq cloud (requires GROQ_API_KEY). Set in .env to
       # http://host.docker.internal:11434/v1 for host Ollama.
       GROQ_BASE_URL: ${GROQ_BASE_URL:-}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: aispm
+      KC_CLIENT_ID: aispm-ui
+      SERVICE_ACCOUNT_USER: admin@aispm.local
+      SERVICE_ACCOUNT_PASSWORD: admin-changeme
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -752,6 +774,10 @@ services:
     container_name: cpm-ui
     platform: linux/arm64/v8
     ports: ["3001:3001"]
+    environment:
+      VITE_KEYCLOAK_URL: http://keycloak.local:8180
+      VITE_KC_REALM: aispm
+      VITE_KC_CLIENT_ID: aispm-ui
     depends_on:
       - api
       - agent-orchestrator

@@ -3,6 +3,15 @@ global:
   imageRegistry: ""          # e.g. ghcr.io/your-org
   imagePullPolicy: IfNotPresent
   namespace: aispm
+  keycloak:
+    url: "http://keycloak.aispm.svc.cluster.local:8080"
+    realm: "aispm"
+    jwksUrl: "http://keycloak.aispm.svc.cluster.local:8080/realms/aispm/protocol/openid-connect/certs"
+    issuer: "http://keycloak.local:8180/realms/aispm"
+    audience: "aispm-ui"
+    clientSecret: "aispm-client-secret-changeme"
+  corsOrigins: "http://aispm.local"
+  internalServiceSecret: "internal-secret-changeme"
 
 # ── Per-service image tags ───────────────────────────────────────────────────
 images:
