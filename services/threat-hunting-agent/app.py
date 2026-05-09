@@ -138,7 +138,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # -- FindingsService ---------------------------------------------------------
     findings_svc = FindingsService(
         orchestrator_url=settings.orchestrator_url,
-        dev_token_url=f"{settings.platform_api_url}/dev-token",
     )
     app.state.findings_svc = findings_svc
     logger.info("FindingsService configured: orchestrator=%s", settings.orchestrator_url)
@@ -155,7 +154,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # are created directly via the AISPM admin UI (not via Kafka).
     poller = SessionPoller(
         orchestrator_url=settings.orchestrator_url,
-        dev_token_url=f"{settings.platform_api_url}/dev-token",
         hunt_agent=_hunt,
         persist_fn=_persist,
         poll_interval_sec=settings.hunt_batch_window_sec,

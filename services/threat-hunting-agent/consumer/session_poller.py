@@ -21,11 +21,20 @@ Design:
 from __future__ import annotations
 
 import logging
+import os
 import threading
+import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
 import httpx
+
+# ── Keycloak service-account credentials ────────────────────────────────────
+_KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
+_KC_REALM     = os.environ.get("KEYCLOAK_REALM", "aispm")
+_KC_CLIENT_ID = os.environ.get("KC_CLIENT_ID", "aispm-ui")
+_SERVICE_USER = os.environ.get("SERVICE_ACCOUNT_USER", "admin@aispm.local")
+_SERVICE_PASS = os.environ.get("SERVICE_ACCOUNT_PASSWORD", "admin-changeme")
 
 from config import TENANT_ID
 
@@ -45,7 +54,7 @@ class SessionPoller:
 
     Args:
         orchestrator_url:  Base URL of agent-orchestrator-service, e.g. http://agent-orchestrator:8094
-        dev_token_url:     URL that returns {"token": "...", "expires_in": ...}
+        (token obtained via Keycloak ROPC using SERVICE_ACCOUNT_USER/PASSWORD env vars)
         hunt_agent:        Callable(tenant_id, events) → dict
         persist_fn:        Callable(tenant_id, finding_dict) → None
         poll_interval_sec: Seconds between polls (default 30).
@@ -55,7 +64,6 @@ class SessionPoller:
     def __init__(
         self,
         orchestrator_url: str,
-        dev_token_url: str,
         hunt_agent: Callable[[str, List[Dict[str, Any]]], dict],
         persist_fn: Optional[Callable[[str, dict], None]] = None,
         poll_interval_sec: int = 30,
@@ -63,7 +71,6 @@ class SessionPoller:
         http_timeout: float = 10.0,
     ) -> None:
         self._orchestrator_url = orchestrator_url.rstrip("/")
-        self._dev_token_url = dev_token_url
         self._hunt_agent = hunt_agent
         self._persist_fn = persist_fn
         self._poll_interval_sec = poll_interval_sec
@@ -110,16 +117,21 @@ class SessionPoller:
     # ── Token ────────────────────────────────────────────────────────────
 
     def _get_token(self) -> Optional[str]:
-        import time
         now = time.time()
         if self._token and self._token_expiry > now + 60:
             return self._token
         try:
-            resp = self._client.get(self._dev_token_url)
+            url = f"{_KEYCLOAK_URL}/realms/{_KC_REALM}/protocol/openid-connect/token"
+            resp = self._client.post(url, data={
+                "grant_type": "password",
+                "client_id":  _KC_CLIENT_ID,
+                "username":   _SERVICE_USER,
+                "password":   _SERVICE_PASS,
+            })
             resp.raise_for_status()
             data = resp.json()
-            self._token = data.get("token") or data.get("access_token")
-            self._token_expiry = now + int(data.get("expires_in", 86400))
+            self._token = data["access_token"]
+            self._token_expiry = now + data.get("expires_in", 300)
             return self._token
         except Exception as exc:
             logger.warning("SessionPoller: token fetch failed: %s", exc)

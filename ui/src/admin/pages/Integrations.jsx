@@ -1961,7 +1961,7 @@ export default function Integrations() {
       {/* Recent activity */}
       <RecentActivityTable events={MOCK_ACTIVITY} />
 
-      {/* Configure modal — admin-only on the server; dev token has the role. */}
+      {/* Configure modal — admin-only on the server. */}
       <IntegrationConfigureModal
         integration={selectedInt}
         open={configureOpen}

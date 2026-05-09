@@ -12,9 +12,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+# ── Keycloak service-account credentials ────────────────────────────────────
+_KEYCLOAK_URL = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
+_KC_REALM     = os.environ.get("KEYCLOAK_REALM", "aispm")
+_KC_CLIENT_ID = os.environ.get("KC_CLIENT_ID", "aispm-ui")
+_SERVICE_USER = os.environ.get("SERVICE_ACCOUNT_USER", "admin@aispm.local")
+_SERVICE_PASS = os.environ.get("SERVICE_ACCOUNT_PASSWORD", "admin-changeme")
 
 logger = logging.getLogger(__name__)
 
@@ -25,21 +34,30 @@ class FindingsService:
     def __init__(
         self,
         orchestrator_url: str = "http://agent-orchestrator:8094",
-        dev_token_url: str = "http://api:8080/dev-token",
         timeout: float = 10.0,
     ) -> None:
         self._orchestrator_url = orchestrator_url.rstrip("/")
-        self._dev_token_url = dev_token_url
         self._client = httpx.Client(timeout=timeout, trust_env=False)
+        self._token: str = ""
+        self._token_expiry: float = 0.0
 
     def _fetch_token(self) -> str:
-        resp = self._client.get(self._dev_token_url)
+        """Fetch a Keycloak access token via Resource Owner Password flow, with caching."""
+        now = time.time()
+        if self._token and self._token_expiry > now + 30:
+            return self._token
+        url = f"{_KEYCLOAK_URL}/realms/{_KC_REALM}/protocol/openid-connect/token"
+        resp = self._client.post(url, data={
+            "grant_type": "password",
+            "client_id":  _KC_CLIENT_ID,
+            "username":   _SERVICE_USER,
+            "password":   _SERVICE_PASS,
+        })
         resp.raise_for_status()
         data = resp.json()
-        token = data.get("token") or data.get("access_token")
-        if not token:
-            raise ValueError(f"dev-token endpoint returned: {list(data.keys())}")
-        return token
+        self._token = data["access_token"]
+        self._token_expiry = now + data.get("expires_in", 300)
+        return self._token
 
     def persist_finding(self, finding_dict: Dict[str, Any], tenant_id: str) -> dict:
         """

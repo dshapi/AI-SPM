@@ -17,6 +17,7 @@
 // stream tokens. Either path works without UI changes.
 
 import { useCallback, useRef, useState } from "react"
+import { getToken } from "../../../api.js"
 
 
 function _newSessionId() {
@@ -33,16 +34,6 @@ function _newSessionId() {
  * Each ChatTurn is one displayable bubble:
  *   { id, role: "user" | "agent", text, ts: ISOString, streaming?: boolean }
  */
-
-async function _getDevToken() {
-  try {
-    const r = await fetch("/api/dev-token")
-    if (!r.ok) return null
-    const d = await r.json()
-    return d.token || null
-  } catch { return null }
-}
-
 
 /**
  * @param {string} agentId
@@ -92,7 +83,8 @@ export function useAgentChat(agentId) {
     abortRef.current = controller
 
     try {
-      const token = await _getDevToken()
+      const token = await getToken()
+      if (!token) throw new Error('Not authenticated')
       const res = await fetch(`/api/spm/agents/${encodeURIComponent(agentId)}/chat`, {
         method: "POST",
         headers: {

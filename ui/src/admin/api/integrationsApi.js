@@ -7,10 +7,7 @@
  * Routing:
  *   /api/spm/integrations/*     →  spm-api  (port 8092, rewrite strips /api/spm)
  *
- * Auth: dev-token Bearer JWT minted by vite.config.js's devTokenPlugin.
- *       The dev token already carries `spm:admin` + `spm:auditor` roles, so
- *       every endpoint (including the admin-only Configure / Bootstrap
- *       mutations) will pass the role check in dev.
+ * Auth: Keycloak Bearer JWT obtained via getToken() from ui/src/api.js.
  *
  * Contract parity: the shapes returned here are the IntegrationSummary /
  * IntegrationDetail Pydantic models — camelCase aliases (`authMethod`,
@@ -18,38 +15,17 @@
  * existing Integrations.jsx mock shape is drop-in compatible.
  */
 
-const SPM_BASE      = '/api/spm'
-const DEV_TOKEN_URL = '/api/dev-token'
+import { getToken } from '../../api.js'
 
-// ── Token cache (same pattern as findingsApi / admin/spm.js) ─────────────────
-let _token = null
-let _tokenExpiry = 0
-
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
-  try {
-    const res = await fetch(DEV_TOKEN_URL)
-    if (!res.ok) throw new Error('token fetch failed')
-    const data = await res.json()
-    _token = data.token
-    _tokenExpiry = now + (data.expires_in || 86400)
-    return _token
-  } catch {
-    return null
-  }
-}
+const SPM_BASE = '/api/spm'
 
 /**
- * Reset the module-level token cache.  Exposed for tests; production code
- * should never need to call this.  Vitest's vi.stubGlobal('fetch', ...) does
- * not clear this cache between tests, so without an explicit reset a stubbed
- * token from an earlier test will survive into the next and the `getToken()`
- * branch that calls fetch('/api/dev-token') is never exercised.
+ * No-op retained for test-suite compatibility. Token state now lives in
+ * ui/src/api.js (Keycloak-backed); tests that need a clean state should
+ * stub getToken directly.
  */
 export function _resetTokenCacheForTests() {
-  _token = null
-  _tokenExpiry = 0
+  // no-op — token state managed by Keycloak flow in api.js
 }
 
 // ── Error shape (matches admin/api/spm.js _errFrom) ───────────────────────────

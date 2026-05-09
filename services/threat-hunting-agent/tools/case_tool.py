@@ -14,9 +14,47 @@ import json
 import logging
 from typing import Any, List, Optional
 
+import os
+import time
+
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Keycloak service-account token (Resource Owner Password flow)
+# ---------------------------------------------------------------------------
+
+_KEYCLOAK_URL  = os.environ.get("KEYCLOAK_URL", "http://keycloak:8080")
+_KC_REALM      = os.environ.get("KEYCLOAK_REALM", "aispm")
+_KC_CLIENT_ID  = os.environ.get("KC_CLIENT_ID", "aispm-ui")
+_SERVICE_USER  = os.environ.get("SERVICE_ACCOUNT_USER", "admin@aispm.local")
+_SERVICE_PASS  = os.environ.get("SERVICE_ACCOUNT_PASSWORD", "admin-changeme")
+
+_cached_token: dict = {}
+
+
+def _fetch_service_token() -> str:
+    """Fetch a Keycloak access token for the threat-hunting-agent service account."""
+    global _cached_token
+    now = time.time()
+    if _cached_token.get("token") and now < _cached_token.get("expires_at", 0) - 30:
+        return _cached_token["token"]
+
+    url = f"{_KEYCLOAK_URL}/realms/{_KC_REALM}/protocol/openid-connect/token"
+    resp = httpx.post(url, data={
+        "grant_type": "password",
+        "client_id":  _KC_CLIENT_ID,
+        "username":   _SERVICE_USER,
+        "password":   _SERVICE_PASS,
+    }, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    _cached_token = {
+        "token":      data["access_token"],
+        "expires_at": now + data.get("expires_in", 300),
+    }
+    return _cached_token["token"]
 
 # ---------------------------------------------------------------------------
 # Runtime config — set at startup via configure()
@@ -52,16 +90,6 @@ def _get_client() -> httpx.Client:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fetch_dev_token() -> str:
-    """Retrieve a short-lived admin JWT from the platform API."""
-    client = _get_client()
-    resp = client.get(f"{_platform_api_url}/dev-token")
-    resp.raise_for_status()
-    data = resp.json()
-    token = data.get("token") or data.get("access_token")
-    if not token:
-        raise ValueError(f"dev-token endpoint returned unexpected shape: {list(data.keys())}")
-    return token
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +107,7 @@ def create_case(
     """
     Create a case directly in the orchestrator (no real session required).
 
-    Fetches a dev-token automatically, then POSTs to /api/v1/cases/hunt.
+    Fetches a Keycloak service token automatically, then POSTs to /api/v1/cases/hunt.
     The case appears immediately in the Cases tab with the exact title and
     description provided — no generic placeholder text.
 
@@ -98,9 +126,9 @@ def create_case(
         return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
 
     try:
-        token = _fetch_dev_token()
+        token = _fetch_service_token()
     except Exception as exc:
-        logger.exception("Failed to fetch dev-token: %s", exc)
+        logger.exception("Failed to fetch service token: %s", exc)
         return json.dumps({"error": f"auth failure: {exc}"})
 
     payload = {
@@ -209,9 +237,9 @@ def create_threat_finding(
         return json.dumps({"error": f"Invalid severity '{severity}'. Must be low/medium/high/critical."})
 
     try:
-        token = _fetch_dev_token()
+        token = _fetch_service_token()
     except Exception as exc:
-        logger.exception("create_threat_finding: dev-token fetch failed: %s", exc)
+        logger.exception("create_threat_finding: service token fetch failed: %s", exc)
         return json.dumps({"error": f"auth failure: {exc}"})
 
     batch_hash = _compute_batch_hash(tenant_id, title, evidence)

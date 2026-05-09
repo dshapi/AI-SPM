@@ -10,24 +10,10 @@
  *   the user explicitly marks it read (or uses "Mark all read").
  */
 import { useState, useEffect, useCallback } from 'react'
+import { getToken } from '../api.js'
 
-const STORAGE_KEY    = 'spm_seen_case_ids'
-const POLL_INTERVAL  = 30_000   // 30 s
-
-// ── Module-level token cache (avoid refetching on every poll tick) ─────────────
-let _cachedToken       = null
-let _tokenExpiresAt    = 0   // unix seconds
-
-async function _getToken(apiBase) {
-  const now = Date.now() / 1000
-  if (_cachedToken && _tokenExpiresAt > now + 60) return _cachedToken
-  const res = await fetch(`${apiBase}/dev-token`)
-  if (!res.ok) throw new Error('token-fetch-failed')
-  const data = await res.json()
-  _cachedToken    = data.token
-  _tokenExpiresAt = now + (data.expires_in || 86400)
-  return _cachedToken
-}
+const STORAGE_KEY   = 'spm_seen_case_ids'
+const POLL_INTERVAL = 30_000   // 30 s
 
 // ── localStorage helpers ──────────────────────────────────────────────────────
 
@@ -54,7 +40,8 @@ async function fetchCasesFromApi() {
   const raw      = import.meta.env.VITE_ORCHESTRATOR_URL || ''
   const orchBase = (raw && !raw.startsWith('http')) ? raw : `${apiBase}/v1`
 
-  const token = await _getToken(apiBase)   // uses module-level cache; no round-trip if still valid
+  const token = await getToken()
+  if (!token) throw new Error('Not authenticated')
 
   const res = await fetch(`${orchBase}/cases`, {
     headers: { Authorization: `Bearer ${token}` },

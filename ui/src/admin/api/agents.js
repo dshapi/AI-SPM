@@ -19,27 +19,9 @@
 // The `mcp_token` and `llm_api_key` columns are NEVER present in
 // responses (the backend strips them) — callers must not look for them.
 
-const SPM_BASE      = '/api/spm'
-const DEV_TOKEN_URL = '/api/dev-token'
+import { getToken } from '../../api.js'
 
-let _token = null
-let _tokenExpiry = 0
-
-
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
-  try {
-    const res = await fetch(DEV_TOKEN_URL)
-    if (!res.ok) throw new Error('Token fetch failed')
-    const data = await res.json()
-    _token = data.token
-    _tokenExpiry = now + (data.expires_in || 86400)
-    return _token
-  } catch {
-    return null
-  }
-}
+const SPM_BASE = '/api/spm'
 
 
 async function _authHeaders() {
@@ -262,9 +244,4 @@ export async function setAgentPolicies(agentId, policyIds) {
 
 // ── Internal — exported only for tests ─────────────────────────────────────
 
-function _resetTokenCache() {
-  _token = null
-  _tokenExpiry = 0
-}
-
-export const __internals = { getToken, _authHeaders, _resetTokenCache }
+export const __internals = { getToken, _authHeaders }

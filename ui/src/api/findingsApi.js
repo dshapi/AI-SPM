@@ -4,30 +4,13 @@
  * REST client for the /api/v1/findings endpoints on the
  * agent-orchestrator-service.
  *
- * Auth: same dev-token Bearer JWT flow used throughout the platform.
+ * Auth: Keycloak Bearer JWT obtained via getToken() from ui/src/api.js.
  * Base URL: /api/v1  (proxied to localhost:8094 in dev by vite.config.js)
  */
 
+import { getToken } from '../api.js'
+
 const BASE = '/api/v1'
-
-// ── Token cache (identical pattern to api.js) ─────────────────────────────────
-let _token = null
-let _tokenExpiry = 0
-
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
-  try {
-    const res = await fetch('/api/dev-token')
-    if (!res.ok) throw new Error('token fetch failed')
-    const data = await res.json()
-    _token = data.token
-    _tokenExpiry = now + (data.expires_in || 86400)
-    return _token
-  } catch {
-    return null
-  }
-}
 
 // ── Authenticated fetch helper ────────────────────────────────────────────────
 async function apiFetch(path, options = {}) {
