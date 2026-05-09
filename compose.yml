@@ -534,6 +534,25 @@ services:
     # the cluster and survives container restarts.
     restart: "no"
 
+  # ── Keycloak identity provider ───────────────────────────────────────────────
+  # Keycloak runs in the kind cluster (see deploy/helm/aispm/); this stub
+  # documents the expected env vars for local dev / auth/seed-users.sh.
+  # To run locally: docker run --rm -p 8180:8080 -e KEYCLOAK_ADMIN=admin \
+  #   -e KEYCLOAK_ADMIN_PASSWORD=admin-changeme-in-prod quay.io/keycloak/keycloak start-dev
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: cpm-keycloak
+    command: start-dev
+    ports: ["8180:8080"]
+    environment:
+      AISPM_CLIENT_SECRET: aispm-client-secret-changeme
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin-changeme-in-prod
+      SEED_ADMIN_PASSWORD: admin-changeme-in-prod
+      SEED_AUDITOR_PASSWORD: auditor-changeme-in-prod
+      SEED_VIEWER_PASSWORD: viewer-changeme-in-prod
+    profiles: ["keycloak"]
+
   # ── AI SPM Platform ──────────────────────────────────────────────────────────
 
   # spm-db (single-pod Postgres) was removed in May 2026.  CNPG (in
