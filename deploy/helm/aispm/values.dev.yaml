@@ -18,6 +18,35 @@
 #                 https://aispm.local/api/spm/docs  (SPM API Swagger)
 #                 https://aispm.local/api/docs      (platform API Swagger)
 
+# ── Local registry image overrides ──────────────────────────────────────────
+# Kind pulls custom images from the local registry (localhost:5001).
+# Build + push all images first:
+#   IMAGE_REGISTRY=localhost:5001 bash deploy/scripts/build-images.sh
+images:
+  api:               { repository: localhost:5001/aispm-api,                tag: latest }
+  guardModel:        { repository: localhost:5001/aispm-guard-model,        tag: latest }
+  garakRunner:       { repository: localhost:5001/aispm-garak-runner,       tag: latest }
+  retrievalGw:       { repository: localhost:5001/aispm-retrieval-gw,       tag: latest }
+  processor:         { repository: localhost:5001/aispm-processor,          tag: latest }
+  policyDecider:     { repository: localhost:5001/aispm-policy-decider,     tag: latest }
+  agent:             { repository: localhost:5001/aispm-agent,              tag: latest }
+  memoryService:     { repository: localhost:5001/aispm-memory,             tag: latest }
+  executor:          { repository: localhost:5001/aispm-executor,           tag: latest }
+  toolParser:        { repository: localhost:5001/aispm-tool-parser,        tag: latest }
+  outputGuard:       { repository: localhost:5001/aispm-output-guard,       tag: latest }
+  freezeCtrl:        { repository: localhost:5001/aispm-freeze-ctrl,        tag: latest }
+  policySimulator:   { repository: localhost:5001/aispm-policy-sim,         tag: latest }
+  spmApi:            { repository: localhost:5001/aispm-spm-api,            tag: latest }
+  spmMcp:            { repository: localhost:5001/aispm-spm-mcp,            tag: latest }
+  spmLlmProxy:       { repository: localhost:5001/aispm-spm-llm-proxy,      tag: latest }
+  spmAggregator:     { repository: localhost:5001/aispm-spm-aggregator,     tag: latest }
+  agentOrchestrator: { repository: localhost:5001/aispm-agent-orchestrator, tag: latest }
+  threatHunter:      { repository: localhost:5001/aispm-threat-hunter,      tag: latest }
+  ui:                { repository: localhost:5001/aispm-ui,                 tag: latest }
+  startupOrch:       { repository: localhost:5001/aispm-startup-orch,       tag: latest }
+  flinkJob:          { repository: localhost:5001/aispm-flink-pyjob,        tag: latest }
+  agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,      tag: latest }
+
 ingress:
   host: aispm.local
   # ingress-nginx is the only supported dev IngressClass — installed by
@@ -58,11 +87,10 @@ ingress:
   httpsRedirect: true
   clusterIssuer: selfsigned-cluster-issuer
 
-prometheus:
-  storageClass: local-path
-
-grafana:
-  storageClass: local-path
+# Prometheus + Grafana removed May 2026 — templates deleted from the
+# chart, no overrides needed in dev.  Use `kubectl top` / Lens for
+# metrics, or install kube-prometheus-stack out-of-band if you want
+# scrape + dashboards back.
 
 # Kafka: single-broker dev mode was REMOVED in May 2026.  AISPM is HA-only
 # now — every dev cluster runs the 3-node kind topology (kind-cluster.sh
@@ -90,15 +118,19 @@ agentRuntime:
   # PSS + gVisor sentry + non-root + caps drop still defend.
   mtlsMode: PERMISSIVE
 
-# Tetragon enabled in dev — TracingPolicies enforce inline kills for
-# forbidden syscalls in agent pods.
+# Tetragon REMOVED in dev (May 2026) — TracingPolicies require the
+# `cilium.io/v1alpha1` CRD which only exists when Tetragon is installed.
+# Bootstrap no longer installs Tetragon (Linuxkit kernel can't host its
+# eBPF probes), so we gate the template off here. Without this gate the
+# infra-tier apply fails with `no matches for kind "TracingPolicy"`.
 tetragon:
-  enabled: true
+  enabled: false
 
-# Falco enabled on dev. Bootstrap pins to falco helm chart 4.20.5
-# (falco 0.42.x) to avoid the 0.43.x duplicate-container-plugin bug.
+# Falco REMOVED in dev (May 2026) — modern_ebpf driver requires kernel
+# features Docker Desktop's Linuxkit doesn't expose; CrashLoopBackOff
+# was unavoidable. Bootstrap no longer installs the falco chart either.
 falco:
-  enabled: true
+  enabled: false
 
 # Tighten LlamaGuard's allow→block escalation threshold for dev so the
 # Simulator catches low-confidence prompt-injection / tool-abuse probes
@@ -129,9 +161,21 @@ platformEnv:
   GROQ_BASE_URL: "http://host.docker.internal:11434/v1"
   GROQ_MODEL: "llama-guard3"
 
-# Flink: single-JobManager dev mode was REMOVED in May 2026.  HA-only
-# (2 JMs, 2 TMs).  Checkpoint + HA storage now live on MinIO via
-# s3:// URIs (see values.dev-multinode.yaml::flink.checkpointsDir /
-# haStorageDir), eliminating the local-path RWX problem that motivated
-# the old single-JM workaround.  Local-path PVCs are not used by Flink
-# anywhere in HA-only mode.
+# Flink: dev mode runs 1 JobManager + 1 TaskManager.  Prod / staging
+# stay at the values.yaml HA default (2 JMs leader-electing, 2 TMs).
+# Rationale (May 2026 dev-cluster post-mortem):
+#   - Total HA memory budget on dev was 21–25 GB of pod requests against
+#     a 19.5 GB Docker Desktop allocation, which produced an OOM cascade
+#     that crashed kube-apiserver mid-rollout.  Flink alone was 10 GB
+#     of that (2 JMs × 2Gi limit + 2 TMs × 3Gi limit).
+#   - Single JM still uses Kubernetes-native HA (leader election via
+#     ConfigMaps/Leases, state in MinIO via s3://), so failover behavior
+#     is identical to the 2-JM topology — there's just nothing to fail
+#     over to.  Acceptable in dev.
+# Same memory pressure killed kube-apiserver: re-bumping to 2/2 here
+# requires raising Docker Desktop to ≥ 24 GB.
+flink:
+  jobmanager:
+    replicas: 1
+  taskmanager:
+    replicas: 1
