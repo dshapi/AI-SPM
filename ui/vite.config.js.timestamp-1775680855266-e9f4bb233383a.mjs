@@ -1,7 +1,6 @@
 import "node:module";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import.meta.url;
 var vite_config_default = defineConfig({
 	plugins: [react()],
 	server: {
