@@ -82,21 +82,18 @@ def _load_public_key() -> str:
 
 
 def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
-    """Verify RS256 JWT and return claims. Raises 401 on failure."""
-    import jwt as pyjwt
+    """Validate Keycloak JWT for all protected routes."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
-    pub_key = _load_public_key()
-    if not pub_key:
-        raise HTTPException(status_code=500, detail="JWT public key not configured")
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization.removeprefix("Bearer ")
     try:
-        return pyjwt.decode(token, pub_key, algorithms=["RS256"],
-                            options={"verify_aud": False})
-    except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except pyjwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        import os as _os
+        from platform_shared.keycloak_auth import decode_token
+        audience = _os.getenv("JWT_AUDIENCE", "aispm-ui")
+        issuer   = _os.getenv("JWT_ISSUER",   "http://keycloak.local:8180/realms/aispm")
+        return decode_token(token, audience=audience, issuer=issuer)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
 
 
 def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
