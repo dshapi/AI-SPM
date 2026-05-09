@@ -1,0 +1,47 @@
+{
+  "title": "AI SPM — Compliance (NIST AI RMF)",
+  "uid": "spm-compliance",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "5m",
+  "panels": [
+    {
+      "id": 1, "type": "gauge",
+      "title": "NIST AI RMF Overall Coverage %",
+      "gridPos": {"x":0,"y":0,"w":6,"h":6},
+      "targets": [{"expr": "spm_compliance_coverage_pct{function=\"OVERALL\"}", "instant": true}],
+      "fieldConfig": {"defaults": {"min":0,"max":100,"unit":"percent","thresholds":{"steps":[
+        {"color":"red","value":0},{"color":"yellow","value":50},{"color":"green","value":80}
+      ]}}},
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 2, "type": "gauge",
+      "title": "GOVERN Coverage %",
+      "gridPos": {"x":6,"y":0,"w":6,"h":6},
+      "targets": [{"expr": "spm_compliance_coverage_pct{function='GOVERN'}", "instant": true}],
+      "fieldConfig": {"defaults": {"min":0,"max":100,"unit":"percent"}},
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 3, "type": "table",
+      "title": "Compliance Gaps",
+      "gridPos": {"x":0,"y":6,"w":24,"h":10},
+      "targets": [{
+        "rawSql": "SELECT function, category, cpm_control, status, last_evaluated_at FROM compliance_evidence WHERE status != 'satisfied' ORDER BY function, category",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    },
+    {
+      "id": 4, "type": "table",
+      "title": "Model Approval Audit Trail",
+      "gridPos": {"x":0,"y":16,"w":24,"h":8},
+      "targets": [{
+        "rawSql": "SELECT name, version, tenant_id, approved_by, approved_at, risk_tier FROM model_registry WHERE approved_by IS NOT NULL ORDER BY approved_at DESC",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    }
+  ]
+}

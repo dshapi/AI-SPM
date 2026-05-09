@@ -1,0 +1,646 @@
+#!/usr/bin/env python3
+"""
+seed_db.py — standalone DB seed script for the spm-api container.
+
+Seeds:
+  • ModelRegistry   — 12 diverse demo models (varied providers, risk tiers, statuses, types)
+  • PostureSnapshot  — 30 days of daily snapshots for the platform
+
+Idempotent: skips rows that already exist.
+
+Run from the spm-api container (compose or k8s):
+    python3 /app/seed_db.py
+
+Or via kubectl:
+    kubectl -n aispm exec <spm-api-pod> -- python3 /app/seed_db.py
+
+Exits 0 on success, 1 on failure.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import sys
+import uuid
+from datetime import datetime, timedelta, timezone
+
+# Allow running from /app (k8s image) or from repo root (dev)
+_here = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _here)
+sys.path.insert(0, os.path.join(_here, ".."))
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [seed_db] %(levelname)s — %(message)s",
+)
+log = logging.getLogger("seed_db")
+
+_NOW = datetime.now(timezone.utc)
+
+
+def _ago(**kw) -> datetime:
+    return _NOW - timedelta(**kw)
+
+
+# ── Demo model registry data ──────────────────────────────────────────────────
+# Single-tenant product — tenant_id "global" for platform-owned models.
+# Covers: 4 providers × 3 risk tiers × 5 statuses × 6 model types.
+
+DEMO_MODELS = [
+    # ── Anthropic / production-approved ──────────────────────────────────────
+    {
+        "name": "claude-3-5-sonnet",
+        "version": "20241022",
+        "provider": "anthropic",
+        "purpose": "Primary LLM for customer-facing agents. Instruction-following, tool use, long context.",
+        "risk_tier": "high",
+        "model_type": "llm",
+        "owner": "platform-eng",
+        "policy_status": "full",
+        "alerts_count": 2,
+        "status": "approved",
+        "approved_by": "security-ops",
+        "approved_at": _ago(days=14),
+        "last_seen_at": _ago(minutes=5),
+        "notes": "Primary production LLM. PII-Guard and Prompt-Guard policies enforced on all sessions.",
+    },
+    {
+        "name": "claude-3-haiku",
+        "version": "20240307",
+        "provider": "anthropic",
+        "purpose": "Low-latency routing and triage tasks. Not used for customer data.",
+        "risk_tier": "limited",
+        "model_type": "llm",
+        "owner": "platform-eng",
+        "policy_status": "partial",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "platform-eng",
+        "approved_at": _ago(days=30),
+        "last_seen_at": _ago(minutes=12),
+        "notes": "Used for routing only. Does not receive user PII.",
+    },
+    # ── OpenAI / approved ────────────────────────────────────────────────────
+    {
+        "name": "gpt-4o",
+        "version": "2024-11-20",
+        "provider": "openai",
+        "purpose": "Fallback LLM for complex multi-step reasoning tasks.",
+        "risk_tier": "high",
+        "model_type": "llm",
+        "owner": "ml-team",
+        "policy_status": "full",
+        "alerts_count": 1,
+        "status": "approved",
+        "approved_by": "security-ops",
+        "approved_at": _ago(days=21),
+        "last_seen_at": _ago(hours=2),
+        "notes": "Fallback model. Output-Filter v2 applied. Token budget capped at 4096 per session.",
+    },
+    {
+        "name": "text-embedding-3-large",
+        "version": "1",
+        "provider": "openai",
+        "purpose": "RAG pipeline embeddings — knowledge base and customer doc retrieval.",
+        "risk_tier": "minimal",
+        "model_type": "embedding_model",
+        "owner": "ml-team",
+        "policy_status": "full",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "ml-team",
+        "approved_at": _ago(days=45),
+        "last_seen_at": _ago(minutes=3),
+        "notes": "Embedding model only — no generation capability. Low risk.",
+    },
+    {
+        "name": "gpt-4o-mini",
+        "version": "2024-07-18",
+        "provider": "openai",
+        "purpose": "Cost-optimised summarisation and classification tasks.",
+        "risk_tier": "limited",
+        "model_type": "llm",
+        "owner": "ml-team",
+        "policy_status": "partial",
+        "alerts_count": 3,
+        "status": "under_review",
+        "approved_by": None,
+        "approved_at": None,
+        "last_seen_at": _ago(hours=6),
+        "notes": "Under review — elevated alert count from summarisation tasks returning PII fragments.",
+    },
+    # ── Internal / local models ──────────────────────────────────────────────
+    {
+        "name": "llama-guard-3",
+        "version": "3.0.0",
+        "provider": "local",
+        "purpose": "Content screening — prompt and output safety classification.",
+        "risk_tier": "limited",
+        "model_type": "llm",
+        "owner": "security-ops",
+        "policy_status": "full",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "startup-orchestrator",
+        "approved_at": _ago(days=60),
+        "last_seen_at": _ago(minutes=1),
+        "notes": "Platform safety model. Always-on. Not exposed to external users.",
+    },
+    {
+        "name": "output-guard-llm",
+        "version": "2.1.0",
+        "provider": "local",
+        "purpose": "Output screening — PII redaction, secret detection, response validation.",
+        "risk_tier": "limited",
+        "model_type": "llm",
+        "owner": "security-ops",
+        "policy_status": "full",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "startup-orchestrator",
+        "approved_at": _ago(days=60),
+        "last_seen_at": _ago(minutes=1),
+        "notes": "Inline output guard. Blocks delivery on credential pattern match.",
+    },
+    {
+        "name": "all-MiniLM-L6-v2",
+        "version": "1.0.0",
+        "provider": "internal",
+        "purpose": "Semantic similarity for deduplication and intent-drift detection.",
+        "risk_tier": "minimal",
+        "model_type": "embedding_model",
+        "owner": "ml-team",
+        "policy_status": "full",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "ml-team",
+        "approved_at": _ago(days=90),
+        "last_seen_at": _ago(hours=1),
+        "notes": "Sentence-transformer. No generation. Purely internal signal pipeline.",
+    },
+    # ── AWS / Azure cloud provider models ────────────────────────────────────
+    {
+        "name": "amazon-titan-text-premier",
+        "version": "v1:0",
+        "provider": "aws",
+        "purpose": "Data pipeline summarisation — used by DataPipeline-Orchestrator agent.",
+        "risk_tier": "high",
+        "model_type": "llm",
+        "owner": "data-eng",
+        "policy_status": "partial",
+        "alerts_count": 5,
+        "status": "under_review",
+        "approved_by": None,
+        "approved_at": None,
+        "last_seen_at": _ago(hours=3),
+        "notes": "Under review after anomalous bulk retrieval finding (find-002). Access frozen for DataPipeline-Orchestrator pending investigation.",
+    },
+    {
+        "name": "azure-openai-gpt-4-turbo",
+        "version": "2024-04-09",
+        "provider": "azure",
+        "purpose": "EU-region LLM for GDPR-scoped workloads (data residency compliance).",
+        "risk_tier": "high",
+        "model_type": "llm",
+        "owner": "compliance-team",
+        "policy_status": "full",
+        "alerts_count": 0,
+        "status": "approved",
+        "approved_by": "security-ops",
+        "approved_at": _ago(days=7),
+        "last_seen_at": _ago(hours=8),
+        "notes": "EU data residency — used for all EU-subject data processing. PII-Mask enforced.",
+    },
+    # ── Deprecated / retired — lifecycle diversity ────────────────────────────
+    {
+        "name": "gpt-3.5-turbo",
+        "version": "0125",
+        "provider": "openai",
+        "purpose": "Legacy agent host — replaced by claude-3-haiku in Q1 2026.",
+        "risk_tier": "limited",
+        "model_type": "llm",
+        "owner": "ml-team",
+        "policy_status": "none",
+        "alerts_count": 0,
+        "status": "deprecated",
+        "approved_by": "ml-team",
+        "approved_at": _ago(days=120),
+        "last_seen_at": _ago(days=35),
+        "notes": "Deprecated Q1 2026. All agents migrated to claude-3-haiku. No active sessions.",
+    },
+    {
+        "name": "whisper-large-v3",
+        "version": "3.0.0",
+        "provider": "internal",
+        "purpose": "Voice-to-text transcription for audio-input agent workflows.",
+        "risk_tier": "minimal",
+        "model_type": "audio_model",
+        "owner": "ml-team",
+        "policy_status": "partial",
+        "alerts_count": 0,
+        "status": "registered",
+        "approved_by": None,
+        "approved_at": None,
+        "last_seen_at": _ago(days=2),
+        "notes": "Newly onboarded. Risk assessment in progress. Not yet approved for production use.",
+    },
+]
+
+
+# ── Demo posture snapshots ────────────────────────────────────────────────────
+# 30 daily snapshots for the platform (model_id=None = platform-wide aggregate).
+# Simulates realistic trend: improving posture over the last month.
+
+def _build_posture_snapshots() -> list[dict]:
+    """Generate 30 days of daily platform-wide posture snapshots."""
+    rows = []
+    for days_ago in range(30, 0, -1):
+        snap_at = _ago(days=days_ago).replace(hour=0, minute=0, second=0, microsecond=0)
+        # Trend: risk was higher 30d ago, improving toward present
+        trend = days_ago / 30.0          # 1.0 at start, ~0.03 at end
+        base_requests = 180 + int(days_ago * 3)   # traffic increasing toward present
+        avg_risk = round(0.28 + trend * 0.22, 3)  # 0.50 → 0.28
+        max_risk = round(min(0.97, avg_risk + 0.35 + (trend * 0.1)), 3)
+        rows.append({
+            "model_id": None,
+            "tenant_id": "global",
+            "snapshot_at": snap_at,
+            "request_count": base_requests,
+            "block_count": max(0, int(base_requests * 0.03 * trend + 1)),
+            "escalation_count": max(0, int(base_requests * 0.01 * trend)),
+            "avg_risk_score": avg_risk,
+            "max_risk_score": max_risk,
+            "intent_drift_avg": round(0.05 + trend * 0.12, 3),
+            "ttp_hit_count": max(0, int(3 * trend + 0.5)),
+        })
+    return rows
+
+
+async def seed_models(db) -> int:
+    """Seed ModelRegistry. Returns count of newly inserted rows."""
+    from sqlalchemy import select
+    from spm.db.models import ModelRegistry, ModelProvider, ModelRiskTier, ModelStatus, ModelType, PolicyCoverage
+
+    _provider_map = {
+        "anthropic": ModelProvider.anthropic,
+        "openai":    ModelProvider.openai,
+        "local":     ModelProvider.local,
+        "internal":  ModelProvider.internal,
+        "aws":       ModelProvider.aws,
+        "azure":     ModelProvider.azure,
+        "gcp":       ModelProvider.gcp,
+    }
+    _tier_map = {
+        "minimal":      ModelRiskTier.minimal,
+        "limited":      ModelRiskTier.limited,
+        "high":         ModelRiskTier.high,
+        "unacceptable": ModelRiskTier.unacceptable,
+        "low":          ModelRiskTier.low,
+        "medium":       ModelRiskTier.medium,
+        "critical":     ModelRiskTier.critical,
+    }
+    _status_map = {
+        "registered":   ModelStatus.registered,
+        "under_review": ModelStatus.under_review,
+        "approved":     ModelStatus.approved,
+        "deprecated":   ModelStatus.deprecated,
+        "retired":      ModelStatus.retired,
+    }
+    _type_map = {
+        "llm":             ModelType.llm,
+        "embedding_model": ModelType.embedding_model,
+        "audio_model":     ModelType.audio_model,
+        "vision_model":    ModelType.vision_model,
+        "multimodal":      ModelType.multimodal,
+        "other":           ModelType.other,
+    }
+    _policy_map = {
+        "full":    PolicyCoverage.full,
+        "partial": PolicyCoverage.partial,
+        "none":    PolicyCoverage.none,
+    }
+
+    inserted = 0
+    for m in DEMO_MODELS:
+        # Idempotency: skip if name+version already exists (unique constraint)
+        result = await db.execute(
+            select(ModelRegistry).where(
+                ModelRegistry.name == m["name"],
+                ModelRegistry.version == m["version"],
+            )
+        )
+        if result.scalar_one_or_none() is not None:
+            log.info("  model already exists: %s %s — skipping", m["name"], m["version"])
+            continue
+
+        row = ModelRegistry(
+            model_id=uuid.uuid4(),
+            name=m["name"],
+            version=m["version"],
+            provider=_provider_map.get(m["provider"], ModelProvider.other),
+            purpose=m.get("purpose"),
+            risk_tier=_tier_map.get(m["risk_tier"], ModelRiskTier.limited),
+            model_type=_type_map.get(m.get("model_type"), ModelType.llm),
+            owner=m.get("owner"),
+            policy_status=_policy_map.get(m.get("policy_status"), PolicyCoverage.none),
+            alerts_count=m.get("alerts_count", 0),
+            last_seen_at=m.get("last_seen_at"),
+            tenant_id="global",
+            status=_status_map.get(m["status"], ModelStatus.registered),
+            approved_by=m.get("approved_by"),
+            approved_at=m.get("approved_at"),
+            notes=m.get("notes"),
+        )
+        db.add(row)
+        inserted += 1
+        log.info("  + model: %s %s (%s / %s)", m["name"], m["version"], m["provider"], m["status"])
+
+    await db.commit()
+    log.info("models: %d inserted, %d already existed", inserted, len(DEMO_MODELS) - inserted)
+    return inserted
+
+
+async def seed_posture_snapshots(db) -> int:
+    """Seed 30 days of daily posture snapshots. Returns count inserted."""
+    from sqlalchemy import select, func
+    from spm.db.models import PostureSnapshot
+
+    # Idempotency: skip if we already have ≥20 global snapshots
+    result = await db.execute(
+        select(func.count()).select_from(PostureSnapshot).where(
+            PostureSnapshot.tenant_id == "global",
+            PostureSnapshot.model_id.is_(None),
+        )
+    )
+    existing = result.scalar() or 0
+    if existing >= 20:
+        log.info("posture_snapshots: %d rows already present — skipping", existing)
+        return 0
+
+    rows = _build_posture_snapshots()
+    for r in rows:
+        db.add(PostureSnapshot(**r))
+    await db.commit()
+    log.info("posture_snapshots: inserted %d daily snapshots (30 days)", len(rows))
+    return len(rows)
+
+
+async def seed_system_agents(db) -> int:
+    """Ensure platform-internal "system" agents have a row in ``agents``.
+
+    System agents (e.g. threat-hunting-agent) are deployed as ordinary
+    Kubernetes Deployments — not customer-uploaded — but they call
+    spm-llm-proxy whose ``_auth_required`` validates the bearer token
+    against ``agents.llm_api_key``. Without a row here, the platform
+    service hits 401 on every LLM call.
+
+    Token sourcing: the token comes from env vars that are populated
+    from the same Kubernetes Secret the deployment mounts. This makes
+    the DB and the deployment share a single source of truth — set the
+    helm value once and both sides agree. If the env is empty we log
+    a clear error pointing at the operator runbook rather than
+    silently generating a token (which would never match what the
+    deployment uses).
+
+    Idempotent: re-runs update token to match env (handles rotation).
+    """
+    from sqlalchemy import select
+    from spm.db.models import Agent
+
+    SYSTEM_AGENTS = [
+        {
+            # Display-cased name shown in the admin inventory. The
+            # corresponding Kubernetes Deployment is named lowercase
+            # (`threat-hunting-agent`) because k8s resource names must
+            # be RFC1123-compatible — that's a separate namespace from
+            # the agent inventory display name and the two don't need
+            # to match. spm-llm-proxy looks up by ``llm_api_key`` so
+            # the display name has no operational effect.
+            "name": "Threat-Hunting-Agent",
+            "version": "1.0",
+            "agent_type": "langchain",
+            "provider": "internal",
+            "owner": "platform",
+            "description": (
+                "System agent: continuous threat hunting over session "
+                "events. Deployed as a Kubernetes Deployment, not "
+                "user-uploaded; uses spm-llm-proxy via this llm_api_key."
+            ),
+            "risk":          "low",
+            "policy_status": "partial",
+            "runtime_state": "running",
+            "code_path":     "k8s://threat-hunting-agent",
+            "code_sha256":   "system-managed",
+            "llm_key_env":   "THREAT_HUNTING_AGENT_LLM_KEY",
+        },
+    ]
+
+    seeded = 0
+    for spec in SYSTEM_AGENTS:
+        token = os.environ.get(spec["llm_key_env"], "").strip()
+        if not token:
+            log.error(
+                "✗ system-agent %s — env %s is empty; cannot seed agents row. "
+                "Set helm value secrets.threatHuntingAgentLlmKey before "
+                "running db-seed.",
+                spec["name"], spec["llm_key_env"],
+            )
+            continue
+
+        existing = (await db.execute(
+            select(Agent).where(
+                Agent.name == spec["name"],
+                Agent.version == spec["version"],
+                Agent.tenant_id == "t1",
+            )
+        )).scalar_one_or_none()
+
+        if existing is None:
+            import secrets as _secrets
+            row = Agent(
+                id=uuid.uuid4(),
+                name=spec["name"], version=spec["version"],
+                agent_type=spec["agent_type"],
+                provider=spec["provider"],
+                owner=spec["owner"],
+                description=spec["description"],
+                risk=spec["risk"], policy_status=spec["policy_status"],
+                runtime_state=spec["runtime_state"],
+                # System agents render as inventory-only in the admin UI;
+                # the chat panel is gated off so operators don't try to
+                # chat with a service that doesn't expose chat.
+                kind="system",
+                code_path=spec["code_path"], code_sha256=spec["code_sha256"],
+                # mcp_token is NOT used by the threat-hunting agent (it
+                # doesn't expose an MCP server) but the column is NOT NULL
+                # so we mint a stable token to satisfy the schema.
+                mcp_token=_secrets.token_urlsafe(32),
+                llm_api_key=token,
+                tenant_id="t1",
+            )
+            db.add(row)
+            await db.flush()
+            log.info("  inserted system agent %s (key prefix=%s)",
+                     spec["name"], token[:8])
+            seeded += 1
+        else:
+            # Reconcile token (handles rotation), kind, ownership, and
+            # runtime_state without disturbing operator-edited description.
+            if existing.llm_api_key != token:
+                existing.llm_api_key = token
+                log.info("  rotated llm_api_key on system agent %s "
+                         "(new prefix=%s)", spec["name"], token[:8])
+                seeded += 1
+            if getattr(existing, "kind", None) != "system":
+                existing.kind = "system"
+            if existing.owner != spec["owner"]:
+                existing.owner = spec["owner"]
+            if existing.provider != spec["provider"]:
+                existing.provider = spec["provider"]
+
+    await db.commit()
+    return seeded
+
+
+async def ensure_schema() -> None:
+    """Bring the database schema to head via Alembic — single source of truth.
+
+    Alembic migrations live at `spm/alembic/versions/` and are the ONLY
+    blessed way to evolve the schema.  This function runs
+    `alembic upgrade head`, which is idempotent: if the DB is already at
+    head it's a no-op (one SELECT against alembic_version).
+
+    Why ensure_schema exists at all (rather than only running migrations
+    in the db-seed Job): several services (api, agent-orchestrator,
+    garak, threat-hunting-agent, guard_model) call `hydrate_env_from_db`
+    at module-import time and SELECT FROM `integrations` before spm-api's
+    lifespan has run.  In phased k8s rollouts the data-init Job runs
+    long before those services start, but on a clean dev cluster they
+    can race ahead.  Calling alembic from the lifespan + the db-seed Job
+    means whichever runs first brings the schema to head; the other
+    becomes a no-op.
+
+    Historical note (May 2026): this function used to call
+    `Base.metadata.create_all`, which silently diverged from the raw
+    bootstrap SQL because the SQLAlchemy model wasn't kept in sync with
+    the constraint definitions.  See `008_backfill_uq_snapshot.py` and
+    runbook §"posture_snapshots unique constraint backfill" for the
+    incident that motivated migrating to a single Alembic-canonical
+    bootstrap.  Do NOT add `Base.metadata.create_all` calls back into
+    any production code path — write a migration instead.
+    """
+    import asyncio
+    import os
+    import pathlib
+    from alembic import command
+    from alembic.config import Config
+
+    # alembic.ini ships in the spm-api image as /app/spm/alembic.ini
+    # (see services/spm_api/Dockerfile: COPY spm/ ./spm/).  Resolve via
+    # the spm package root so this also works in dev (running from a
+    # checkout) and tests.
+    import spm  # noqa: F401  — used to resolve package path
+    spm_pkg_dir = pathlib.Path(__import__("spm").__file__).resolve().parent
+    ini_path = spm_pkg_dir / "alembic.ini"
+    if not ini_path.exists():
+        raise FileNotFoundError(
+            f"alembic.ini not found at {ini_path}; the spm package must "
+            "ship the migrations directory and ini file."
+        )
+
+    cfg = Config(str(ini_path))
+    # The script_location in alembic.ini is relative ("alembic"); make it
+    # absolute so alembic finds versions/ regardless of cwd.
+    cfg.set_main_option("script_location", str(spm_pkg_dir / "alembic"))
+
+    # SPM_DB_URL is honored by env.py (highest-priority after CLI -x), so
+    # we don't need to override it here.  Just log what alembic will see.
+    db_url_env = os.getenv("SPM_DB_URL", "(unset — using alembic.ini default)")
+    log.info("── ensure_schema: alembic upgrade head ── (db: %s)",
+             _redact_password(db_url_env))
+
+    # alembic.command.upgrade is synchronous (it builds its own engine
+    # via env.py and uses connection.connect()).  Run in the default
+    # executor so we don't block the event loop.
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, command.upgrade, cfg, "head")
+    log.info("✓ schema at head")
+
+
+def _redact_password(url: str) -> str:
+    """Hide :password@ in a SQLAlchemy URL for safe logging."""
+    import re
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)
+
+
+async def main() -> int:
+    try:
+        from spm.db.session import get_session_factory
+    except ModuleNotFoundError:
+        # Fallback: build a session factory directly from SPM_DB_URL
+        import os
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+        db_url = os.getenv("SPM_DB_URL", "postgresql+asyncpg://spm_rw:spmpass@spm-db:5432/spm")
+        # Swap sync driver prefix if present
+        if db_url.startswith("postgresql://"):
+            db_url = db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        engine = create_async_engine(db_url, echo=False)
+        _factory = async_sessionmaker(engine, expire_on_commit=False)
+
+        class _CtxMgr:
+            async def __aenter__(self):
+                self._sess = _factory()
+                return await self._sess.__aenter__()
+            async def __aexit__(self, *a):
+                return await self._sess.__aexit__(*a)
+
+        def get_session_factory():
+            return _factory
+
+    log.info("═══ spm-api DB seed ═══")
+    errors = 0
+
+    # Create the schema FIRST so platform-tier services that hydrate_env_from_db()
+    # at import time find the `integrations` table they expect.
+    try:
+        await ensure_schema()
+    except Exception as e:
+        log.error("✗ ensure_schema failed: %s", e, exc_info=True)
+        return 1
+
+    factory = get_session_factory()
+    async with factory() as db:
+        try:
+            n = await seed_models(db)
+            log.info("✓ ModelRegistry: seeded %d models", n)
+        except Exception as e:
+            log.error("✗ seed_models failed: %s", e, exc_info=True)
+            errors += 1
+
+    async with factory() as db:
+        try:
+            n = await seed_posture_snapshots(db)
+            log.info("✓ PostureSnapshot: seeded %d snapshots", n)
+        except Exception as e:
+            log.error("✗ seed_posture_snapshots failed: %s", e, exc_info=True)
+            errors += 1
+
+    async with factory() as db:
+        try:
+            n = await seed_system_agents(db)
+            log.info("✓ system-agents: seeded/reconciled %d row(s)", n)
+        except Exception as e:
+            log.error("✗ seed_system_agents failed: %s", e, exc_info=True)
+            errors += 1
+
+    if errors:
+        log.error("✗ seed_db completed with %d error(s)", errors)
+        return 1
+
+    log.info("✓ Database seeded successfully")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

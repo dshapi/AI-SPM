@@ -1,0 +1,53 @@
+# deploy/helm/aispm/templates/kyverno-verify-images.yaml
+# Kyverno verifyImages — require Cosign signature on agent runtime images.
+#
+# How signatures are produced (build pipeline):
+#   IMG=registry.example.com/aispm/aispm-agent-runtime
+#   nerdctl --namespace k8s.io build -t "$IMG:$TAG" -f agent_runtime/Dockerfile .
+#   nerdctl --namespace k8s.io push "$IMG:$TAG"
+#   cosign sign --key deploy/cosign/aispm-images.key "$IMG:$TAG"
+#
+# How signatures are verified at admission (this policy):
+#   - Match: Pods in aispm-agents whose image starts with .Values.global.imageRegistry
+#   - Verify: signature against the public key embedded below
+#   - Mode: Audit on dev (skips local-only images), Enforce on prod
+#
+# Local dev images (e.g. plain "aispm-agent-runtime:latest" without a
+# registry prefix) are matched by the policy but skipped — Audit only
+# emits a Kyverno PolicyReport entry, not a denial.
+{{- if .Values.kyverno.verifyImages.enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: agent-verify-image-signature
+  annotations:
+    policies.kyverno.io/title: Verify Agent Runtime Image Signature
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: {{ .Values.kyverno.verifyImages.mode | default "Audit" }}
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+  rules:
+    - name: cosign-verify-agent-runtime
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: ["{{ .Values.agentRuntime.namespace }}"]
+      verifyImages:
+        - imageReferences:
+            # Only verify images that came through a registry — this
+            # naturally excludes local containerd-only builds during
+            # dev, which would otherwise fail because no signature
+            # exists for them.
+            - "*/aispm-agent-runtime:*"
+            - "*/aispm/aispm-agent-runtime:*"
+          attestors:
+            - count: 1
+              entries:
+                - keys:
+                    publicKeys: |-
+{{ .Values.kyverno.verifyImages.publicKey | indent 22 }}
+{{- end }}

@@ -1,0 +1,86 @@
+{
+  "title": "AI SPM — Engineering",
+  "uid": "spm-engineering",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "1m",
+  "panels": [
+    {
+      "id": 1, "type": "timeseries",
+      "title": "Model Risk Score Over Time",
+      "gridPos": {"x":0,"y":0,"w":12,"h":8},
+      "targets": [{"expr": "spm_model_risk_score", "legendFormat": "{{model_id}}"}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 2, "type": "stat",
+      "title": "Enforcement Actions (Total)",
+      "gridPos": {"x":12,"y":0,"w":6,"h":4},
+      "targets": [{"expr": "sum(spm_enforcement_actions_total)", "instant": true}],
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 3, "type": "gauge",
+      "title": "Snapshot Lag (seconds)",
+      "gridPos": {"x":18,"y":0,"w":6,"h":4},
+      "targets": [{"expr": "spm_snapshot_lag_seconds", "instant": true}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [
+        {"color":"green","value":0},{"color":"yellow","value":60},{"color":"red","value":300}
+      ]}}},
+      "datasource": "Prometheus"
+    },
+    {
+      "id": 4, "type": "table",
+      "title": "Model Lifecycle Status",
+      "gridPos": {"x":0,"y":8,"w":24,"h":8},
+      "targets": [{
+        "rawSql": "SELECT name, version, tenant_id, status, risk_tier, approved_by, updated_at FROM model_registry ORDER BY updated_at DESC LIMIT 50",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    },
+    {
+      "id": 5, "type": "table",
+      "title": "Web Tool Calls (Search & Fetch)",
+      "gridPos": {"x":0,"y":16,"w":24,"h":8},
+      "options": {"sortBy": [{"displayName": "timestamp", "desc": true}]},
+      "targets": [{
+        "rawSql": "SELECT timestamp, actor AS user, payload->'details'->>'session_id' AS session, jsonb_array_elements_text(payload->'details'->'tool_calls') AS tool_used FROM audit_export WHERE payload->'details'->'tool_calls' IS NOT NULL AND jsonb_array_length(payload->'details'->'tool_calls') > 0 ORDER BY timestamp DESC LIMIT 100",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    },
+    {
+      "id": 6, "type": "stat",
+      "title": "Web Tool Calls (Total)",
+      "gridPos": {"x":0,"y":24,"w":6,"h":4},
+      "targets": [{
+        "rawSql": "SELECT COUNT(*) AS total FROM audit_export WHERE payload->'details'->'tool_calls' IS NOT NULL AND jsonb_array_length(payload->'details'->'tool_calls') > 0",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    },
+    {
+      "id": 7, "type": "piechart",
+      "title": "Tool Type Breakdown",
+      "gridPos": {"x":6,"y":24,"w":8,"h":8},
+      "options": {"pieType": "donut", "displayLabels": ["name","percent"]},
+      "targets": [{
+        "rawSql": "SELECT CASE WHEN tool LIKE '🔍%' THEN 'Web Search' WHEN tool LIKE '🌐%' THEN 'Web Fetch' ELSE 'Other' END AS tool_type, COUNT(*) AS count FROM (SELECT jsonb_array_elements_text(payload->'details'->'tool_calls') AS tool FROM audit_export WHERE payload->'details'->'tool_calls' IS NOT NULL AND jsonb_array_length(payload->'details'->'tool_calls') > 0) t GROUP BY tool_type",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    },
+    {
+      "id": 8, "type": "table",
+      "title": "Blocked Requests",
+      "gridPos": {"x":14,"y":24,"w":10,"h":8},
+      "options": {"sortBy": [{"displayName": "timestamp", "desc": true}]},
+      "targets": [{
+        "rawSql": "SELECT timestamp, actor AS user, event_type, COALESCE(payload->'details'->>'reason', payload->'details'->>'categories', payload->'details'->>'model_id') AS reason, payload->'details'->>'session_id' AS session FROM audit_export WHERE event_type IN ('guard_model_block','output_blocked','model_gate_block') ORDER BY timestamp DESC LIMIT 50",
+        "format": "table"
+      }],
+      "datasource": "SPM-DB"
+    }
+  ]
+}

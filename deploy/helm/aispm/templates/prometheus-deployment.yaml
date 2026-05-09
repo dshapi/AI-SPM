@@ -1,0 +1,64 @@
+# deploy/helm/aispm/templates/prometheus-deployment.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: {{ .Values.global.namespace }}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: {{ .Values.prometheus.storageClass }}
+  resources:
+    requests:
+      storage: {{ .Values.prometheus.storage }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: {{ .Values.global.namespace }}
+spec:
+  # KNOWN SPOF — single replica because the Prometheus TSDB is on a
+  # RWO PVC and only one pod can hold it.  Pod loss = ~30s
+  # observability blackout while kubelet reschedules; metrics scraped
+  # during the gap are missing forever.
+  #
+  # Real HA path requires a sidecar that ships TSDB blocks to MinIO
+  # (Thanos sidecar or Grafana Mimir) so multiple Prometheus replicas
+  # can scrape independently and queries can deduplicate at the
+  # Querier tier.  Until that lands, this is the only deployment in
+  # the chart that is intentionally NOT HA.  See follow-up "wire
+  # Prometheus to Thanos for true HA".
+  replicas: 1
+  strategy:
+    type: Recreate   # required: RWO PVC cannot be held by two pods
+  selector:
+    matchLabels: { app: prometheus }
+  template:
+    metadata:
+      labels: { app: prometheus }
+    spec:
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v2.55.1
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+          ports:
+            - containerPort: 9090
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+            - name: data
+              mountPath: /prometheus
+          readinessProbe:
+            httpGet: { path: /-/healthy, port: 9090 }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: prometheus-data
