@@ -113,30 +113,18 @@ class IdentityContext:
 
 def _decode_token(raw_token: str) -> dict:
     """
-    Decode the JWT payload WITHOUT signature verification.
-
-    Accepts:
-      • Real JWTs (header.payload.sig)  — payload is base64url-decoded.
-      • Test tokens where the payload is a raw base64url JSON object.
-
-    Returns an empty dict on any parse failure so the caller receives
-    a default identity rather than a hard crash.
+    Validate the JWT against Keycloak JWKS (RS256, aud, iss).
+    Returns empty dict on any failure so callers get a default identity.
     """
+    if not raw_token:
+        return {}
     try:
-        parts = raw_token.split(".")
-        if len(parts) != 3:
-            raise ValueError("not a 3-part JWT")
-        payload_b64 = parts[1]
-        # Restore padding stripped by base64url encoding
-        padding = 4 - len(payload_b64) % 4
-        payload_bytes = base64.urlsafe_b64decode(payload_b64 + "=" * padding)
-        claims = json.loads(payload_bytes)
-        logger.debug("JWT decoded: sub=%s roles=%s groups=%s env=%s",
-                     claims.get("sub"), claims.get("roles"),
-                     claims.get("groups"), claims.get("env"))
-        return claims
-    except Exception as exc:
-        logger.debug("JWT decode failed (%s) — using empty claims", exc)
+        import os
+        from platform_shared.keycloak_auth import decode_token
+        audience = os.environ.get("JWT_AUDIENCE", "aispm-ui")
+        issuer   = os.environ.get("JWT_ISSUER",   "http://keycloak.local:8180/realms/aispm")
+        return decode_token(raw_token, audience=audience, issuer=issuer)
+    except Exception:
         return {}
 
 

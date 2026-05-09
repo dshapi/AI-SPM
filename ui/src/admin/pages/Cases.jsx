@@ -12,6 +12,7 @@ import {
   ChevronRight, Eye, Zap, RotateCcw,
   TriangleAlert, CircleDot, Layers, Lock,
 } from 'lucide-react'
+import { getToken }      from '../../api.js'
 import { cn }            from '../../lib/utils.js'
 import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
@@ -971,17 +972,8 @@ export default function Cases() {
 
     async function fetchCases() {
       try {
-        const tokenRes = await fetch(`${apiBase}/dev-token`)
-        if (!tokenRes.ok) {
-          console.warn('[Cases] dev-token fetch failed:', tokenRes.status)
-          return false
-        }
-        const tokenData = await tokenRes.json()
-        const token = tokenData.token || tokenData.access_token
-        if (!token) {
-          console.warn('[Cases] dev-token response missing token field:', Object.keys(tokenData))
-          return false
-        }
+        const token = await getToken()
+        if (!token) throw new Error('Not authenticated')
 
         const res = await fetch(`${orchBase}/cases`, {
           headers: { Authorization: `Bearer ${token}` },

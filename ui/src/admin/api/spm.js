@@ -4,30 +4,12 @@
 //   /api/spm/*    →  spm_api   (port 8092)
 //   /api/v1/*     →  orchestrator (port 8094) — used here only for policies
 //
-// Token handling follows the same dev-token pattern as ui/src/api.js so we get
-// a Bearer token with the `spm:admin` role (minted by vite.config.js in dev).
+// Token handling delegates to ui/src/api.js (Keycloak-backed getToken).
 
-const SPM_BASE       = '/api/spm'
-const POLICIES_BASE  = '/api/v1/policies'
-const DEV_TOKEN_URL  = '/api/dev-token'
+import { getToken } from '../../api.js'
 
-let _token = null
-let _tokenExpiry = 0
-
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) return _token
-  try {
-    const res = await fetch(DEV_TOKEN_URL)
-    if (!res.ok) throw new Error('Token fetch failed')
-    const data = await res.json()
-    _token = data.token
-    _tokenExpiry = now + (data.expires_in || 86400)
-    return _token
-  } catch {
-    return null
-  }
-}
+const SPM_BASE      = '/api/spm'
+const POLICIES_BASE = '/api/v1/policies'
 
 async function _authHeaders() {
   const token = await getToken()

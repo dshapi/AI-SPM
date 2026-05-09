@@ -40,7 +40,7 @@ from spm.db.models import (
     ComplianceEvidence, ModelRegistry,
     ModelStatus, ModelProvider, ModelRiskTier, ModelType, PolicyCoverage,
 )
-from spm.db.session import get_db, get_engine
+from spm.db.session import get_db, get_engine, set_app_user
 from spm.db.models import Base
 
 logging.basicConfig(
@@ -82,21 +82,18 @@ def _load_public_key() -> str:
 
 
 def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
-    """Verify RS256 JWT and return claims. Raises 401 on failure."""
-    import jwt as pyjwt
+    """Validate Keycloak JWT for all protected routes."""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
-    pub_key = _load_public_key()
-    if not pub_key:
-        raise HTTPException(status_code=500, detail="JWT public key not configured")
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization.removeprefix("Bearer ")
     try:
-        return pyjwt.decode(token, pub_key, algorithms=["RS256"],
-                            options={"verify_aud": False})
-    except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except pyjwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        import os as _os
+        from platform_shared.keycloak_auth import decode_token
+        audience = _os.getenv("JWT_AUDIENCE", "aispm-ui")
+        issuer   = _os.getenv("JWT_ISSUER",   "http://keycloak.local:8180/realms/aispm")
+        return decode_token(token, audience=audience, issuer=issuer)
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
 
 
 def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
@@ -110,6 +107,15 @@ def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
     if "spm:admin" not in roles and "spm:auditor" not in roles:
         raise HTTPException(status_code=403, detail="spm:auditor or spm:admin role required")
     return claims
+
+
+def _require_internal_secret(x_internal_secret: Optional[str] = Header(None)) -> None:
+    """Guard for service-to-service internal routes."""
+    expected = os.getenv("INTERNAL_SERVICE_SECRET", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVICE_SECRET not configured")
+    if not x_internal_secret or x_internal_secret != expected:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid internal secret")
 
 
 def _tenant_from_claims(claims: Dict, fallback: str = "global") -> str:
@@ -279,7 +285,7 @@ async def _seed_demo_models() -> None:
     Non-fatal — a failure here never blocks API startup.
     """
     try:
-        from seed_all import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
+        from seed_db import seed_models, seed_posture_snapshots, DEMO_MODELS  # type: ignore
         from spm.db.session import get_session_factory
 
         factory = get_session_factory()
@@ -325,7 +331,7 @@ async def _seed_system_agents_on_startup() -> None:
     functional via the other two.
     """
     try:
-        from seed_all import seed_system_agents  # type: ignore
+        from seed_db import seed_system_agents  # type: ignore
         from spm.db.session import get_session_factory
 
         factory = get_session_factory()
@@ -343,12 +349,11 @@ async def _seed_system_agents_on_startup() -> None:
 async def lifespan(app: FastAPI):
     # Create tables + backfill any constraints/indexes the SQLAlchemy
     # model added since the database was first bootstrapped. Routes
-    # through seed_all.ensure_schema so both the lifespan path and the
-    # data-init Job (db-seed, which runs `python3 /app/seed_all.py db`)
-    # use the same backfill logic — see ensure_schema's docstring for
-    # the older-create_all rationale (e.g., posture_snapshots.uq_snapshot
-    # constraint, May 2026).
-    from seed_all import ensure_schema  # type: ignore
+    # through seed_db.ensure_schema so both the lifespan path and the
+    # data-init Job (db-seed) use the same backfill logic — see
+    # ensure_schema's docstring for the older-create_all rationale
+    # (e.g., posture_snapshots.uq_snapshot constraint, May 2026).
+    from seed_db import ensure_schema  # type: ignore
     await ensure_schema()
     # Seed compliance evidence from mapping file
     await seed_compliance_evidence()
@@ -500,6 +505,7 @@ async def register_model(
     claims: Dict = Depends(require_admin),
 ) -> ModelResponse:
     """Register a new model. Returns 409 on (name, version, tenant) collision."""
+    await set_app_user(db, claims.get("sub", "unknown"))
     tenant_id = body.tenant_id or _tenant_from_claims(claims)
     # Initial risk is derived from alerts_count; ignore anything the caller
     # sent so there's one source of truth.
@@ -623,6 +629,7 @@ async def register_model_with_file(
     <service-dir>/models), sha256'd, and its metadata is embedded in
     the row's ai_sbom under the "artifact" key.  Returns 409 on duplicate.
     """
+    await set_app_user(db, claims.get("sub", "unknown"))
     effective_tenant = tenant_id or _tenant_from_claims(claims)
 
     # Parse optional ai_sbom JSON blob
@@ -708,6 +715,7 @@ async def transition_status(
     claims: Dict = Depends(require_admin),
 ) -> ModelResponse:
     """Transition model lifecycle status. Validates state machine."""
+    await set_app_user(db, claims.get("sub", "unknown"))
     model = await db.get(ModelRegistry, uuid.UUID(model_id))
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -743,6 +751,7 @@ async def transition_status(
 async def enforce_model(
     model_id: str,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(_require_internal_secret),
 ) -> Dict:
     """Called by spm-aggregator when risk threshold is exceeded. Idempotent."""
     model = await db.get(ModelRegistry, uuid.UUID(model_id))

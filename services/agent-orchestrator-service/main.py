@@ -220,12 +220,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.db_session_factory = session_factory
     logger.info("Database engine initialised: %s", db_url)
 
-    # Seed demo data on first boot (no-op if DB already has sessions).
-    # The orchestrator container's Dockerfile COPYs scripts/seed_all.py
-    # alongside the service source, so the bare `import seed_all` matches
-    # what runs in production.
+    # Seed demo data on first boot (no-op if DB already has sessions)
     try:
-        from seed_all import seed_demo_data
+        from seed_demo import seed_demo_data
         await seed_demo_data(session_factory)
     except Exception as _seed_err:
         logger.warning("seed_demo: skipped — %s", _seed_err)
@@ -381,12 +378,17 @@ def create_app() -> FastAPI:
     )
 
     # ── CORS ────────────────────────────────────────────────────────────────
+    _cors_origins = [
+        o.strip()
+        for o in os.getenv("CORS_ORIGINS", "http://aispm.local,http://localhost:5173").split(",")
+        if o.strip()
+    ]
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_origins=_cors_origins,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=False,
     )
 
     # ── Trace ID + RBAC access-log middleware ──────────────────────────────

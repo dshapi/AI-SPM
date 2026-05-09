@@ -3,6 +3,15 @@ global:
   imageRegistry: ""          # e.g. ghcr.io/your-org
   imagePullPolicy: IfNotPresent
   namespace: aispm
+  keycloak:
+    url: "http://keycloak.aispm.svc.cluster.local:8080"
+    realm: "aispm"
+    jwksUrl: "http://keycloak.aispm.svc.cluster.local:8080/realms/aispm/protocol/openid-connect/certs"
+    issuer: "http://keycloak.local:8180/realms/aispm"
+    audience: "aispm-ui"
+    clientSecret: "aispm-client-secret-changeme"
+  corsOrigins: "http://aispm.local"
+  internalServiceSecret: "internal-secret-changeme"
 
 # ── Per-service image tags ───────────────────────────────────────────────────
 images:
@@ -239,17 +248,16 @@ platformEnv:
 # ── Agent runtime ────────────────────────────────────────────────────────────
 agentRuntime:
   namespace: aispm-agents
-  # RuntimeClass for kernel-boundary isolation. Default `gvisor` keeps
-  # user-uploaded agents off the host kernel out of the box (kind, GKE,
-  # EKS, kubeadm — user-space sentry, ~95% Linux ABI, real kernel
-  # boundary). Override per-environment:
-  #   values.prod.yaml → "kata"   (microVM-grade isolation in prod)
-  #   any environment without gVisor installed → ""  (host runtime;
-  #     loses isolation but lets the chart still apply)
-  # The bootstrap script always runs deploy/scripts/install-gvisor.sh
-  # against the kind cluster so the `gvisor` RuntimeClass is present
-  # before the chart is applied.
-  runtimeClassName: "gvisor"
+  # RuntimeClass for kernel-boundary isolation. Empty default means
+  # "use the cluster's default OCI runtime" — cheap, but agents share
+  # the host kernel. Set this to a registered RuntimeClass:
+  #   - kata    (RKE2 prod with Kata Containers installed)
+  #   - gvisor  (kind, GKE, EKS, kubeadm — user-space sentry instead
+  #             of microVM, ~95% Linux ABI, real kernel boundary)
+  # Override per-environment:
+  #   values.dev.yaml  → "gvisor"
+  #   values.prod.yaml → "kata"
+  runtimeClassName: ""
   defaultMemMi: 512
   defaultCpuMillicores: 500
 
@@ -287,6 +295,30 @@ agentRuntime:
   # waypoint proxies for the cross-mode bridge.
   mtlsMode: PERMISSIVE
 
+# ── Kyverno admission policies ─────────────────────────────────────────────
+# Cluster-wide policies (disallow-privileged, disallow-host-namespaces,
+# image-origin-allowlist) are applied directly via kubectl, not via this
+# chart, so they remain active even when the chart is helm-deleted. Only
+# the verifyImages policy is templated here because it depends on the
+# Cosign keypair which lives alongside the rest of the deployment values.
+kyverno:
+  verifyImages:
+    # Off by default. Local dev images aren't pushed to a registry and
+    # have no Cosign signature, so enabling on dev would block every
+    # agent pod. Turn on in values.prod.yaml.
+    enabled: false
+    # "Audit" emits PolicyReport entries without blocking. "Enforce"
+    # rejects unsigned images at admission.
+    mode: Audit
+    # Cosign public key (PEM). Generated with:
+    #   cosign generate-key-pair --output-key-prefix deploy/cosign/aispm-images
+    # Private key is in deploy/cosign/aispm-images.key (gitignored).
+    publicKey: |
+      -----BEGIN PUBLIC KEY-----
+      MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEC/IrHdw9JZDJvCuC90CXeE7ZEsgE
+      SUkFuN8J7uoylaxTLuiZYTf2SuixBO39s1R1a806LzDU5RBJMEORIvl3gA==
+      -----END PUBLIC KEY-----
+
 # ── Secrets (safe defaults — override at deploy time via --set or Rancher UI) ─
 secrets:
   spmDbPassword: "spmpass"     # matches hardcoded source defaults; override in prod
@@ -303,7 +335,7 @@ secrets:
   # upstream LLM auth is done by the proxy using ANTHROPIC_API_KEY /
   # GROQ_API_KEY hydrated from the integrations table). So a literal
   # placeholder like "local" is sufficient for development — it keeps
-  # scripts/seed_all.py from logging "key empty" and lets the
+  # services/spm_api/seed_db.py from logging "key empty" and lets the
   # agent satisfy spm-llm-proxy's "Field required" validator.
   #
   # For production, OVERRIDE in your environment-specific values file
@@ -318,6 +350,7 @@ secrets:
   # makes it into platform-secrets via the chart, instead of relying on
   # a manual `kubectl patch` that gets reverted on the next helm upgrade.
   threatHuntingAgentLlmKey: "local"
+  grafanaAdminPassword: "admin"
 
 # ── Ingress ──────────────────────────────────────────────────────────────────
 ingress:
@@ -339,6 +372,28 @@ ingress:
   # limit on a misconfigured DNS will lock you out for a week, so we
   # require an explicit flip in prod values to switch to `letsencrypt-prod`.
   clusterIssuer: letsencrypt-staging
+
+# ── Runtime Security ─────────────────────────────────────────────────────────
+# Set falco.enabled=true only when Falco is installed (namespace falco must exist).
+# Set tetragon.enabled=true only when Tetragon DaemonSet is healthy.
+# Both require a kernel that exposes /sys/fs/bpf mounts — kind nodes
+# do, but if you see DaemonSet pods crashlooping with eBPF mount errors
+# in some other dev setup, leave both disabled.
+falco:
+  enabled: false   # prod: true (after: helm install falco falcosecurity/falco -n falco)
+
+tetragon:
+  enabled: false   # prod: true (after: helm install tetragon cilium/tetragon -n kube-system)
+
+# ── Observability ────────────────────────────────────────────────────────────
+prometheus:
+  storage: 10Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
+
+grafana:
+  adminPasswordSecret: grafana-secret
+  storage: 2Gi
+  storageClass: local-path   # dev: local-path; prod: longhorn
 
 # ── Application-tier replica counts ────────────────────────────────────
 # Default to 1 to keep the resource budget realistic on a 24 GB / 12-core

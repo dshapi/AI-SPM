@@ -36,14 +36,9 @@
 #      module-import time; without the schema in place by Phase 4 they
 #      crash before lifespan can create it.
 #
-#   5. The spm-api Dockerfile MUST COPY both scripts/seed_all.py AND
-#      services/spm_api/posture_routes.py into /app. Either missing →
-#      db-seed Job fails with "can't open file '/app/seed_all.py'" or
-#      Posture page 404s. scripts/seed_all.py is the single canonical
-#      seeder for the platform (replaces the old seed_db.py / seed_demo.py
-#      / seed_runtime_sessions.py / seed_integrations.py). The Helm Job
-#      runs `python3 /app/seed_all.py db`. The grep-check in Step 3a
-#      keys on `COPY scripts/seed_all.py`.
+#   5. The spm-api Dockerfile MUST COPY both seed_db.py AND
+#      posture_routes.py into /app. Either missing → db-seed Job fails
+#      with "can't open file '/app/seed_db.py'" or Posture page 404s.
 #
 #   6. AuthorizationPolicies that match `source.namespaces` only allow
 #      mTLS-identified callers. Sidecar-less Jobs (orchestrator, db-seed)
@@ -89,9 +84,8 @@
 #  12. ALWAYS rebuild the spm-api and startup-orchestrator images on
 #      bootstrap (Step 3). They contain code that's tightly coupled to
 #      chart changes:
-#        - seed_db.py / seed_all.py own schema creation (invariant 4)
-#          — out-of-date image misses tables that platform services
-#          need on import.
+#        - seed_db.py owns schema creation (invariant 4) — out-of-date
+#          image misses tables that platform services need on import.
 #        - startup_orchestrator/app.py pins kafka api_version (invariant 3)
 #          — out-of-date image fails Step 2 with UnrecognizedBrokerVersion.
 #
@@ -110,20 +104,6 @@
 #      and manage the secret yourself.
 #
 #      Prereq: `brew install mkcert` (preflight warns if missing).
-#
-#      Why TWO mkcert touchpoints (Step 2 + Section 8d):
-#        Step 2 upserts the Secret early so it exists before Istio comes
-#        up. Section 8d re-upserts after the chart has fully applied
-#        because cert-manager would otherwise race us — even with
-#        ingress.certManager=false, ANY un-guarded Certificate template
-#        in the chart causes cert-manager to overwrite our Secret with
-#        an O=aispm-dev selfsigned cert. Section 8d also restarts
-#        istio-ingressgateway so envoy actually loads the new cert
-#        (envoy holds certs in memory; SDS push timing is non-
-#        deterministic on a fresh cluster). The chart fix lives at
-#        deploy/helm/aispm/templates/aispm-tls-certificate.yaml — that
-#        template MUST be guarded on .Values.ingress.certManager.
-#        If WSS regresses, check that guard first.
 #
 #      Prod (`values.yaml: ingress.certManager: true`): cert-manager
 #      issues + renews via ACME / Let's Encrypt. Browsers trust the chain
@@ -275,38 +255,10 @@
 #                      CI forever. Default: unlimited.
 #   BOOTSTRAP_SUMMARY_FILE  Path to write a JSON run summary on exit. Always
 #                      printed to stdout as a `BOOTSTRAP_SUMMARY: { … }` line.
-#   VERBOSE=1                stream the full shell xtrace to the terminal
-#                            in addition to the file (for debugging). By
-#                            default the trace is captured silently to
-#                            /tmp/bootstrap-xtrace-<pid>.log and only
-#                            the narrative log lines render on screen.
-#   QUIET=1                  disable shell xtrace entirely (no file, no
-#                            terminal). Narrative log lines still print.
-#   FORCE_DESTROY=1          if a kind cluster named 'aispm' already exists,
-#                            destroy and recreate it without prompting
-#                            (Step 0). Useful for CI / scripted runs.
-#   FORCE_KEEP=1             same situation, but skip the prompt and re-run
-#                            against the existing cluster. Bootstrap is
-#                            idempotent so this is the safe-default for
-#                            non-interactive shells.
-#   FORCE_CREATE=1           if no kind cluster of that name exists, create
-#                            one without prompting (Step 0).
-#   KIND_CLUSTER_NAME=name   override the kind cluster name to detect in
-#                            Step 0 (default: aispm).
-#   SKIP_HA=1                skip Step 5.5 (HA backing services: MinIO,
-#                            CNPG Postgres, Redis Sentinel) AND drop the
-#                            multinode overlay so the chart's built-in
-#                            single-pod spm-db / redis come up instead.
-#                            Use this when you want a minimal dev cluster.
-#   VALUES_EXTRA=<path>      override the overlay layered on top of
-#                            values.yaml + values.dev.yaml (default:
-#                            values.dev-multinode.yaml). Set to ""
-#                            to disable the overlay.
 #   SKIP_INGRESS=1           skip ingress-nginx
 #   SKIP_CERT_MANAGER=1      skip cert-manager
-#   SKIP_GVISOR=1            skip gVisor install (default: install — gVisor
-#                            is the default RuntimeClass for user-uploaded
-#                            agents; see install-gvisor.sh)
+#   INSTALL_GVISOR=1         install gVisor runsc into every kind node
+#                            (off by default — see install-gvisor.sh)
 #   ENABLE_ISTIO_CNI=1       install istio-cni (off by default — corrupts
 #                            pod networking in some kind topologies; use
 #                            only on prod kubeadm/GKE)
@@ -317,79 +269,14 @@
 #
 #   ALWAYS-INSTALLED COMPONENTS (no flag — these are required platform deps):
 #     local-path-provisioner, Istio (base + istiod),
-#     HA backing services: MinIO + CNPG Postgres + Redis Sentinel
-#     (set SKIP_HA=1 to use chart-built-in single-pod versions instead)
+#     Falco + Tetragon, Kyverno + cluster policies
 #
 # ── TARGETED RE-RUNS ─────────────────────────────────────────────────────────
 #   bash deploy/scripts/bootstrap-cluster.sh chart     # only re-apply chart
+#   bash deploy/scripts/bootstrap-cluster.sh policies  # only re-apply Kyverno
 #   bash deploy/scripts/bootstrap-cluster.sh addons    # only re-install addons
 
 set -euo pipefail
-
-# ── Verbose mode (xtrace) ────────────────────────────────────────────────
-# Three modes:
-#
-#   default    Full per-command xtrace is captured silently to
-#              /tmp/bootstrap-xtrace-<pid>.log via BASH_XTRACEFD.
-#              The terminal stays clean — you see only the narrative
-#              (section headers, ▶ tasks, ✓/✗, errors). On a problem,
-#              `cat` the trace file to see exactly what happened. This
-#              is the right balance between "verbose" (full record on
-#              disk) and "readable" (terminal isn't drowning in noise).
-#
-#   VERBOSE=1  Stream the trace to the terminal too (in addition to the
-#              file). Use when you're actively debugging the script.
-#
-#   QUIET=1    Disable xtrace entirely. No trace file, no terminal
-#              trace. Narrative log lines still render.
-#
-# PS4 is exported so any subprocess that enables xtrace inherits the
-# same [HH:MM:SS scriptname:lineno] prefix format.
-export PS4='+ [\D{%H:%M:%S} ${BASH_SOURCE##*/}:${LINENO}] '
-
-# BASH_XTRACEFD was added in bash 4.1. macOS ships /bin/bash 3.2 forever
-# (Apple GPL-aversion). On 3.2 the variable is silently ignored and
-# xtrace falls back to stderr — i.e. the trace floods the user's
-# terminal, which is exactly what we DON'T want in default mode.
-# Detect the version and pick a sane behaviour:
-#   bash >= 4.1 + default     → trace to file
-#   bash <  4.1 + default     → no xtrace at all (terminal stays clean,
-#                              file would be empty anyway)
-#   VERBOSE=1                 → trace to terminal regardless of version
-#   QUIET=1                   → no xtrace anywhere
-_BS_XTRACE_LOG=""
-_bash_supports_xtracefd() {
-  local maj="${BASH_VERSINFO[0]:-0}"
-  local min="${BASH_VERSINFO[1]:-0}"
-  if [ "$maj" -gt 4 ]; then return 0; fi
-  if [ "$maj" -eq 4 ] && [ "$min" -ge 1 ]; then return 0; fi
-  return 1
-}
-if [ "${QUIET:-0}" = "1" ]; then
-  : # xtrace stays off entirely
-elif [ "${VERBOSE:-0}" = "1" ]; then
-  set -x   # trace to terminal (default fd 2 == stderr)
-elif _bash_supports_xtracefd; then
-  # Default + modern bash: pipe xtrace to a side log, leave terminal clean.
-  _BS_XTRACE_LOG="/tmp/bootstrap-xtrace-$$.log"
-  : > "$_BS_XTRACE_LOG"
-  # Open fd 19 to the file (an arbitrary high fd that won't collide
-  # with anything else this script uses). Bash inherits BASH_XTRACEFD
-  # globally so `set -x` everywhere — including inside helper
-  # functions — writes here instead of stderr.
-  exec 19>>"$_BS_XTRACE_LOG"
-  export BASH_XTRACEFD=19
-  set -x
-  echo "[bootstrap] full shell trace → $_BS_XTRACE_LOG  (set VERBOSE=1 to stream to terminal)"
-else
-  # Default + ancient bash 3.2: BASH_XTRACEFD is ignored, so enabling
-  # set -x would just flood the terminal. Stay silent on the trace
-  # axis; the log helpers (log/warn/err/section) and bs_parallel still
-  # produce a readable narrative.
-  echo "[bootstrap] note: bash $BASH_VERSION is too old to redirect xtrace cleanly;"
-  echo "  shell trace is OFF. Set VERBOSE=1 to force xtrace to terminal,"
-  echo "  or 'brew install bash' for trace-to-file mode."
-fi
 
 # ── Global timeout (opt-in) ──────────────────────────────────────────────
 # CI sets BOOTSTRAP_TIMEOUT (e.g. "25m") so a stuck `helm --wait` can't
@@ -411,12 +298,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DEPLOY="$REPO_ROOT/deploy"
 HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
-# Multinode HA overlay — default ON. Layered LAST in helm template so its
-# values win over values.yaml + values.dev.yaml. Pairs with the HA
-# backing services that Step 5.5 provisions (MinIO + CNPG Postgres +
-# Redis Sentinel). Override with VALUES_EXTRA="" to opt out, or point
-# at a different overlay file. Empty string = no overlay.
-VALUES_EXTRA="${VALUES_EXTRA-$HELM_CHART/values.dev-multinode.yaml}"
+# Optional extra overlay (e.g. values.dev-multinode.yaml). Applied LAST so
+# its values win. Useful for layering cluster-shape overrides on top of
+# values.dev.yaml without forking the whole file. Empty by default.
+VALUES_EXTRA="${VALUES_EXTRA:-}"
 SKIP_PREFLIGHT=0
 TARGET="all"
 SECRETS_FROM=""      # optional override path; default is $REPO_ROOT/.env
@@ -442,13 +327,26 @@ for _arg in "$@"; do
   esac
 done
 
-# ── Logging helpers ──────────────────────────────────────────────────────
-# Defined early so Step 0 (cluster destroy prompt) and the cluster
-# reachability check below can use them.
-log()  { { set +x; } 2>/dev/null; echo "$(date +%H:%M:%S) [bootstrap] $*"; [ "${QUIET:-0}" != "1" ] && set -x; return 0; }
-warn() { { set +x; } 2>/dev/null; echo "$(date +%H:%M:%S) [bootstrap] WARN: $*" >&2; [ "${QUIET:-0}" != "1" ] && set -x; return 0; }
-err()  { { set +x; } 2>/dev/null; echo "$(date +%H:%M:%S) [bootstrap] ERROR: $*" >&2; [ "${QUIET:-0}" != "1" ] && set -x; return 0; }
-section() { { set +x; } 2>/dev/null; echo; echo "═══ $* ═══"; [ "${QUIET:-0}" != "1" ] && set -x; return 0; }
+# ── Cluster reachability ─────────────────────────────────────────────────
+# This script bootstraps a Kubernetes cluster. If kubectl can't reach one,
+# there's nothing to bootstrap. (--dry-run is exempt — it only renders.)
+if [ "$DRY_RUN" != "1" ]; then
+  if ! command -v kubectl >/dev/null 2>&1; then
+    echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl not installed" >&2
+    exit 1
+  fi
+  if ! kubectl cluster-info >/dev/null 2>&1; then
+    echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl cannot reach a cluster" >&2
+    echo "$(date +%H:%M:%S) [bootstrap]   check: kubectl config current-context && kubectl cluster-info" >&2
+    echo "$(date +%H:%M:%S) [bootstrap]   for kind: 'deploy/scripts/kind-cluster.sh init' brings up a fresh 3-node cluster" >&2
+    exit 1
+  fi
+fi
+
+log()  { echo "$(date +%H:%M:%S) [bootstrap] $*"; }
+warn() { echo "$(date +%H:%M:%S) [bootstrap] WARN: $*" >&2; }
+err()  { echo "$(date +%H:%M:%S) [bootstrap] ERROR: $*" >&2; }
+section() { echo; echo "═══ $* ═══"; }
 
 # Hard-fail on every critical-path error. The whole point of this script
 # is to produce a known-good deployment or fail loudly — silent warnings
@@ -458,432 +356,61 @@ die() {
   exit 1
 }
 
-# ── kind-cluster.sh wrapper ──────────────────────────────────────────────
-# All cluster-lifecycle ops (init / clean / destroy) go through this
-# helper. It captures combined output to /tmp/kind-<verb>-$$.log AND tees
-# to the user's terminal so they always see what's happening live.
-# On non-zero exit, _kind_helper_failure dumps the tail of that log into
-# the bootstrap error so the actual kind/docker error is visible — no
-# more "scroll up to find the message" guessing game.
-_KIND_LAST_LOG=""
-_run_kind_helper() {
-  local verb="$1"; shift
-  local logf="/tmp/kind-${verb}-$$.log"
-  _KIND_LAST_LOG="$logf"
-  : > "$logf"
-  # `tee` so user sees output live; pipefail propagates the helper's
-  # exit code through the pipeline. We pass `bash -e` so any silent
-  # failure inside the helper aborts (kind-cluster.sh has its own
-  # set -euo pipefail but a fresh bash makes the boundary clearer).
-  bash "$DEPLOY/scripts/kind-cluster.sh" "$verb" 2>&1 | tee -a "$logf"
-}
-
-_kind_helper_failure() {
-  local what="$1"
-  err "$what failed."
-  if [ -s "$_KIND_LAST_LOG" ]; then
-    err "  ── tail of $_KIND_LAST_LOG (last 40 lines) ──"
-    # Print without err-prefix so it reads like the original tool output.
-    tail -n 40 "$_KIND_LAST_LOG" | sed 's/^/    /' >&2
-    err "  ── end of helper log ──"
-  fi
-  err "  full log: $_KIND_LAST_LOG"
-  err "  common causes:"
-  err "    - docker daemon not running          (run: docker info)"
-  err "    - port 6443/30080/30443 already used (run: lsof -i :6443)"
-  err "    - stale kind state                   (re-run; FORCE_DESTROY=1 to skip prompt)"
-  die "aborting bootstrap"
-}
-
-# ── Generic subscript wrapper ────────────────────────────────────────────
-# Same idea as _run_kind_helper but for any helper script (kind-storage.sh,
-# kind-databases-ha.sh, etc). Captures combined output to /tmp/<tag>-$$.log
-# AND tees to terminal. _subscript_failure dumps the tail of the log into
-# the bootstrap error so failures are never silent.
-_SUBSCRIPT_LAST_LOG=""
-_run_subscript() {
-  local tag="$1"; shift
-  local logf="/tmp/${tag}-$$.log"
-  _SUBSCRIPT_LAST_LOG="$logf"
-  : > "$logf"
-  "$@" 2>&1 | tee -a "$logf"
-}
-
-_subscript_failure() {
-  local tag="$1"
-  local what="$2"
-  err "$what failed."
-  if [ -s "$_SUBSCRIPT_LAST_LOG" ]; then
-    err "  ── tail of $_SUBSCRIPT_LAST_LOG (last 40 lines) ──"
-    tail -n 40 "$_SUBSCRIPT_LAST_LOG" | sed 's/^/    /' >&2
-    err "  ── end of subscript log ──"
-  fi
-  err "  full log: $_SUBSCRIPT_LAST_LOG"
-  err "  to skip the HA step (use chart's built-in single-pod versions): SKIP_HA=1 ./deploy/scripts/bootstrap-cluster.sh"
-  die "aborting bootstrap"
-}
-
-# ── Job wait with auto-diagnose + one retry ──────────────────────────────
-# `kubectl wait --for=condition=Complete` on a Job that's actually stuck
-# (init container CNAME issue, ImagePullBackOff, etc.) gives the user
-# `error: timed out waiting for the condition` and nothing else. This
-# helper:
-#   - waits up to <timeout> seconds
-#   - if Complete  → return 0
-#   - if Failed    → dump pod logs/events and die (real failure)
-#   - if timed out → dump diagnostics, delete Job + re-apply data-init
-#                    tier, wait again ONCE; then succeed/die
+# ── Parallel-job helpers ─────────────────────────────────────────────────
+# bs_parallel <name> <cmd...> runs the command in the background, with
+# stdout+stderr captured to /tmp/bs-<name>-<ppid>.log. bs_wait_all <label>
+# waits on every tracked PID and exits 1 if any failed, listing the log
+# paths so you can investigate.
 #
-# The data-init tier file (already rendered to $TIERS_DIR/data-init.yaml
-# in Step 6) is re-applied on retry — that's enough to recreate the Job
-# with whatever values the chart now has (image, hostnames, etc.).
-_wait_for_job() {
-  local job="$1"
-  local timeout="${2:-300}"
-  local ns="${AISPM_NAMESPACE:-aispm}"
-  local tier_file="${TIERS_DIR:-/tmp/aispm-tiers}/data-init.yaml"
-
-  # Stream the pod's combined output to a file in the background so we
-  # have the logs even if Kubernetes garbage-collects the pod the
-  # instant our wait fires. The streamer:
-  #   1. polls until a pod exists for this job (the Job controller may
-  #      take a few seconds to create one after kubectl apply)
-  #   2. tails ALL containers (init + main), with --prefix so each line
-  #      is annotated with [pod/<name> container/<name>]
-  #   3. keeps running across pod restarts via the label selector
-  local stream_log="/tmp/${job}-pod-stream-$$.log"
-  : > "$stream_log"
-  (
-    # Run forever (until killed by the parent). Whenever a Job pod
-    # exists, stream its log. Across pod restarts (activeDeadlineSeconds
-    # killed it, retry created a new one, etc.) the inner kubectl logs
-    # call returns and we just loop and restream the next one.
-    # `--all-containers --prefix --max-log-requests=10` tails every
-    # container of every pod matching the selector. -f keeps streaming.
-    while true; do
-      if kubectl -n "$ns" get pods -l "job-name=${job}" -o name 2>/dev/null | grep -q .; then
-        echo "── streaming pod logs for job/${job} at $(date +%H:%M:%S) ──"
-        kubectl -n "$ns" logs -f -l "job-name=${job}" \
-          --all-containers=true --prefix=true \
-          --max-log-requests=10 --tail=-1 2>&1 || true
-      fi
-      sleep 2
-    done
-  ) >>"$stream_log" 2>&1 &
-  local streamer_pid=$!
-
-  log "  waiting up to ${timeout}s for job/${job} to Complete..."
-  if kubectl -n "$ns" wait --for=condition=Complete --timeout="${timeout}s" "job/${job}" 2>/dev/null; then
-    log "    ✓ job/${job} Complete"
-    kill "$streamer_pid" 2>/dev/null || true
-    wait "$streamer_pid" 2>/dev/null || true
-    return 0
-  fi
-
-  # Wait returned non-zero. Two cases:
-  #   - Job's Failed condition is True       → real failure, no retry
-  #   - Job is still Active / pod stuck      → timeout, recoverable
-  local job_failed
-  job_failed="$(kubectl -n "$ns" get "job/${job}" \
-                  -o jsonpath='{.status.conditions[?(@.type=="Failed")].status}' 2>/dev/null || true)"
-
-  warn "    job/${job} did not Complete in ${timeout}s — gathering diagnostics"
-  _dump_job_diag "$ns" "$job"
-  # Always dump streamed logs — these survive pod GC.
-  if [ -s "$stream_log" ]; then
-    err "    ── streamed pod logs from $stream_log (last 80 lines) ──"
-    tail -n 80 "$stream_log" | sed 's/^/      /' >&2
-    err "    ── end of streamed logs (full file: $stream_log) ──"
-  else
-    err "    no pod logs were captured — pod may have crashed before any container started"
-  fi
-  kill "$streamer_pid" 2>/dev/null || true
-  wait "$streamer_pid" 2>/dev/null || true
-
-  # Retry-on-Failed rationale: Job pod templates are IMMUTABLE in
-  # Kubernetes. If the chart's YAML changed between runs (e.g. memory
-  # limit bump, env var add), the existing Job in the cluster STILL
-  # has the old pod template. Deleting and reapplying picks up the
-  # current spec. So we treat Failed identically to "timeout-while-
-  # active": delete + reapply tier + wait once more. If it Fails
-  # again, THAT is the real failure (no second retry).
-  if [ "$job_failed" = "True" ]; then
-    warn "    job/${job} is Failed — most likely the existing Job has stale pod"
-    warn "    template (Job spec is immutable). Will delete + reapply data-init"
-    warn "    tier so the latest chart values take effect, then retry once."
-  fi
-
-  # Recoverable — delete + reapply + wait once more.
-  warn "    deleting job/${job} and re-applying data-init tier for a clean retry"
-  kubectl -n "$ns" delete "job/${job}" --ignore-not-found --wait=true --timeout=60s 2>&1 \
-    | sed 's/^/      /' >&2 || true
-
-  if [ -s "$tier_file" ]; then
-    kubectl apply -f "$tier_file" 2>&1 | sed 's/^/      /' >&2 \
-      || warn "      re-apply of data-init tier returned non-zero"
-  else
-    warn "      no rendered data-init tier at $tier_file — retry may not recreate the Job"
-  fi
-
-  log "    retry: waiting up to ${timeout}s for job/${job}..."
-  if kubectl -n "$ns" wait --for=condition=Complete --timeout="${timeout}s" "job/${job}" 2>/dev/null; then
-    log "    ✓ job/${job} Complete (after one retry)"
-    kill "$streamer_pid" 2>/dev/null || true
-    wait "$streamer_pid" 2>/dev/null || true
-    return 0
-  fi
-
-  err "    job/${job} STILL did not Complete after retry — second-round diagnostics:"
-  _dump_job_diag "$ns" "$job"
-  if [ -s "$stream_log" ]; then
-    err "    ── streamed pod logs from $stream_log (last 100 lines) ──"
-    tail -n 100 "$stream_log" | sed 's/^/      /' >&2
-    err "    ── end of streamed logs (full file: $stream_log) ──"
-  fi
-  kill "$streamer_pid" 2>/dev/null || true
-  wait "$streamer_pid" 2>/dev/null || true
-  die "${job} Job failed after retry"
-}
-
-# Dump everything useful about a stuck Job: status, pod state, events,
-# init/main container logs. Indented so it nests inside the bootstrap's
-# log narrative cleanly.
-_dump_job_diag() {
-  local ns="$1"
-  local job="$2"
-  local prefix='      '
-  {
-    echo "── job/${job} status (${ns}) ──"
-    kubectl -n "$ns" get "job/${job}" -o wide 2>&1 || true
-    echo
-    echo "── recent events related to ${job} (kubelet retains these even after pod GC; OOMKilled shows here) ──"
-    kubectl -n "$ns" get events \
-      --field-selector="involvedObject.name=${job}" \
-      --sort-by=.lastTimestamp 2>/dev/null | tail -10 || true
-    echo "── recent events for any pod whose name starts with ${job}- ──"
-    kubectl -n "$ns" get events --sort-by=.lastTimestamp 2>/dev/null \
-      | awk -v j="${job}-" '$0 ~ ("pod/" j) || $0 ~ ("/" j) {print}' \
-      | tail -15 || true
-    echo
-    echo "── pod(s) for job/${job} ──"
-    kubectl -n "$ns" get pods -l "job-name=${job}" -o wide 2>&1 || true
-    echo
-    local pod
-    pod="$(kubectl -n "$ns" get pods -l "job-name=${job}" -o name 2>/dev/null | head -1)"
-    if [ -n "$pod" ]; then
-      echo "── ${pod} events (last 20) ──"
-      kubectl -n "$ns" describe "$pod" 2>/dev/null \
-        | awk '/^Events:/{flag=1} flag' \
-        | tail -25
-      echo
-      # Best-effort container logs — both init and main, both this run
-      # and any previous (terminated) instance via --previous.
-      for c in $(kubectl -n "$ns" get "$pod" \
-                   -o jsonpath='{range .spec.initContainers[*]}{.name}{" "}{end}{range .spec.containers[*]}{.name}{" "}{end}' 2>/dev/null); do
-        echo "── ${pod} container '$c' logs (last 30) ──"
-        kubectl -n "$ns" logs "$pod" -c "$c" --tail=30 2>&1 | head -35
-        echo "── ${pod} container '$c' logs (--previous, last 30) ──"
-        kubectl -n "$ns" logs "$pod" -c "$c" --previous --tail=30 2>&1 | head -35
-        echo
-      done
-    else
-      echo "(no pod currently exists for job/${job} — likely killed by activeDeadlineSeconds)"
-    fi
-  } 2>&1 | sed "s/^/${prefix}/" >&2
-}
-
-# ── Step 0: existing cluster check ───────────────────────────────────────
-# If a kind cluster named "$KIND_CLUSTER_NAME" (default: aispm) already
-# exists, ask whether to:
-#   - DESTROY it (clean slate — internally invokes the kind helpers
-#     to wipe cluster + registry + volumes + network, then recreate)
-#   - KEEP it (idempotent re-run against the existing cluster)
-#   - ABORT
+# Output is intentionally quiet on the happy path: one "✓ <name>" per
+# job. On failure, just the log path — `cat /tmp/bs-<name>-<pid>.log` to
+# see what went wrong. (User explicitly opted for this UX over streaming
+# / on-failure tail; tradeoff: shorter scrollback, less live visibility.)
 #
-# Honors:
-#   FORCE_DESTROY=1   destroy without prompting (CI clean-room)
-#   FORCE_KEEP=1      keep without prompting (idempotent re-deploy)
-#   non-TTY shell     defaults to KEEP (the safe-by-default behaviour)
-#
-# Skipped under --dry-run (no cluster mutation in that mode).
-if [ "$DRY_RUN" != "1" ]; then
-  section "Step 0: existing cluster check"
-  KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-aispm}"
-  if command -v kind >/dev/null 2>&1 \
-       && kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER_NAME"; then
-    log "kind cluster '$KIND_CLUSTER_NAME' already exists"
-
-    decision=""
-    if [ "${FORCE_DESTROY:-0}" = "1" ]; then
-      decision="destroy"
-      log "  FORCE_DESTROY=1 → destroying without prompt"
-    elif [ "${FORCE_KEEP:-0}" = "1" ]; then
-      decision="keep"
-      log "  FORCE_KEEP=1 → keeping without prompt"
-    elif [ -t 0 ]; then
-      # Interactive shell — prompt the user. Default (Enter) is keep,
-      # because re-running this script is supposed to be safe.
-      { set +x; } 2>/dev/null
-      printf '\n  Destroy and recreate the cluster from scratch? [y]es / [N]o (keep) / [a]bort: '
-      read -r ans || ans=""
-      [ "${QUIET:-0}" != "1" ] && set -x
-      case "${ans}" in
-        [Yy]|[Yy][Ee][Ss])  decision="destroy" ;;
-        [Aa]|[Aa][Bb]*)     die "aborted by user" ;;
-        *)                  decision="keep" ;;
-      esac
-    else
-      warn "  non-interactive shell (no TTY); defaulting to KEEP. "
-      warn "  Use FORCE_DESTROY=1 to force a clean rebuild from CI."
-      decision="keep"
-    fi
-
-    if [ "$decision" = "destroy" ]; then
-      log "  destroying cluster '$KIND_CLUSTER_NAME' (cluster + registry + volumes + kind network)"
-      if [ ! -f "$DEPLOY/scripts/kind-cluster.sh" ]; then
-        die "internal: deploy/scripts/kind-cluster.sh is missing — bootstrap can't manage the kind cluster lifecycle without it"
-      fi
-      _run_kind_helper clean || warn "  cleanup returned non-zero (continuing; will detect leftover state on recreate)"
-
-      log "  recreating cluster '$KIND_CLUSTER_NAME'"
-      _run_kind_helper init \
-        || _kind_helper_failure "cluster recreate"
-      log "  ✓ fresh cluster '$KIND_CLUSTER_NAME' is up"
-    else
-      log "  keeping existing cluster — bootstrap is idempotent and will pick up where it left off"
-    fi
-  else
-    # No kind cluster of that name. If kind is installed, offer to
-    # create one (otherwise the cluster reachability check below will
-    # die anyway, so it's better to surface the choice now).
-    if command -v kind >/dev/null 2>&1; then
-      log "no kind cluster '$KIND_CLUSTER_NAME' exists"
-      decision=""
-      if [ "${FORCE_CREATE:-0}" = "1" ]; then
-        decision="create"
-        log "  FORCE_CREATE=1 → creating without prompt"
-      elif [ "${FORCE_KEEP:-0}" = "1" ]; then
-        # User said "keep" but there's nothing to keep. Treat as "skip".
-        decision="skip"
-      elif [ -t 0 ]; then
-        { set +x; } 2>/dev/null
-        printf '\n  Create the kind cluster now? [Y]es / [n]o (skip — point kubectl at another cluster) / [a]bort: '
-        read -r ans || ans=""
-        [ "${QUIET:-0}" != "1" ] && set -x
-        case "${ans}" in
-          [Aa]|[Aa][Bb]*)     die "aborted by user" ;;
-          [Nn]|[Nn][Oo])      decision="skip" ;;
-          *)                  decision="create" ;;   # default = create
-        esac
-      else
-        warn "  non-interactive shell; assuming kubectl is pointed at an"
-        warn "  existing non-kind cluster. Use FORCE_CREATE=1 to create one."
-        decision="skip"
-      fi
-
-      if [ "$decision" = "create" ]; then
-        log "  creating cluster '$KIND_CLUSTER_NAME'"
-        _run_kind_helper init \
-          || _kind_helper_failure "cluster create"
-        log "  ✓ cluster '$KIND_CLUSTER_NAME' is up"
-      else
-        log "  skipping cluster create — will use whatever cluster kubectl points at"
-      fi
-    else
-      log "kind is not installed — bootstrap will use whatever cluster kubectl"
-      log "  is currently pointed at. To deploy on kind, install it first:"
-      log "    macOS: brew install kind"
-      log "    linux: https://kind.sigs.k8s.io/docs/user/quick-start/#installation"
-    fi
-  fi
-fi
-
-# ── Cluster reachability ─────────────────────────────────────────────────
-# This script bootstraps a Kubernetes cluster. If kubectl can't reach one,
-# there's nothing to bootstrap. (--dry-run is exempt — it only renders.)
-if [ "$DRY_RUN" != "1" ]; then
-  if ! command -v kubectl >/dev/null 2>&1; then
-    err "kubectl not installed"
-    exit 1
-  fi
-  if ! kubectl cluster-info >/dev/null 2>&1; then
-    err "kubectl cannot reach a cluster"
-    err "  check: kubectl config current-context && kubectl cluster-info"
-    err "  for kind: re-run this script and answer 'yes' at the Step 0 prompt to create the cluster,"
-    err "          or set FORCE_CREATE=1 to skip the prompt"
-    exit 1
-  fi
-fi
-
-# ── Job helpers ──────────────────────────────────────────────────────────
-# bs_parallel <name> <cmd...> runs the command SYNCHRONOUSLY (the
-# function name is preserved for backward-compat with the ~30 callsites
-# in this script — see git log for the parallel→serial switch).
-# bs_wait_all <label> reports the cumulative result for the batch.
-#
-# Why serial: parallel rollouts during phased apply hammer the API
-# server + scheduler, especially on a kind cluster on a laptop where
-# one node holds all the load. Serial execution gives the cluster room
-# to breathe and pairs cleanly with verbose xtrace (output is now
-# linear and chronological instead of interleaved between concurrent
-# subprocesses). Total wall-time goes up, but failures are easier to
-# read and the cluster stays healthy.
-#
-# UX: each task streams its output live to the terminal AND to a
-# /tmp/bs-<name>-$$.log file you can `cat` after the run for triage.
-# Failures inside one task don't abort the batch — bs_wait_all
-# summarises and exits 1 if any task in the batch returned non-zero.
-#
-# State arrays are PARALLEL INDEXED (not associative) so this script
-# runs on macOS's stock bash 3.2 — `declare -A` was added in bash 4.0
-# and Apple froze its system bash before that release.
+# State is held in three PARALLEL INDEXED ARRAYS (not a single
+# associative array) so this script runs on macOS's stock bash 3.2 —
+# `declare -A` was added in bash 4.0 and Apple froze its system bash
+# before that release. Parallel indexed arrays work all the way back to
+# bash 2.0.
 _BS_NAMES=()
+_BS_PIDS=()
 _BS_LOGS=()
-_BS_RCS=()
 
 bs_parallel() {
   local name="$1"; shift
   local logf="/tmp/bs-${name}-$$.log"
-  log "▶ $name (serial)"
-  # `tee` so the user sees live output (pairs with verbose xtrace);
-  # also write to logf for after-the-fact `cat`. pipefail (set above)
-  # propagates the command's non-zero status through the tee pipeline.
-  local rc=0
-  ( "$@" ) 2>&1 | tee "$logf" || rc=$?
-  if [ "$rc" = "0" ]; then
-    log "  ✓ $name"
-  else
-    err "  ✗ $name returned $rc (full log: $logf)"
-  fi
+  ( "$@" ) >"$logf" 2>&1 &
   _BS_NAMES+=("$name")
+  _BS_PIDS+=("$!")
   _BS_LOGS+=("$logf")
-  _BS_RCS+=("$rc")
 }
 
 bs_wait_all() {
-  local label="${1:-tasks}"
+  local label="${1:-parallel jobs}"
   local fails=0
   local failed_names=()
   local i
+  # ${#_BS_NAMES[@]} works on bash 3.2; iterate by index.
   for i in $(seq 0 $(( ${#_BS_NAMES[@]} - 1 ))); do
     [ "${#_BS_NAMES[@]}" -eq 0 ] && break
     local name="${_BS_NAMES[$i]}"
+    local pid="${_BS_PIDS[$i]}"
     local logf="${_BS_LOGS[$i]}"
-    local rc="${_BS_RCS[$i]}"
-    if [ "$rc" != "0" ]; then
+    if wait "$pid"; then
+      log "  ✓ $name"
+    else
+      err "  ✗ $name FAILED — log: $logf"
       failed_names+=("$name")
       fails=$((fails + 1))
-      err "  ✗ $name (rc=$rc, log=$logf)"
     fi
   done
   # Reset the arrays for the next batch.
   _BS_NAMES=()
+  _BS_PIDS=()
   _BS_LOGS=()
-  _BS_RCS=()
   if [ "$fails" -gt 0 ]; then
     die "$fails of the $label failed: ${failed_names[*]}"
   fi
-  log "  ✓ $label: all tasks completed"
 }
 
 # ── Run summary (emitted on every exit path) ─────────────────────────────
@@ -936,13 +463,16 @@ if [ "$DRY_RUN" = "1" ]; then
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
+    --api-versions cilium.io/v1alpha1 \
+    --api-versions kyverno.io/v1 \
+    $( [ "${SKIP_FALCO:-0}" = "1" ] && echo "--set falco.enabled=false" ) \
     > "$RENDERED" \
     || { err "helm template failed"; exit 1; }
   log "    rendered $(wc -l <"$RENDERED" | tr -d ' ') lines"
 
   # `kubectl apply --dry-run=client` still needs the apiserver to recognize
-  # CRD-defined kinds (Istio AuthorizationPolicy, …) which the chart
-  # references. So:
+  # CRD-defined kinds (Istio AuthorizationPolicy, Kyverno ClusterPolicy, …)
+  # which the chart references. So:
   #   - No cluster reachable → helm lint + helm template are our validation
   #     surface. We additionally run a pure YAML parse to catch any yaml
   #     errors that `helm template` somehow let through.
@@ -1316,12 +846,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "namespaces" ]; then
     fi
   fi
 
-  # Whitelist of env vars to read from .env (or --secrets-from) and merge
-  # into platform-secrets. Add a key here whenever a new integration in
-  # services/spm_api/integrations_seed_data.py:ENV_EXPORT_MAP wants its
-  # credential auto-populated from .env on bootstrap (so operators don't
-  # have to re-enter it in the Integrations UI on every rebuild).
-  SECRET_KEYS="ANTHROPIC_API_KEY OPENAI_API_KEY TAVILY_API_KEY GROQ_API_KEY OLLAMA_BASE_URL GARAK_INTERNAL_SECRET SPM_INTERNAL_BOOTSTRAP_SECRET THREAT_HUNTING_AGENT_LLM_KEY SPM_DB_PASSWORD"
+  SECRET_KEYS="ANTHROPIC_API_KEY OPENAI_API_KEY OLLAMA_BASE_URL GARAK_INTERNAL_SECRET SPM_INTERNAL_BOOTSTRAP_SECRET"
   _secrets_src=""
   if [ -n "$SECRETS_FROM" ]; then
     if [ ! -f "$SECRETS_FROM" ]; then
@@ -1354,37 +879,26 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "namespaces" ]; then
     exit 1
   fi
 
-  # Extract the merge into a reusable function. We need to call it
-  # BOTH here (so secrets exist before chart apply does anything that
-  # might depend on them) AND again AFTER the infra tier applies (so
-  # the chart's empty-defaulted secret values from
-  # templates/secrets.yaml get re-overwritten with the real .env
-  # values — otherwise every kubectl apply during a re-bootstrap
-  # silently zeroes out TAVILY_API_KEY etc. and operators have to
-  # re-enter them in the Integrations UI).
-  _merge_env_into_platform_secrets() {
-    local _patch=""
-    local _src="${1:-${_secrets_src:-env}}"
-    for var in $SECRET_KEYS; do
-      val="${!var:-}"
-      [ -n "$val" ] || continue
-      enc="$(printf '%s' "$val" | base64 | tr -d '\n')"
-      _patch="${_patch}\"$var\":\"$enc\","
-    done
-    if [ -z "$_patch" ]; then
-      log "  no env secrets found via $_src — skipping platform-secrets merge"
-      log "    (set ANTHROPIC_API_KEY / TAVILY_API_KEY etc. in .env or --secrets-from)"
-      return 0
-    fi
-    _patch="${_patch%,}"
-    # Ensure secret exists (might not on first run before chart applied)
+  PATCH_DATA=""
+  for var in $SECRET_KEYS; do
+    val="${!var:-}"
+    [ -n "$val" ] || continue
+    enc="$(printf '%s' "$val" | base64 | tr -d '\n')"
+    PATCH_DATA="${PATCH_DATA}\"$var\":\"$enc\","
+  done
+  if [ -n "$PATCH_DATA" ]; then
+    PATCH_DATA="${PATCH_DATA%,}"
+    # Use create-or-merge: ensure secret exists first (chart may not have
+    # applied yet on first run).
     kubectl -n aispm create secret generic platform-secrets \
       --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1 || true
     kubectl -n aispm patch secret platform-secrets --type=merge \
-      -p "{\"data\":{$_patch}}" >/dev/null
-    log "  platform-secrets merged from $_src ($(echo "$_patch" | tr ',' '\n' | wc -l | tr -d ' ') keys)"
-  }
-  _merge_env_into_platform_secrets "$_secrets_src"
+      -p "{\"data\":{$PATCH_DATA}}" >/dev/null
+    log "  platform-secrets merged from $_secrets_src (LLM keys)"
+  else
+    log "  no LLM keys found via $_secrets_src — skipping platform-secrets merge"
+    log "    (set ANTHROPIC_API_KEY etc. in .env, the env, or via --secrets-from to persist)"
+  fi
 
   # PVCs (storage class, model upload PVC, flink checkpoints, etc.)
   # and NetworkPolicies live under deploy/k8s/. Helm chart references
@@ -1401,66 +915,38 @@ fi
 section "Step 3: build images"
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "images" ]; then
   # ── 3a. Dockerfile sanity check — invariant 5 ─────────────────────────
-  # Catch the regression where scripts/seed_all.py / posture_routes.py
-  # aren't COPY'd into the spm-api image. We've hit this twice this year:
+  # Catch the regression where seed_db.py / posture_routes.py aren't
+  # COPY'd into the spm-api image. We've hit this twice this year:
   # someone adds a new module under services/spm_api/, the chart
   # references it (db-seed Job, posture endpoints), and the Dockerfile
   # never gets the matching COPY line. Symptom is a 5-minute wait for
-  # db-seed to crash with "can't open file /app/seed_all.py" or for the
+  # db-seed to crash with "can't open file /app/seed_db.py" or for the
   # Posture page to 404 in the UI. Failing fast here saves real time.
   _spm_api_dockerfile="$REPO_ROOT/services/spm_api/Dockerfile"
   if [ -f "$_spm_api_dockerfile" ]; then
-    if ! grep -q "COPY scripts/seed_all.py" "$_spm_api_dockerfile"; then
-      die "spm-api Dockerfile is missing COPY for scripts/seed_all.py — db-seed Job will fail with 'can't open file /app/seed_all.py'. See invariant 5 in this script's header."
-    fi
-    if ! grep -q "COPY services/spm_api/posture_routes.py" "$_spm_api_dockerfile"; then
-      die "spm-api Dockerfile is missing COPY for posture_routes.py — Posture page will 404. See invariant 5 in this script's header."
-    fi
+    for required in seed_db.py posture_routes.py; do
+      if ! grep -q "COPY services/spm_api/$required" "$_spm_api_dockerfile"; then
+        die "spm-api Dockerfile is missing COPY for $required — db-seed Job / Posture page will fail. See invariant 5 in this script's header."
+      fi
+    done
   fi
 
   # chmod +x in case the repo lost the executable bit (e.g. fresh
   # clone on a Windows-friendly filesystem, or zip extraction).
   chmod +x "$DEPLOY/scripts/build-images.sh" 2>/dev/null || true
-  if [ ! -x "$DEPLOY/scripts/build-images.sh" ]; then
+  if [ -x "$DEPLOY/scripts/build-images.sh" ]; then
+    bash "$DEPLOY/scripts/build-images.sh" \
+      || die "image build returned non-zero — pods will fail ImagePullBackOff if images aren't loaded"
+  else
     die "build-images.sh not executable — skipping image build (the chart will fail to start without images)"
-  fi
-
-  # build-images.sh tags + pushes only when IMAGE_REGISTRY is set. The
-  # kind-side registry runs on localhost:5001 (kind-cluster.sh wires it
-  # into every node's containerd as a mirror, so kind pods can pull
-  # `localhost:5001/aispm-*:latest` from inside the cluster).
-  # Without the push, every platform pod hits ImagePullBackOff because
-  # the chart's image references resolve to that registry but the
-  # registry has nothing in it. Default IMAGE_REGISTRY here so the dev
-  # path works end-to-end without an extra command.
-  : "${IMAGE_REGISTRY:=localhost:5001}"
-  export IMAGE_REGISTRY
-  log "  building + pushing images to $IMAGE_REGISTRY"
-  bash "$DEPLOY/scripts/build-images.sh" \
-    || die "image build/push returned non-zero — pods will fail ImagePullBackOff if images aren't loaded"
-
-  # Sanity check: did the push actually land? (build-images.sh logs the
-  # registry but doesn't fail if push silently no-ops.) Hit /v2/_catalog
-  # and verify at least the spm-api image is present, since the db-seed
-  # Job and the platform tier all depend on it.
-  if command -v curl >/dev/null 2>&1; then
-    _catalog="$(curl -fsS --max-time 5 "http://${IMAGE_REGISTRY}/v2/_catalog" 2>/dev/null || true)"
-    if [ -z "$_catalog" ]; then
-      warn "  could not query ${IMAGE_REGISTRY}/v2/_catalog — registry may not be reachable; pods may ImagePullBackOff"
-    elif ! echo "$_catalog" | grep -q 'aispm-spm-api'; then
-      warn "  push may have failed: ${IMAGE_REGISTRY}/v2/_catalog has no 'aispm-spm-api' entry"
-      warn "  catalog response: $_catalog"
-    else
-      log "  ✓ images present in registry (catalog confirmed aispm-spm-api)"
-    fi
   fi
 fi
 
 # ── 3.5. kube-dns IPv4 only ──────────────────────────────────────────────
 # Some kind setups end up with a dual-stack kube-dns whose IPv6
 # ClusterIP isn't actually routable, which makes Go-based clients
-# (anything resolving via Go's net package) randomly fail with
-# "connection refused" on the IPv6 nameserver.  Force IPv4-only.
+# (falcoctl, anything resolving via Go's net package) randomly fail
+# with "connection refused" on the IPv6 nameserver.  Force IPv4-only.
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
   section "Step 3.5: kube-dns IPv4 SingleStack"
   CURRENT_FAMILIES=$(kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.ipFamilyPolicy}' 2>/dev/null || true)
@@ -1476,15 +962,10 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
 fi
 
 # ── 4. gVisor runtime ────────────────────────────────────────────────────
-# gVisor is the default RuntimeClass for user-uploaded agents (see
-# values.yaml::agentRuntime.runtimeClassName), so the install runs
-# unconditionally as part of bootstrap. Set SKIP_GVISOR=1 only on
-# environments where you've already provisioned an alternative runtime
-# (e.g. kata in prod) and want to skip the kind/containerd setup here.
 section "Step 4: gVisor runtime"
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "gvisor" ]; then
-  if [ "${SKIP_GVISOR:-0}" = "1" ]; then
-    log "  gVisor skipped (SKIP_GVISOR=1)"
+  if [ "${INSTALL_GVISOR:-0}" != "1" ]; then
+    log "  gVisor skipped (set INSTALL_GVISOR=1 to install)"
   else
     # kind nodes use containerd; install-gvisor.sh iterates them via
     # docker exec.  Falls back to in-cluster Job if not running on kind.
@@ -1519,10 +1000,10 @@ helm_install() {
 }
 
 # ── 5. Cluster-level addons ──────────────────────────────────────────────
-# Two-phase serial install (was parallel; switched to serial to reduce
-# load on the API server / kubelet during cold start):
+# Two-phase parallel install:
 #   Group A (independent, no inter-deps):
-#     cert-manager, local-path-provisioner, ingress-nginx
+#     cert-manager, local-path-provisioner, ingress-nginx,
+#     falco, tetragon, kyverno
 #   Step 5.3 (sequential, after Group A):
 #     Istio (base + istiod + ingressgateway via istioctl, NOT helm)
 #
@@ -1532,21 +1013,23 @@ helm_install() {
 # unrecoverable server-side apply conflicts on every rerun.  istioctl owns
 # all of istio now; no helm release for istio anymore.
 #
-# `helm repo` is NOT thread-safe; we always do `helm repo add` and
-# `helm repo update` sequentially up front. The actual installs are
-# also serial now (see bs_parallel header for rationale).
+# `helm repo` is NOT thread-safe — all `helm repo add` and `helm repo update`
+# happen sequentially up front before any parallel `helm upgrade --install`.
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
-  section "Step 5: cluster addons (serial)"
+  section "Step 5: cluster addons (parallel)"
 
   # ── 5.0  Repo setup (sequential — repos.yaml isn't thread-safe) ─────────
   log "  preparing helm repositories..."
   [ "${SKIP_CERT_MANAGER:-0}" != "1" ] && helm repo add jetstack       https://charts.jetstack.io                       >/dev/null 2>&1 || true
   [ "${SKIP_INGRESS:-0}"      != "1" ] && helm repo add ingress-nginx  https://kubernetes.github.io/ingress-nginx       >/dev/null 2>&1 || true
   # istio repo intentionally omitted — istioctl owns istio (Step 5.3).
+  helm repo add falcosecurity  https://falcosecurity.github.io/charts             >/dev/null 2>&1 || true
+  helm repo add cilium         https://helm.cilium.io                             >/dev/null 2>&1 || true
+  helm repo add kyverno        https://kyverno.github.io/kyverno                  >/dev/null 2>&1 || true
   helm repo update >/dev/null 2>&1 || die "  helm repo update failed"
 
-  # ── 5.1  Group A — independent installs (serial) ───────────────────────
-  log "  installing Group A addons one at a time..."
+  # ── 5.1  Group A — independent installs in parallel ────────────────────
+  log "  launching Group A (independent addons) in parallel..."
 
   # cert-manager
   if [ "${SKIP_CERT_MANAGER:-0}" != "1" ]; then
@@ -1568,7 +1051,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
       kubectl -n local-path-storage rollout status deploy/local-path-provisioner --timeout=120s
     "
   else
-    log "    local-path-provisioner already installed (skipping)"
+    log "    local-path-provisioner already installed (skipping parallel job)"
   fi
 
   # ingress-nginx
@@ -1582,9 +1065,103 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
         --wait --timeout=5m
   fi
 
-  # Istio is intentionally NOT in this group — see Step 5.3.
+  # Istio is intentionally NOT in this parallel group — see Step 5.3.
   # ISTIO_VER kept for legacy reference only (no helm install of istio).
   ISTIO_VER="${ISTIO_VERSION:-1.29.2}"
+
+  # falco + falcosidekick (always installed).
+  # Pin to chart 7.2.1 → falco 0.42.1.  The 4.x chart series was removed from
+  # the falcosecurity index (we tried 4.20.5 and got "no chart version
+  # found"); upstream renumbered the chart to 7.x while keeping the falco app
+  # at 0.42.x.  We avoid 8.0.x / falco 0.43.x because of an unrelated
+  # crashloop bug.
+  #
+  # The chart 7.2.1 has a partial-toggle bug around the bundled container
+  # plugin — we disable two related things together to avoid two distinct
+  # crashloops:
+  #   1. collectors.containerEngine.enabled=false → chart skips emitting
+  #      /etc/falco/config.d/falco.container_plugin.yaml.  Without this,
+  #      the container plugin is loaded via the configmap AND falco 0.42's
+  #      built-in support → "found another plugin with name container"
+  #      → aborts.
+  #   2. falco.load_plugins=[]  (passed via --set-json because helm's
+  #      --set can't represent an empty array) → chart still emits
+  #      `load_plugins: [container]` in falco.yaml even when the engine
+  #      flag above is false.  Without this, falco starts and tries to
+  #      load a plugin named `container` whose config block isn't there
+  #      → "Cannot load plugin 'container': plugin config not found".
+  # With both, falco starts cleanly using its built-in container support.
+  FALCO_CHART_VERSION="${FALCO_CHART_VERSION:-7.2.1}"
+  if [ "${SKIP_FALCO:-0}" = "1" ]; then
+    log "    falco SKIPPED (SKIP_FALCO=1) — chart 7.2.1 / falco 0.42.1 has an"
+    log "    upstream bug where modern_ebpf engine auto-loads the container plugin"
+    log "    and expects a config block we don't have. Tracked for follow-up."
+  else
+    # Falco 0.42.1's modern_ebpf engine auto-loads the `container` plugin
+    # internally (for syscall metadata enrichment) regardless of
+    # falco.load_plugins.  When the chart's collectors.containerEngine
+    # is disabled, plugins[] is empty → falco can't find the config block
+    # for the auto-loaded plugin → "Cannot load plugin 'container': plugin
+    # config not found for given name" → CrashLoopBackOff.
+    #
+    # The --set-json below gives falco a minimal plugin entry under that
+    # exact name with empty engines{}, which satisfies the auto-loader's
+    # config lookup without enabling any actual container metadata
+    # collection (which we don't need for dev — we get container info
+    # from k8s metadata anyway).
+    bs_parallel "falco" \
+      helm upgrade --install falco falcosecurity/falco \
+        -n falco --create-namespace \
+        --version "$FALCO_CHART_VERSION" \
+        --set driver.kind=modern_ebpf \
+        --set collectors.containerEngine.enabled=false \
+        --set-json 'falco.load_plugins=[]' \
+        --set-json 'falco.plugins=[{"name":"container","library_path":"libcontainer.so","init_config":{"hooks":["create"],"engines":{}}}]' \
+        --set falcosidekick.enabled=true \
+        --set falco.http_output.enabled=true \
+        --set falco.http_output.url=http://falco-falcosidekick:2801/ \
+        --set falcosidekick.config.kafka.hostport="kafka-broker.aispm.svc.cluster.local:9092" \
+        --set falcosidekick.config.kafka.topic="security.falco.events" \
+        --set falcoctl.artifact.install.enabled=false \
+        --set falcoctl.artifact.follow.enabled=false \
+        --wait --timeout=5m
+  fi
+
+  # tetragon (always installed by default).  SKIP_TETRAGON=1 bypass
+  # for environments where the kernel doesn't expose the required eBPF
+  # mounts (`mount --make-rshared /sys`).  Default behavior unchanged
+  # on real prod kernels.
+  if [ "${SKIP_TETRAGON:-0}" = "1" ]; then
+    log "    tetragon SKIPPED (SKIP_TETRAGON=1) — eBPF mount unavailable"
+  else
+    bs_parallel "tetragon" \
+      helm upgrade --install tetragon cilium/tetragon \
+        -n kube-system \
+        --set tetragon.enabled=true \
+        --set tetragon.bpf.autoMount.enabled=false \
+        --wait --timeout=5m
+  fi
+
+  # kyverno (always installed by default).  SKIP_KYVERNO=1 bypass for
+  # environments where kyverno's chart hooks misbehave — chart 3.3.7
+  # has lifecycle hooks (kyverno-scale-to-zero pre-delete,
+  # kyverno-clean-reports post-upgrade) that can hang when the helper
+  # images don't pull cleanly.  The actual kyverno controllers install
+  # fine; only the hooks misbehave.  Setting SKIP_KYVERNO=1 leaves any
+  # existing kyverno pods running.
+  if [ "${SKIP_KYVERNO:-0}" = "1" ]; then
+    log "    kyverno SKIPPED (SKIP_KYVERNO=1) — chart 3.3.7 lifecycle hooks"
+    log "    can hang on slow registries.  Existing kyverno pods stay running."
+  else
+    bs_parallel "kyverno" \
+      helm upgrade --install kyverno kyverno/kyverno \
+        -n kyverno --create-namespace --version 3.3.7 \
+        --set admissionController.replicas=1 \
+        --set backgroundController.replicas=1 \
+        --set cleanupController.replicas=1 \
+        --set reportsController.replicas=1 \
+        --wait --timeout=5m
+  fi
 
   bs_wait_all "Group A addons"
 
@@ -1671,53 +1248,6 @@ EOF
   log "  ✓ Istio installed (istiod + ingressgateway)"
 fi
 
-# ── 5.5. HA backing services (MinIO + CNPG Postgres + Redis Sentinel) ────
-# The default deploy uses values.dev-multinode.yaml as VALUES_EXTRA,
-# which points services at HA endpoints provisioned here:
-#
-#     spm-db-rw.aispm.svc.cluster.local      ← CNPG Postgres primary
-#     redis-master.aispm.svc.cluster.local   ← Redis Sentinel proxy
-#     s3://flink/...                         ← MinIO bucket for Flink state
-#
-# Both helper scripts are idempotent (re-running them is a no-op when
-# everything is already up). Output streams live and is also captured
-# to /tmp/<helper>-up-$$.log via _run_subscript so any failure tail is
-# right there in the bootstrap error message.
-#
-# Opt out with SKIP_HA=1 — that ALSO drops the multinode overlay
-# (handled near the helm template invocation in Step 6) so the chart
-# renders its built-in single-pod spm-db / redis StatefulSets. Use that
-# when you want the simpler dev cluster without HA backing services.
-if [ "$TARGET" = "all" ] || [ "$TARGET" = "ha" ]; then
-  if [ "${SKIP_HA:-0}" = "1" ]; then
-    section "Step 5.5: HA backing services — SKIPPED (SKIP_HA=1)"
-    log "  using chart-built-in single-pod spm-db + redis instead"
-    log "  dropping multinode overlay from helm template"
-    VALUES_EXTRA=""
-  else
-    section "Step 5.5: HA backing services (MinIO, CNPG Postgres, Redis Sentinel)"
-
-    if [ ! -f "$DEPLOY/scripts/kind-storage.sh" ] || [ ! -f "$DEPLOY/scripts/kind-databases-ha.sh" ]; then
-      die "internal: deploy/scripts/kind-{storage,databases-ha}.sh missing — needed for HA defaults; set SKIP_HA=1 to use the simpler single-pod stack"
-    fi
-
-    # 5.5a — MinIO (object storage; provides the S3 bucket Flink writes
-    # checkpoints / HA state to). Must run before kind-databases-ha.sh
-    # because some users layer further values that pin MinIO endpoints.
-    log "  installing MinIO + provisioning the 'flink' bucket"
-    _run_subscript "minio-up" bash "$DEPLOY/scripts/kind-storage.sh" up \
-      || _subscript_failure "minio-up" "MinIO install"
-
-    # 5.5b — CNPG Postgres + Redis Sentinel. Both are sequenced inside
-    # kind-databases-ha.sh's cmd_up; we just call it.
-    log "  installing CNPG Postgres + Redis Sentinel HA"
-    _run_subscript "databases-ha-up" bash "$DEPLOY/scripts/kind-databases-ha.sh" up \
-      || _subscript_failure "databases-ha-up" "HA databases install"
-
-    log "  ✓ HA backing services up — services will use spm-db-rw + redis-master"
-  fi
-fi
-
 # ── 6. Render + phased apply of the AISPM chart ──────────────────────────
 # We do `helm template | split-by-tier.py | kubectl apply` rather than a
 # single `kubectl apply` so we can gate each phase on the previous one
@@ -1748,6 +1278,9 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
+    --api-versions cilium.io/v1alpha1 \
+    --api-versions kyverno.io/v1 \
+    $( [ "${SKIP_FALCO:-0}" = "1" ] && echo "--set falco.enabled=false" ) \
     > "$RENDERED" \
     || die "helm template failed"
   log "    rendered $(wc -l <"$RENDERED" | tr -d ' ') lines"
@@ -1765,60 +1298,8 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       return 0
     fi
     log "    applying tier=$tier..."
-
-    local apply_log="/tmp/aispm-apply-${tier}-$$.log"
-    if kubectl apply -f "$file" >"$apply_log" 2>&1; then
-      return 0
-    fi
-
-    # ── Auto-recovery: stale immutable PVC ─────────────────────────────
-    # PVC spec is immutable on bound claims. If a previous run left a
-    # PVC with a different storageClass / size / access mode, the next
-    # kubectl apply rejects with:
-    #   The PersistentVolumeClaim "<name>" is invalid:
-    #   * spec: Forbidden: spec is immutable after creation
-    # PVCs in this chart are caches (model-download cache, kafka logs,
-    # flink state). Stale spec means the previous deploy is gone and
-    # the data isn't useful — safe to delete + recreate.
-    if grep -q 'PersistentVolumeClaim.*is invalid' "$apply_log" \
-         && grep -q 'spec is immutable' "$apply_log"; then
-      warn "    stale immutable PVC blocking apply — auto-recovering"
-      sed 's/^/      /' "$apply_log" >&2
-
-      local stale_pvcs
-      stale_pvcs="$(grep -oE 'PersistentVolumeClaim "[^"]+"' "$apply_log" \
-                    | awk -F'"' '{print $2}' | sort -u)"
-      if [ -z "$stale_pvcs" ]; then
-        err "    couldn't extract PVC names from $apply_log; manual recovery needed"
-        die "tier=$tier apply failed"
-      fi
-
-      local ns="${AISPM_NAMESPACE:-aispm}"
-      for pvc in $stale_pvcs; do
-        log "      deleting stale PVC $ns/$pvc"
-        # Annotate first so any controller (CSI external-provisioner,
-        # CNPG operator) doesn't retain it; then delete with wait so
-        # the next apply doesn't race the deletion.
-        kubectl -n "$ns" delete pvc "$pvc" --wait=true --timeout=60s 2>&1 \
-          | sed 's/^/        /' >&2 \
-          || warn "      pvc/$pvc deletion returned non-zero (re-apply may still succeed)"
-      done
-
-      log "    re-applying tier=$tier after PVC cleanup..."
-      if kubectl apply -f "$file" >"$apply_log" 2>&1; then
-        log "    ✓ tier=$tier applied after auto-recovery"
-        return 0
-      fi
-      err "tier=$tier STILL failing after PVC cleanup; tail of log:"
-      tail -n 40 "$apply_log" | sed 's/^/      /' >&2
-      die "tier=$tier apply failed (after auto-recovery attempt)"
-    fi
-
-    # Some other failure — surface the tail of kubectl's output so the
-    # user sees the actual error without scrolling through xtrace noise.
-    err "tier=$tier apply failed; tail of $apply_log:"
-    tail -n 40 "$apply_log" | sed 's/^/      /' >&2
-    die "tier=$tier apply failed (kubectl apply returned non-zero)"
+    kubectl apply -f "$file" >/dev/null \
+      || die "tier=$tier apply failed (kubectl apply returned non-zero)"
   }
 
   # ── Phase 1: infra ───────────────────────────────────────────────────
@@ -1827,24 +1308,6 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   # idempotent declarations that controllers reconcile lazily.
   log "  Phase 1: infra (config — no wait gate)"
   apply_tier infra
-
-  # Re-apply the .env → platform-secrets merge HERE, after the chart's
-  # secrets template has just been applied by `apply_tier infra`. The
-  # chart's templates/secrets.yaml renders TAVILY_API_KEY="" /
-  # ANTHROPIC_API_KEY="" / etc. (the chart-level safe defaults) and
-  # kubectl apply zeroes out whatever Step 2 patched in. By patching
-  # AGAIN now, the operator's .env values are the final state — so
-  # the spm-api lifespan's _auto_bootstrap_integrations actually sees
-  # them and writes integration_credentials rows. Without this re-merge,
-  # operators have to re-enter keys in the Integrations UI on every
-  # bootstrap.
-  if declare -f _merge_env_into_platform_secrets >/dev/null 2>&1; then
-    log "    re-merging .env keys into platform-secrets (chart apply may have zeroed them)"
-    _merge_env_into_platform_secrets ".env (post-chart)"
-    # Restart spm-api so its lifespan sees the newly-patched env and
-    # re-runs _auto_bootstrap_integrations against the latest values.
-    kubectl -n aispm rollout restart deploy/spm-api >/dev/null 2>&1 || true
-  fi
 
   # ── Phase 2: data plane ──────────────────────────────────────────────
   # kafka StatefulSet (the chart's own — spm-db moved to CNPG and redis
@@ -1926,22 +1389,12 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   # and the seeders are idempotent (db-seed checkfirst, orchestrator
   # topic-already-exists handler).
   log "  Phase 3: data-init (db-seed, startup-orchestrator)"
-  # ALWAYS delete + recreate the data-init Jobs. K8s Job pod templates
-  # are IMMUTABLE — kubectl apply on an existing Job silently keeps the
-  # old container spec (image, command, env, resources). When the chart
-  # YAML changes between bootstrap runs (memory bump, command tweak,
-  # new env var), apply alone NEVER updates a running Job. The only
-  # way to pick up the latest spec is delete + recreate. We do so
-  # unconditionally — the seeders are idempotent (db-seed checkfirst,
-  # orchestrator topic-already-exists handler) so a Complete Job's
-  # work isn't lost.
   for j in db-seed startup-orchestrator; do
-    log "    pre-cleaning job/$j (Job pod templates are immutable; force-recreating)"
-    kubectl -n aispm delete job "$j" --ignore-not-found --wait=true --timeout=60s >/dev/null 2>&1 || true
+    if kubectl -n aispm get job "$j" >/dev/null 2>&1; then
+      log "    pre-cleaning stale job/$j"
+      kubectl -n aispm delete job "$j" --ignore-not-found --wait=true >/dev/null
+    fi
   done
-  # Brief settle so the Job controller's GC of leftover pods finishes
-  # before apply recreates the Job and a new pod tries the same name.
-  sleep 2
   apply_tier data-init
   # ── Apply platform manifests EARLY — break the OPA dependency cycle ──
   # startup-orchestrator (data-init) blocks until opa.aispm:8181 responds
@@ -1954,22 +1407,18 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   log "  Phase 3.5: applying platform tier early so OPA comes up while"
   log "             startup-orchestrator is still retrying its OPA probe"
   apply_tier platform
-  # data-init Jobs use _wait_for_job which dumps full diagnostics
-  # (pod state + events + init/main container logs, both current and
-  # --previous) on timeout, then deletes + reapplies + retries ONCE
-  # before giving up. So a transient failure (image just-pushed,
-  # CoreDNS warming up, init-container probe race) self-heals; a
-  # genuine failure dies with the actual error in front of you.
-  log "    waiting for data-init Jobs to Complete (serial, with auto-recovery)..."
-  _wait_for_job db-seed 300
-  _wait_for_job startup-orchestrator 300
-  log "    ✓ data-init tier complete"
+  log "    waiting for data-init Jobs to Complete (parallel)..."
+  bs_parallel "db-seed" \
+    kubectl -n aispm wait --for=condition=Complete --timeout=300s job/db-seed
+  bs_parallel "startup-orchestrator" \
+    kubectl -n aispm wait --for=condition=Complete --timeout=300s job/startup-orchestrator
+  bs_wait_all "data-init tier"
 
   # ── Phase 4: platform rollout-status wait ────────────────────────────
   # Manifests were applied above (Phase 3.5). Here we just wait for the
   # 22 Deployments to finish rolling out — most are likely Ready already
   # by the time data-init Jobs Complete.
-  log "  Phase 4: platform (20 backend services)"
+  log "  Phase 4: platform (22 backend services)"
   # Apply frontend tier NOW so its rollout overlaps with platform (UI
   # only needs platform Services) AND so a later Flink failure can't
   # skip it. Originally lived at Phase 7 (after compute-init); but
@@ -1978,10 +1427,10 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   log "  Phase 4.5: applying frontend tier early (UI needs only platform)"
   apply_tier frontend
 
-  log "    waiting for platform tier rollouts (20 Deployments, serial)..."
+  log "    waiting for platform tier rollouts (22 Deployments, parallel)..."
   for d in api spm-api opa guard-model agent agent-orchestrator executor \
-           freeze-controller garak-runner memory-service output-guard \
-           policy-decider policy-simulator processor retrieval-gateway \
+           freeze-controller garak-runner grafana memory-service output-guard \
+           policy-decider policy-simulator processor prometheus retrieval-gateway \
            spm-aggregator spm-llm-proxy spm-mcp threat-hunting-agent tool-parser; do
     bs_parallel "$d" kubectl -n aispm rollout status deploy/"$d" --timeout=5m
   done
@@ -2023,6 +1472,20 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     || die "ui rollout did not complete"
 
   log "  ✓ phased rollout complete (7 phases, all gates passed)"
+fi
+
+# ── 7. Kyverno cluster policies ──────────────────────────────────────────
+# Kyverno is always installed (Step 5), so the policies always apply.
+if [ "$TARGET" = "all" ] || [ "$TARGET" = "policies" ]; then
+  section "Step 7: Kyverno cluster policies"
+  POLICIES_FILE="$DEPLOY/k8s/kyverno/cluster-policies.yaml"
+  if [ -f "$POLICIES_FILE" ]; then
+    kubectl apply -f "$POLICIES_FILE" \
+      || die "policies apply returned non-zero"
+    log "  applied $(grep -c '^kind:' "$POLICIES_FILE") policies"
+  else
+    die "no Kyverno policy file at $POLICIES_FILE — expected to exist"
+  fi
 fi
 
 # ── 8. Final HTTP /health smoke test ────────────────────────────────────
@@ -2171,28 +1634,20 @@ if [ "$TARGET" = "all" ]; then
   done
 
   # WebSocket upgrade on /ws — the Simulator + Chat pages stream
-  # results over WS. If Istio RBAC blocks this the UI shows
-  # "Waiting for probe results" forever while the api side logs spam
+  # results over WS. If this returns 403 the UI shows "Waiting for
+  # probe results" forever while the api side logs spam
   # `ws_buffer_full — dropping oldest`. The api-allow path list must
   # contain `/ws*` (prefix), not just `/ws` + `/ws/*` exact pair.
-  #
-  # 403 alone is ambiguous: could be Istio RBAC (the failure mode we
-  # care about) OR the api app itself returning 403 to an
-  # unauthenticated WebSocket attempt (perfectly fine — the UI sends a
-  # JWT, the smoke test doesn't). We distinguish by sniffing the body:
-  # Istio RBAC returns the exact string "RBAC: access denied" with
-  # `server: envoy`. Anything else on 403 is the app.
-  ws_resp=$(kubectl -n aispm exec "$_PROBE_POD" -- \
-    curl -sS -i --max-time 5 \
+  got=$(kubectl -n aispm exec "$_PROBE_POD" -- \
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
     -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
     'http://api.aispm.svc.cluster.local:8080/ws' 2>/dev/null || echo "ERR")
-  got=$(echo "$ws_resp" | head -1 | awk '{print $2}')
-  if [ "$got" = "403" ] && echo "$ws_resp" | grep -qi 'RBAC: access denied'; then
-    warn "api /ws WebSocket upgrade RBAC-blocked by Istio — Simulator/Chat result streaming will fail. Ensure api-allow has '/ws*' (prefix) in its path list."
+  if [ "$got" = "403" ]; then
+    die "api /ws WebSocket upgrade returned 403 — Simulator/Chat result streaming will fail. Ensure api-allow has '/ws*' (prefix) in its path list."
   fi
-  log "    ✓ api /ws WebSocket → HTTP $got (not RBAC-blocked; app-level auth may still apply)"
+  log "    ✓ api /ws WebSocket → HTTP $got (upgrade not RBAC-blocked)"
 
   # ── 8e. Guard / Simulator coverage probes (invariants 16, 17) ────
   # The Simulator is only meaningful if the guard chain actually
@@ -2241,109 +1696,29 @@ if [ "$TARGET" = "all" ]; then
 
   # ── 8d. TLS cert chain (invariant 13) ─────────────────────────────
   # Browsers refuse WSS connections to selfsigned certs even after
-  # the user clicks through HTTPS warnings — there's no click-through
-  # for the WSS handshake. Dev needs mkcert (root CA added to OS
-  # keychain by `mkcert -install`) so Safari/Chrome trust the cert.
-  #
-  # The full chain that makes WSS work:
-  #   1. ingress.certManager=false in values.dev.yaml (defers to mkcert)
-  #   2. Step 2 above mints aispm.local{.crt,.key} via mkcert and
-  #      upserts istio-system/aispm-tls.
-  #   3. The chart's aispm-tls-certificate.yaml template MUST be
-  #      gated on .Values.ingress.certManager — otherwise cert-manager
-  #      sees the resulting Certificate and overwrites our Secret with
-  #      a selfsigned cert (issuer O=aispm-dev). Guard added May 2026.
-  #   4. istio-ingressgateway must be restarted to load the new cert
-  #      from SDS — envoy holds the cert in memory until told otherwise.
-  #
-  # Past failure mode (May 2026): bootstrap completed cleanly, all
-  # smoke tests passed, but Safari kept rejecting the WSS handshake
-  # because the gateway was serving the chart's cert-manager
-  # selfsigned cert (O=aispm-dev). The chart's Certificate resource
-  # was un-guarded; cert-manager won the race against the mkcert
-  # Secret upsert. Took 3 hours to find. Do not let this regress.
-  #
-  # This block now ACTIVELY REPAIRS the chain (was passive warn-only):
-  #   a. delete any cert-manager Certificate the chart left behind
-  #      (insurance against template regression)
-  #   b. re-upsert the mkcert Secret if our keys/aispm-tls.{crt,key}
-  #      are present (idempotent, last-writer-wins)
-  #   c. bounce istio-ingressgateway so envoy picks up the new cert
-  #   d. verify the WIRE is serving mkcert (not just the Secret)
-  cm_enabled=$(yq -r '.ingress.certManager' "$VALUES_FILE" 2>/dev/null || echo "true")
-  if [ "$cm_enabled" = "false" ]; then
-    # (a) Nuke any stale cert-manager Certificate that would
-    # overwrite our mkcert Secret on the next reconcile.
-    for ns in istio-system aispm; do
-      if kubectl -n "$ns" get certificate aispm-tls >/dev/null 2>&1; then
-        log "    deleting stale cert-manager Certificate $ns/aispm-tls (would overwrite mkcert)"
-        kubectl -n "$ns" delete certificate aispm-tls --ignore-not-found >/dev/null
-        kubectl -n "$ns" delete certificaterequest \
-          -l cert-manager.io/certificate-name=aispm-tls --ignore-not-found >/dev/null 2>&1 || true
-      fi
-    done
-
-    # (b) Re-upsert the mkcert Secret. The Step 2 upsert may have
-    # been overwritten by cert-manager mid-bootstrap; re-applying
-    # here is the last write before we restart the gateway, so it's
-    # the cert envoy actually loads.
-    _certdir="$REPO_ROOT/keys"
-    _crt="$_certdir/aispm-tls.crt"
-    _key="$_certdir/aispm-tls.key"
-    if [ -f "$_crt" ] && [ -f "$_key" ]; then
-      for ns in istio-system aispm; do
-        kubectl -n "$ns" create secret tls aispm-tls \
-          --cert="$_crt" --key="$_key" \
-          --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-      done
-      log "    aispm-tls re-upserted from $_crt (post-chart, pre-gateway-restart)"
-
-      # (c) Bounce istio-ingressgateway so envoy reloads. SDS would
-      # eventually push the new cert without this, but the timing is
-      # not deterministic on a fresh cluster — an explicit restart
-      # is ~5s and removes the race entirely.
-      if kubectl -n istio-system get deploy istio-ingressgateway >/dev/null 2>&1; then
-        log "    bouncing istio-ingressgateway to reload aispm-tls..."
-        kubectl -n istio-system rollout restart deploy/istio-ingressgateway >/dev/null
-        kubectl -n istio-system rollout status deploy/istio-ingressgateway --timeout=120s >/dev/null \
-          || warn "    istio-ingressgateway rollout did not complete in 120s — gateway may still be serving the old cert"
-      fi
-    else
-      warn "    mkcert keys not found at $_crt — Step 2 mkcert step did not run (mkcert not installed?). WSS connections will fail in browsers."
+  # the user clicks through HTTPS warnings. Dev uses mkcert (root CA
+  # added to OS keychain by `mkcert -install`); the istio-system/
+  # aispm-tls secret should be populated with that cert, NOT with
+  # cert-manager's selfsigned one. We don't enforce mkcert here
+  # (could be a fresh laptop without it), but we do warn loudly if
+  # the gateway is serving a cert-manager selfsigned cert AND
+  # certManager is disabled — that's the exact failure mode where
+  # the secret never got populated and WSS will fail.
+  if kubectl -n istio-system get certificate aispm-tls >/dev/null 2>&1; then
+    cm_enabled=$(yq -r '.ingress.certManager' "$VALUES_FILE" 2>/dev/null || echo "true")
+    if [ "$cm_enabled" = "false" ]; then
+      warn "    cert-manager Certificate aispm-tls exists in istio-system but values has certManager=false — cert-manager may overwrite your mkcert-issued secret. Run:"
+      warn "      kubectl -n istio-system delete certificate aispm-tls"
     fi
-
-    # (d) Verify the WIRE is serving mkcert. The Secret check from
-    # before was insufficient — envoy can keep an old cert in memory
-    # even after the Secret is updated. This check is the ground
-    # truth: it's exactly what Safari/Chrome see during the WSS
-    # handshake.
-    INGRESS_HOST_VAL=$(yq -r '.ingress.host' "$VALUES_FILE" 2>/dev/null || echo "aispm.local")
-    wire_issuer=$(openssl s_client -connect "${INGRESS_HOST_VAL}:443" \
-                    -servername "${INGRESS_HOST_VAL}" </dev/null 2>/dev/null \
-                  | openssl x509 -noout -issuer 2>/dev/null \
-                  | tr ',' '\n' | grep -i 'O *=' | head -1)
-    log "    aispm-tls issuer on wire: ${wire_issuer:-<unknown>}"
-    if echo "$wire_issuer" | grep -qi 'mkcert'; then
-      log "    ✓ gateway is serving the mkcert-issued cert — WSS will work in browsers"
-    elif echo "$wire_issuer" | grep -qi 'cert-manager\|selfsigned\|aispm-dev'; then
-      warn "    ✗ gateway is serving a NON-mkcert cert (issuer: ${wire_issuer:-?}) — WSS will FAIL in Safari/Chrome."
-      warn "      Most likely: the chart re-rendered aispm-tls-certificate.yaml without the certManager guard,"
-      warn "      or cert-manager raced us. Run as a fix:"
-      warn "        kubectl -n istio-system delete certificate aispm-tls"
-      warn "        kubectl -n istio-system create secret tls aispm-tls --cert=$_crt --key=$_key --dry-run=client -o yaml | kubectl apply -f -"
-      warn "        kubectl -n istio-system rollout restart deploy/istio-ingressgateway"
-    else
-      warn "    aispm-tls wire-issuer is unrecognized: ${wire_issuer:-<empty>} — manual verification recommended."
-    fi
-  else
-    # certManager=true (prod or dev-with-cm): just log what's on the
-    # wire so failure modes are visible in the bootstrap log.
-    if kubectl -n istio-system get secret aispm-tls >/dev/null 2>&1; then
-      issuer_org=$(kubectl -n istio-system get secret aispm-tls -o jsonpath='{.data.tls\.crt}' \
-                   | base64 -d 2>/dev/null \
-                   | openssl x509 -noout -issuer 2>/dev/null \
-                   | tr ',' '\n' | grep -i 'O *=' | head -1)
-      log "    aispm-tls issuer (certManager=true): ${issuer_org:-<unknown>}"
+  fi
+  if kubectl -n istio-system get secret aispm-tls >/dev/null 2>&1; then
+    issuer_org=$(kubectl -n istio-system get secret aispm-tls -o jsonpath='{.data.tls\.crt}' \
+                 | base64 -d 2>/dev/null \
+                 | openssl x509 -noout -issuer 2>/dev/null \
+                 | tr ',' '\n' | grep -i 'O *=' | head -1)
+    log "    aispm-tls issuer: ${issuer_org:-<unknown>}"
+    if echo "$issuer_org" | grep -qi 'cert-manager\|selfsigned'; then
+      warn "    aispm-tls is signed by cert-manager/selfsigned — WSS connections will fail in browsers. See invariant 13."
     fi
   fi
 
@@ -2387,8 +1762,9 @@ cat <<EOF
 Cluster bootstrap complete.
 
   ┌─────────────────────────────────────────────────────────┐
-  │  Chat            →  https://${INGRESS_HOST}
-  │  Admin panel     →  https://${INGRESS_HOST}/admin
+  │  Chat            →  http://${INGRESS_HOST}
+  │  Admin panel     →  http://${INGRESS_HOST}/admin
+  │  Grafana         →  http://${INGRESS_HOST}/grafana
   │  Flink UI        →  kubectl -n aispm port-forward svc/flink-jobmanager 8081:8081
   └─────────────────────────────────────────────────────────┘
 
@@ -2403,9 +1779,8 @@ Re-run this script to upgrade. Idempotent. Data in PVCs persists.
 
 Useful targeted runs:
   bash $0 chart                  — re-render and apply AISPM only
-  bash $0 addons                 — re-install cert-manager / ingress-nginx
-  bash $0 ha                     — re-run HA backing services only (MinIO, CNPG, Redis Sentinel)
+  bash $0 policies               — re-apply Kyverno policies only
+  bash $0 addons                 — re-install cert-manager / ingress-nginx / kyverno
   bash $0 --skip-preflight       — skip preflight checks (CI / known-good cluster)
-  SKIP_HA=1 bash $0              — use chart's built-in single-pod spm-db / redis instead of HA stack
-  SKIP_GVISOR=1 SKIP_RUNTIME_SECURITY=1 SKIP_HA=1 bash $0   — fastest minimal install
+  SKIP_GVISOR=1 SKIP_RUNTIME_SECURITY=1 bash $0   — fast minimal install
 EOF

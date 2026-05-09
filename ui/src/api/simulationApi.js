@@ -15,6 +15,8 @@
  *   default                — /api/v1  (Vite proxy maps /api/v1/* → orchestrator:8094)
  */
 
+import { getToken } from '../api.js'
+
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
 // Only use VITE_ORCHESTRATOR_URL when it is a relative path (starts with '/').
@@ -22,31 +24,6 @@ const BASE = import.meta.env.VITE_API_URL || '/api'
 // direct browser requests to the service port are blocked by CORS.
 const _rawOrch = import.meta.env.VITE_ORCHESTRATOR_URL || ''
 const ORCHESTRATOR_BASE = (_rawOrch && !_rawOrch.startsWith('http')) ? _rawOrch : `${BASE}/v1`
-
-// ── Token management ──────────────────────────────────────────────────────────
-// Mirrors the pattern in api.js — fetches a dev JWT from the platform gateway.
-
-let _token       = null
-let _tokenExpiry = 0
-
-async function getToken() {
-  const now = Date.now() / 1000
-  if (_token && _tokenExpiry > now + 60) { console.log('[SimAPI] getToken: cache hit'); return _token }
-  console.log('[SimAPI] getToken: fetching from', `${BASE}/dev-token`)
-  try {
-    const res = await fetch(`${BASE}/dev-token`)
-    console.log('[SimAPI] getToken: fetch returned status', res.status)
-    if (!res.ok) throw new Error('Token fetch failed')
-    const data = await res.json()
-    _token       = data.token
-    _tokenExpiry = now + (data.expires_in ?? 86400)
-    console.log('[SimAPI] getToken: token cached, expiry in', data.expires_in, 's')
-    return _token
-  } catch (e) {
-    console.error('[SimAPI] getToken: error', e.message)
-    return null   // callers send requests unauthenticated; orchestrator may reject
-  }
-}
 
 // ── createSession ─────────────────────────────────────────────────────────────
 

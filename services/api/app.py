@@ -49,7 +49,8 @@ from contextlib import asynccontextmanager
 
 import httpx
 import redis as redis_lib
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from typing import Dict, Optional
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -567,6 +568,30 @@ async def lifespan(app: FastAPI):
         _producer.close()
 
 
+def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
+    """Validate Keycloak JWT for protected routes."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing Bearer token")
+    token = authorization.removeprefix("Bearer ")
+    try:
+        import os as _os
+        from platform_shared.keycloak_auth import decode_token
+        return decode_token(
+            token,
+            audience=_os.getenv("JWT_AUDIENCE", "aispm-ui"),
+            issuer=_os.getenv("JWT_ISSUER", "http://keycloak.local:8180/realms/aispm"),
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+
+
+def _require_internal_secret_api(x_internal_secret: Optional[str] = Header(None)) -> None:
+    import os as _os
+    expected = _os.getenv("INTERNAL_SERVICE_SECRET", "")
+    if not expected or x_internal_secret != expected:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
 app = FastAPI(
     title="CPM API v3",
     description="Context Posture Management — Ingress Service",
@@ -574,11 +599,17 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+_cors_origins = [
+    o.strip()
+    for o in os.getenv("CORS_ORIGINS", "http://aispm.local,http://localhost:5173").split(",")
+    if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_methods=["GET", "POST"],
     allow_headers=["Authorization", "Content-Type"],
+    allow_credentials=False,
 )
 
 # WebSocket endpoint: /ws/sessions/{session_id}
@@ -727,7 +758,7 @@ async def health(request: Request):
 
 
 @app.get("/inventory", response_model=ServiceInventory)
-async def inventory():
+async def inventory(claims: Dict = Depends(verify_jwt)):
     return ServiceInventory(
         service="cpm-api",
         version="3.0.0",
@@ -1125,6 +1156,7 @@ class InternalProbeResponse(BaseModel):
 async def internal_probe(
     req: InternalProbeRequest,
     x_internal_token: str = Header(None, alias="X-Internal-Token"),
+    _: None = Depends(_require_internal_secret_api),
 ):
     """Garak red-team probe — full CPM pipeline, no JWT required."""
     _secret = get_credential_by_env("GARAK_INTERNAL_SECRET", default="") or ""
@@ -1873,7 +1905,7 @@ def _merge_session_summaries(
 
 
 @app.get("/sessions")
-async def list_sessions(request: Request):
+async def list_sessions(request: Request, claims: Dict = Depends(verify_jwt)):
     """
     Return a summary of every session eligible for Lineage replay. Unions the
     api service's hot in-memory log (bounded LRU) with the orchestrator's
@@ -1887,7 +1919,7 @@ async def list_sessions(request: Request):
 
 
 @app.get("/sessions/{session_id}/events")
-async def get_session_events(session_id: str, request: Request):
+async def get_session_events(session_id: str, request: Request, claims: Dict = Depends(verify_jwt)):
     """
     Return the full recorded event stream for *session_id* in WS-wire shape.
 
@@ -1993,36 +2025,3 @@ async def simulation_screen(
         correlation_id = result.correlation_id,
         signals        = result.signals,
     )
-
-
-@app.get("/dev-token")
-async def dev_token():
-    """Generate a 24-hour demo JWT for the UI. Uses the platform RS256 private key."""
-    try:
-        import jwt as pyjwt
-        key_path = os.getenv("JWT_PRIVATE_KEY_PATH", "/keys/private.pem")
-        issuer   = os.getenv("JWT_ISSUER", "cpm-platform")
-        with open(key_path) as f:
-            private_key = f.read()
-        now = int(time.time())
-        payload = {
-            "sub": "dany.shapiro",
-            "iss": issuer,
-            "iat": now,
-            "exp": now + 86400,
-            "tenant_id": "t1",
-            "email": "dany.shapiro@gmail.com",
-            "name": "Dany Shapiro",
-            "roles": ["admin", "spm:admin", "spm:auditor"],
-            "groups": [],
-            "scopes": [
-                "calendar:read", "calendar:write",
-                "gmail:read", "gmail:send",
-                "memory:read", "memory:write",
-                "file:read", "db:read",
-            ],
-        }
-        token = pyjwt.encode(payload, private_key, algorithm="RS256")
-        return {"token": token, "expires_in": 86400}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import os as _os
 import re
 import subprocess
 import sys
@@ -53,6 +54,40 @@ class ValidationError(Exception):
     exception (most don't — they just inspect the ValidationResult)."""
 
 
+# ─── Safe module loader ─────────────────────────────────────────────────────
+
+def validate_agent_module(path: str):
+    """Load an agent module safely — only paths inside AGENT_ALLOWLIST_DIR are accepted.
+
+    The allowlist directory is read from the ``AGENT_ALLOWLIST_DIR`` environment
+    variable (default: an ``agents/`` subdirectory next to this file).
+
+    Uses ``os.path.realpath`` so that symlinks and ``..`` traversal are both
+    resolved before comparison, preventing path-traversal bypasses.
+
+    Raises:
+        ValueError: if *path* resolves to a location outside the allowlist.
+    """
+    import importlib.util
+
+    allowlist = _os.path.realpath(
+        _os.environ.get(
+            "AGENT_ALLOWLIST_DIR",
+            _os.path.join(_os.path.dirname(__file__), "agents"),
+        )
+    )
+    real = _os.path.realpath(path)
+    if not (real.startswith(allowlist + _os.sep) or real == allowlist):
+        raise ValueError(
+            f"Agent path '{path}' is not inside allowlist '{allowlist}'"
+        )
+
+    spec = importlib.util.spec_from_file_location("_agent_under_test", real)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 # ─── Internal helpers ───────────────────────────────────────────────────────
 
 def _has_async_main(tree: ast.Module) -> bool:
@@ -67,13 +102,30 @@ def _has_async_main(tree: ast.Module) -> bool:
 # Subprocess script for the dry-import step. Written separately so the
 # string can be passed to ``python -c "..."`` without escaping issues.
 # Uses argv to receive the module path, avoiding f-string injection.
+# AGENT_ALLOWLIST_DIR env var is set by the caller to restrict loadable paths.
 _DRY_IMPORT_SCRIPT = r"""
-import importlib.util, sys, traceback
-path = sys.argv[1]
-spec = importlib.util.spec_from_file_location("agent_under_test", path)
-mod  = importlib.util.module_from_spec(spec)
-try:
+import importlib.util, os, sys, traceback
+
+def _validate_and_exec(path):
+    # Load a module only if its realpath is inside AGENT_ALLOWLIST_DIR.
+    allowlist = os.environ.get("AGENT_ALLOWLIST_DIR", "")
+    if allowlist:
+        allowlist_real = os.path.realpath(allowlist)
+        real = os.path.realpath(path)
+        if not (real.startswith(allowlist_real + os.sep) or real == allowlist_real):
+            raise ValueError(
+                "Agent path '{}' is not inside allowlist '{}'".format(path, allowlist_real)
+            )
+    else:
+        real = os.path.realpath(path)
+    spec = importlib.util.spec_from_file_location("agent_under_test", real)
+    mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
+    return mod
+
+path = sys.argv[1]
+try:
+    _validate_and_exec(path)
 except SyntaxError as e:
     print("SYNTAX_ERR: " + str(e))
     sys.exit(0)
@@ -126,10 +178,14 @@ def validate_agent_code(code: str, *,
             f = Path(tmp) / "agent.py"
             f.write_text(code)
             try:
+                # Pass AGENT_ALLOWLIST_DIR as the tempdir so the subprocess
+                # allowlist check matches the path we generated.
+                env = {**_os.environ, "AGENT_ALLOWLIST_DIR": tmp}
                 p = subprocess.run(
                     [sys.executable, "-c", _DRY_IMPORT_SCRIPT, str(f)],
                     capture_output=True, text=True,
                     timeout=dry_import_timeout_s,
+                    env=env,
                 )
             except subprocess.TimeoutExpired:
                 # Hung at import time — almost certainly a side-effecting

@@ -1,5 +1,5 @@
-fastapi>=0.121.0
-python-multipart==0.0.27
+fastapi==0.115.6
+python-multipart==0.0.17
 uvicorn[standard]==0.32.1
 sqlalchemy[asyncio]==2.0.36
 asyncpg==0.30.0
@@ -9,19 +9,20 @@ psycopg2-binary==2.9.9
 # runs the same command before its data-seeding pass.  Migrations live
 # at spm/alembic/versions/ — see spm/alembic.ini for the runtime config.
 alembic==1.14.0
-pyjwt[crypto]==2.12.0
+pyjwt[crypto]==2.10.1
 httpx==0.27.2
-requests==2.33.0
-weasyprint==68.0
+requests==2.32.3
+weasyprint==62.3
 prometheus-fastapi-instrumentator==7.0.0
 kafka-python-ng==2.2.3
-cryptography==46.0.7
+cryptography==43.0.3
 redis==5.2.1
 # K8s migration — agent runtime control plane now uses the kubernetes
 # Python client to spawn agent Pods instead of Docker containers.
 kubernetes==31.*
 # docker kept for back-compat import alias; not actively used in k8s mode.
 docker==7.1.0
+
 # Phase 4 — agent chat pipeline. POST /agents/{id}/chat produces to
 # the agent's chat.in topic and consumes the reply from chat.out
 # inside the SSE generator. kafka-python-ng above is the legacy sync

@@ -1,6 +1,6 @@
 """
-Tests for the spm-db seeders in scripts/seed_all.py
-====================================================
+Tests for services/spm_api/seed_db.py
+======================================
 
 Strategy
 --------
@@ -9,17 +9,14 @@ cannot be compiled by the SQLite dialect.  To keep tests hermetic and
 dependency-free we:
 
   1. Define SQLite-compatible stub models that mirror exactly the schema
-     that the seeders rely on.
+     that seed_db.py relies on.
   2. Inject them into sys.modules["spm.db.models"] BEFORE importing
-     seed_all so that the lazy ``from spm.db.models import …`` inside
+     seed_db so that the lazy ``from spm.db.models import …`` inside
      seed_models() and seed_posture_snapshots() resolves to our stubs.
   3. Create a fresh in-memory aiosqlite DB per test and pass the async
      session directly to the seed functions.
 
 No real Postgres instance is required.
-
-(File name preserved as test_seed_db.py for git history continuity even
-though seed_db.py is gone — these are still the "spm-db seeder" tests.)
 """
 from __future__ import annotations
 
@@ -147,7 +144,7 @@ class PostureSnapshot(_Base):
     )
 
 
-# ── 2. Inject stub module before importing seed_all ──────────────────────────
+# ── 2. Inject stub module before importing seed_db ────────────────────────────
 # seed_models() and seed_posture_snapshots() contain lazy imports:
 #   from spm.db.models import ModelRegistry, …
 # Injecting into sys.modules ensures those resolve to our SQLite-compatible
@@ -166,16 +163,12 @@ for _key in ("spm", "spm.db", "spm.db.models", "spm.db.session"):
     sys.modules.setdefault(_key, types.ModuleType(_key))
 sys.modules["spm.db.models"] = _stub_module
 
-# ── 3. Import the seed functions from the unified seeder ─────────────────────
-# scripts/seed_all.py is the canonical seed module; add the repo's scripts/
-# dir to sys.path so the bare `import seed_all` matches what the spm-api
-# image sees at runtime (Dockerfile flat-COPYs scripts/seed_all.py to /app/).
-_REPO_ROOT = Path(__file__).parents[3]   # repo root
-_SCRIPTS_DIR = _REPO_ROOT / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
+# ── 3. Import the seed functions ──────────────────────────────────────────────
+_SVC_ROOT = Path(__file__).parents[1]  # services/spm_api/
+if str(_SVC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SVC_ROOT))
 
-from seed_all import seed_models, seed_posture_snapshots  # noqa: E402
+from seed_db import seed_models, seed_posture_snapshots  # noqa: E402
 
 
 # ── 4. Fixtures ───────────────────────────────────────────────────────────────

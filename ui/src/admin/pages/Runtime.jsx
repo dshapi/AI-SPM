@@ -15,6 +15,7 @@ import { PageContainer } from '../../components/layout/PageContainer.jsx'
 import { PageHeader }    from '../../components/layout/PageHeader.jsx'
 import { Button }        from '../../components/ui/Button.jsx'
 import { Badge }         from '../../components/ui/Badge.jsx'
+import { getToken }                             from '../../api.js'
 import { fetchAllSessions, fetchSessionEvents } from '../../api/simulationApi.js'
 import { useSessionSocket } from '../../hooks/useSessionSocket.js'
 
@@ -620,15 +621,10 @@ function ControlPanel({ session }) {
       const _rawO            = import.meta.env.VITE_ORCHESTRATOR_URL || ''
       const orchestratorBase = (_rawO && !_rawO.startsWith('http')) ? _rawO : `${base}/v1`
 
-      // Fetch a dev token the same way simulationApi does
-      let token = null
-      try {
-        const r = await fetch(`${base}/dev-token`)
-        if (r.ok) token = (await r.json()).token
-      } catch { /* unauthenticated fallback */ }
+      const token = await getToken()
+      if (!token) throw new Error('Not authenticated')
 
-      const headers = { 'Content-Type': 'application/json' }
-      if (token) headers.Authorization = `Bearer ${token}`
+      const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }
 
       const res = await fetch(`${orchestratorBase}/cases`, {
         method:  'POST',

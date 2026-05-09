@@ -36,6 +36,27 @@ async def simulation_events_ws(websocket: WebSocket, session_id: str) -> None:
     Stream simulation events for the given session_id.
     Mirrors /ws/sessions/{session_id} using the same infrastructure.
     """
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    import os as _os
+    _token = websocket.query_params.get("token") or \
+             websocket.headers.get("authorization", "").removeprefix("Bearer ")
+    if not _token:
+        await websocket.accept()
+        await websocket.send_json({"error": "unauthorized"})
+        await websocket.close(code=4401)
+        return
+    try:
+        from platform_shared.keycloak_auth import decode_token
+        decode_token(_token,
+                     audience=_os.environ.get("JWT_AUDIENCE", "aispm-ui"),
+                     issuer=_os.environ.get("JWT_ISSUER",
+                                            "http://keycloak.local:8180/realms/aispm"))
+    except Exception:
+        await websocket.accept()
+        await websocket.send_json({"error": "unauthorized"})
+        await websocket.close(code=4401)
+        return
+
     manager = _session_ws._manager
     if manager is None:
         await websocket.close(code=1011, reason="WS layer not initialized")

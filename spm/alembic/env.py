@@ -32,13 +32,8 @@ from db.models import Base   # noqa: E402
 config = context.config
 
 # Set up Python logging from alembic.ini [loggers] section.
-# disable_existing_loggers=False so any logger created BEFORE alembic
-# ran (e.g. seed_all's `log` logger) keeps working. The default True
-# silently no-ops every pre-existing logger — which silenced seed_all's
-# error logging and turned alembic crashes into mystery exit-1s with
-# zero output. (Spent a long evening chasing this in May 2026.)
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name, disable_existing_loggers=False)
+    fileConfig(config.config_file_name)
 
 # ORM metadata — used by autogenerate
 target_metadata = Base.metadata

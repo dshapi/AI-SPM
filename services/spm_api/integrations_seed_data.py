@@ -30,7 +30,6 @@ Env-var → DB mapping (for the /integrations/env endpoint):
     OLLAMA_KEEP_ALIVE            → int-017.config.keep_alive
     GARAK_INTERNAL_SECRET        → int-018.credentials.shared_secret
     SPM_INTERNAL_BOOTSTRAP_SECRET→ int-018.credentials.internal_bootstrap_secret
-    SPM_DB_PASSWORD              → int-020.credentials.password
 
 SPM_INTERNAL_BOOTSTRAP_SECRET is co-located with GARAK_INTERNAL_SECRET on
 int-018 because both are "internal service-to-service" secrets: Garak uses
@@ -100,7 +99,6 @@ ENV_EXPORT_MAP: List[tuple] = [
     ("int-017", "config",     "keep_alive",                "OLLAMA_KEEP_ALIVE"),
     ("int-018", "credential", "shared_secret",             "GARAK_INTERNAL_SECRET"),
     ("int-018", "credential", "internal_bootstrap_secret", "SPM_INTERNAL_BOOTSTRAP_SECRET"),
-    ("int-020", "credential", "password",                  "SPM_DB_PASSWORD"),
 ]
 
 
@@ -947,14 +945,10 @@ def build_seed() -> List[Dict[str, Any]]:
             ],
             "workflows": {"playbooks": [], "alerts": [], "policies": [], "cases": []},
             "credentials": [
-                # Auto-populated from SPM_DB_PASSWORD on first bootstrap so the
-                # operator doesn't have to retype the password they already set
-                # in .env / Helm values. _upsert_integration only writes when
-                # the env var is non-empty AND won't clobber a value the
-                # operator later edits via Configure (it only overwrites if a
-                # NEW non-empty env value arrives).
-                {"type": "password", "name": "Database password",
-                 "env_var": "SPM_DB_PASSWORD"},
+                # Populated by operator in Configure — the local dev DB
+                # password is not seeded from env to avoid baking the
+                # compose default into rebuilt containers.
+                {"type": "password", "name": "Database password"},
             ],
         },
 

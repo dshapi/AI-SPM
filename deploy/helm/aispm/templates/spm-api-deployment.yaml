@@ -37,16 +37,8 @@ spec:
             - secretRef:
                 name: platform-secrets
           env:
-            # Hits CNPG primary directly via spmDb.externalName instead
-            # of the chart's `spm-db.<ns>.svc.cluster.local` ExternalName
-            # alias. The alias works most of the time but its CNAME-
-            # follow has been flaky for some asyncpg connections; one
-            # fewer DNS hop here removes a real failure mode. Pairs with
-            # the same change in templates/secrets.yaml so the value in
-            # platform-secrets and the per-container override agree.
-            # May 2026 incident.
             - name: SPM_DB_URL
-              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@{{ .Values.spmDb.externalName }}:5432/{{ .Values.spmDb.database }}"
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
             - name: FREEZE_CONTROLLER_URL
               value: "http://freeze-controller.{{ .Values.global.namespace }}.svc.cluster.local:8090"
             - name: CPM_API_URL
@@ -61,25 +53,6 @@ spec:
               value: {{ include "aispm.image" .Values.images.agentRuntime | quote }}
             - name: AGENT_RUNTIME_CLASS
               value: {{ .Values.agentRuntime.runtimeClassName | default "" | quote }}
-          # Explicit resources. spm-api was getting OOMKilled (Exit 137)
-          # roughly every 8 minutes on dev because no limits were set
-          # at the container level — the namespace LimitRange's default
-          # of 512Mi was being applied silently. seed_all data + the
-          # ORM session pool + uvicorn workers comfortably blow past
-          # 512Mi at peak. 2Gi gives sustainable headroom on dev; prod
-          # should pin its own value via .Values.spmApi.resources.
-          # May 2026 incident.
-          resources:
-            {{- if .Values.spmApi.resources }}
-            {{- toYaml .Values.spmApi.resources | nindent 12 }}
-            {{- else }}
-            requests:
-              cpu: "200m"
-              memory: "512Mi"
-            limits:
-              cpu: "2"
-              memory: "2Gi"
-            {{- end }}
           volumeMounts:
             - name: jwt-keys
               mountPath: /keys

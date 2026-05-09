@@ -2,8 +2,8 @@
 # ─────────────────────────────────────────────────────────────────────────
 # Override layer for the 3-node kind cluster.
 # Apply on top of values.dev.yaml so the dev defaults (PERMISSIVE mTLS,
-# tightened guard threshold, etc.) are inherited and only the
-# HA-relevant fields change.
+# tightened guard threshold, Tetragon enabled, etc.) are inherited and
+# only the HA-relevant fields change.
 #
 #   helm template aispm deploy/helm/aispm \
 #     -f deploy/helm/aispm/values.dev.yaml \
@@ -108,55 +108,42 @@ platformEnv:
 # by deploy/scripts/install-gvisor.sh which patches containerd on every
 # node; idempotent.  If you flipped this on without running that first, the
 # scheduler will reject the pod with "RuntimeClass gvisor not found".
-#
-# IMPORTANT macOS dev caveat: gVisor is set to "" (default runc) below
-# because kind on Docker Desktop runs Linuxkit kernel — runsc fails at
-# sandbox-init with "runsc did not terminate successfully" (it can't
-# write its log.json before crashing). install-gvisor.sh DOES register
-# the RuntimeClass and DOES install runsc into the kind nodes, but the
-# Linuxkit kernel doesn't expose what runsc needs. On a Linux dev host
-# or in real prod (values.prod.yaml uses kata-containers anyway), flip
-# this back to "gvisor". May 2026 incident.
 agentRuntime:
-  runtimeClassName: ""
+  runtimeClassName: gvisor
 
 # ── Per-image registry overrides (host Docker → kind nodes) ─────────────
 # kind nodes pull from the local registry on the host at localhost:5001
 # (5000 is often already in use; we standardise on 5001).
 # kind-cluster.sh init wires this up as a containerd mirror on every node.
-# Image names MUST match what deploy/scripts/build-images.sh produces.
-# That script tags images using short names (aispm-retrieval-gw, not
-# aispm-retrieval-gateway, etc). Until May 2026 this overlay used long
-# names and bootstrap left every pod in ImagePullBackOff. Keep these in
-# lockstep with build-images.sh.
 images:
-  api:               { repository: localhost:5001/aispm-api,                tag: latest }
-  guardModel:        { repository: localhost:5001/aispm-guard-model,        tag: latest }
-  garakRunner:       { repository: localhost:5001/aispm-garak-runner,       tag: latest }
-  retrievalGw:       { repository: localhost:5001/aispm-retrieval-gw,       tag: latest }
-  processor:         { repository: localhost:5001/aispm-processor,          tag: latest }
-  policyDecider:     { repository: localhost:5001/aispm-policy-decider,     tag: latest }
-  agent:             { repository: localhost:5001/aispm-agent,              tag: latest }
-  memoryService:     { repository: localhost:5001/aispm-memory,             tag: latest }
-  executor:          { repository: localhost:5001/aispm-executor,           tag: latest }
-  toolParser:        { repository: localhost:5001/aispm-tool-parser,        tag: latest }
-  outputGuard:       { repository: localhost:5001/aispm-output-guard,       tag: latest }
-  freezeCtrl:        { repository: localhost:5001/aispm-freeze-ctrl,        tag: latest }
-  policySimulator:   { repository: localhost:5001/aispm-policy-sim,         tag: latest }
-  spmApi:            { repository: localhost:5001/aispm-spm-api,            tag: latest }
-  spmMcp:            { repository: localhost:5001/aispm-spm-mcp,            tag: latest }
-  spmLlmProxy:       { repository: localhost:5001/aispm-spm-llm-proxy,      tag: latest }
-  spmAggregator:     { repository: localhost:5001/aispm-spm-aggregator,     tag: latest }
-  agentOrchestrator: { repository: localhost:5001/aispm-agent-orchestrator, tag: latest }
-  threatHunter:      { repository: localhost:5001/aispm-threat-hunter,      tag: latest }
-  ui:                { repository: localhost:5001/aispm-ui,                 tag: latest }
-  startupOrch:       { repository: localhost:5001/aispm-startup-orch,       tag: latest }
-  flinkJob:          { repository: localhost:5001/aispm-flink-pyjob,        tag: latest }
-  agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,      tag: latest }
+  api:               { repository: localhost:5001/aispm-api,                  tag: latest }
+  guardModel:        { repository: localhost:5001/aispm-guard-model,          tag: latest }
+  garakRunner:       { repository: localhost:5001/aispm-garak-runner,         tag: latest }
+  retrievalGw:       { repository: localhost:5001/aispm-retrieval-gateway,    tag: latest }
+  processor:         { repository: localhost:5001/aispm-processor,            tag: latest }
+  policyDecider:     { repository: localhost:5001/aispm-policy-decider,       tag: latest }
+  agent:             { repository: localhost:5001/aispm-agent,                tag: latest }
+  memoryService:     { repository: localhost:5001/aispm-memory-service,       tag: latest }
+  executor:          { repository: localhost:5001/aispm-executor,             tag: latest }
+  toolParser:        { repository: localhost:5001/aispm-tool-parser,          tag: latest }
+  outputGuard:       { repository: localhost:5001/aispm-output-guard,         tag: latest }
+  freezeCtrl:        { repository: localhost:5001/aispm-freeze-controller,    tag: latest }
+  policySimulator:   { repository: localhost:5001/aispm-policy-simulator,     tag: latest }
+  spmApi:            { repository: localhost:5001/aispm-spm-api,              tag: latest }
+  spmMcp:            { repository: localhost:5001/aispm-spm-mcp,              tag: latest }
+  spmLlmProxy:       { repository: localhost:5001/aispm-spm-llm-proxy,        tag: latest }
+  spmAggregator:     { repository: localhost:5001/aispm-spm-aggregator,       tag: latest }
+  agentOrchestrator: { repository: localhost:5001/aispm-agent-orchestrator,   tag: latest }
+  threatHunter:      { repository: localhost:5001/aispm-threat-hunting-agent, tag: latest }
+  ui:                { repository: localhost:5001/aispm-ui,                   tag: latest }
+  startupOrch:       { repository: localhost:5001/aispm-startup-orchestrator, tag: latest }
+  flinkJob:          { repository: localhost:5001/aispm-flink-pyjob,          tag: latest }
+  agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,        tag: latest }
 
-# Runtime security: Falco and Tetragon were both removed. There is no
-# inline syscall enforcement layer in the chart now — Istio AuthZ +
-# OPA + Kubernetes RBAC are the active guardrails.
+# ── Falco — disabled (chart-pinned 0.42.x has container-plugin schema
+#    bug; Tetragon already enforces runtime security policies).
+falco:
+  enabled: false
 
 # ── Flink — only the s3:// state-store URIs differ from values.yaml.
 # 2 JMs / 2 TMs are the HA-by-default in values.yaml — never override
