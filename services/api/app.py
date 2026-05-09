@@ -618,8 +618,11 @@ app.include_router(ws_router)
 # WebSocket simulation endpoint: /ws/simulation/{session_id}
 app.include_router(simulation_ws_router)
 
-# Simulation endpoints: /api/simulate/single, /api/simulate/garak
-app.include_router(simulation_router, prefix="/api")
+# Simulation endpoints: /simulate/single, /simulate/garak
+# Istio strips the /api/ prefix before forwarding to this service, so
+# the router is mounted without a prefix. Browser calls /api/simulate/*,
+# Istio rewrites to /simulate/*, FastAPI sees /simulate/*.
+app.include_router(simulation_router)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
