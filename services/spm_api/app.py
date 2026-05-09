@@ -40,7 +40,7 @@ from spm.db.models import (
     ComplianceEvidence, ModelRegistry,
     ModelStatus, ModelProvider, ModelRiskTier, ModelType, PolicyCoverage,
 )
-from spm.db.session import get_db, get_engine
+from spm.db.session import get_db, get_engine, set_app_user
 from spm.db.models import Base
 
 logging.basicConfig(
@@ -107,6 +107,15 @@ def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
     if "spm:admin" not in roles and "spm:auditor" not in roles:
         raise HTTPException(status_code=403, detail="spm:auditor or spm:admin role required")
     return claims
+
+
+def _require_internal_secret(x_internal_secret: Optional[str] = Header(None)) -> None:
+    """Guard for service-to-service internal routes."""
+    expected = os.getenv("INTERNAL_SERVICE_SECRET", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="INTERNAL_SERVICE_SECRET not configured")
+    if not x_internal_secret or x_internal_secret != expected:
+        raise HTTPException(status_code=403, detail="Forbidden: invalid internal secret")
 
 
 def _tenant_from_claims(claims: Dict, fallback: str = "global") -> str:
@@ -496,6 +505,7 @@ async def register_model(
     claims: Dict = Depends(require_admin),
 ) -> ModelResponse:
     """Register a new model. Returns 409 on (name, version, tenant) collision."""
+    await set_app_user(db, claims.get("sub", "unknown"))
     tenant_id = body.tenant_id or _tenant_from_claims(claims)
     # Initial risk is derived from alerts_count; ignore anything the caller
     # sent so there's one source of truth.
@@ -619,6 +629,7 @@ async def register_model_with_file(
     <service-dir>/models), sha256'd, and its metadata is embedded in
     the row's ai_sbom under the "artifact" key.  Returns 409 on duplicate.
     """
+    await set_app_user(db, claims.get("sub", "unknown"))
     effective_tenant = tenant_id or _tenant_from_claims(claims)
 
     # Parse optional ai_sbom JSON blob
@@ -704,6 +715,7 @@ async def transition_status(
     claims: Dict = Depends(require_admin),
 ) -> ModelResponse:
     """Transition model lifecycle status. Validates state machine."""
+    await set_app_user(db, claims.get("sub", "unknown"))
     model = await db.get(ModelRegistry, uuid.UUID(model_id))
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -739,6 +751,7 @@ async def transition_status(
 async def enforce_model(
     model_id: str,
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(_require_internal_secret),
 ) -> Dict:
     """Called by spm-aggregator when risk threshold is exceeded. Idempotent."""
     model = await db.get(ModelRegistry, uuid.UUID(model_id))

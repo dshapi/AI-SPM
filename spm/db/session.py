@@ -4,6 +4,7 @@ AI SPM — SQLAlchemy async engine and session factory.
 from __future__ import annotations
 import os
 from functools import lru_cache
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 # Prefer the explicit async URL injected by Helm; fall back to the sync URL
@@ -36,3 +37,14 @@ async def get_db() -> AsyncSession:
     factory = get_session_factory()
     async with factory() as session:
         yield session
+
+
+async def set_app_user(session, user_sub: str) -> None:
+    """
+    Set app.current_user in the Postgres session for audit/RLS.
+    Call immediately after acquiring a session in any write route.
+    """
+    await session.execute(
+        text("SELECT set_config('app.current_user', :sub, true)"),
+        {"sub": user_sub},
+    )
