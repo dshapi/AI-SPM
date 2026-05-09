@@ -1159,9 +1159,15 @@ class InternalProbeResponse(BaseModel):
 async def internal_probe(
     req: InternalProbeRequest,
     x_internal_token: str = Header(None, alias="X-Internal-Token"),
-    _: None = Depends(_require_internal_secret_api),
 ):
-    """Garak red-team probe — full CPM pipeline, no JWT required."""
+    """Garak red-team probe — full CPM pipeline, no JWT required.
+
+    Auth: GARAK_INTERNAL_SECRET shared between the garak-runner sidecar and
+    this service via the X-Internal-Token header.  This endpoint intentionally
+    does NOT use _require_internal_secret_api (which checks INTERNAL_SERVICE_SECRET)
+    because INTERNAL_SERVICE_SECRET is not propagated to the garak-runner in the
+    Helm chart — the dedicated GARAK_INTERNAL_SECRET is the sole auth mechanism here.
+    """
     _secret = get_credential_by_env("GARAK_INTERNAL_SECRET", default="") or ""
     if not _secret or x_internal_token != _secret:
         raise HTTPException(status_code=403, detail="Forbidden")
