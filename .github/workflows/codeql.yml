@@ -1,0 +1,66 @@
+# .github/workflows/codeql.yml
+#
+# CodeQL static analysis — finds security vulnerabilities in source code
+# (SQL injection, path traversal, command injection, unsafe deserialization,
+# hardcoded credentials, XSS, etc.).
+#
+# Runs on:
+#   • Every push to main / dev
+#   • Every PR targeting main
+#   • Weekly schedule (catches new CVE rules applied to old code)
+#
+# Languages scanned: python, javascript
+# Results appear in: Security → Code scanning alerts (GitHub UI)
+
+name: CodeQL
+
+"on":
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  schedule:
+    # 03:42 UTC every Monday — off-peak, avoids the thundering herd at :00
+    - cron: "42 3 * * 1"
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF results
+  actions: read            # required for private repos
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript]
+        # Add 'actions' here if you want workflow-file scanning too.
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # Initialise the CodeQL tools and create a blank database.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          # "security-extended" adds more queries on top of the default
+          # "security-and-quality" suite — catches more edge cases at the
+          # cost of a few extra minutes of analysis time.
+          queries: security-extended
+
+      # Auto-build works for interpreted languages (Python, JS) — no
+      # Makefile or manual compile step needed.
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+          # Upload results to the Security tab. SARIF files are also kept
+          # as artifacts so you can download and diff them locally.
+          upload: true
