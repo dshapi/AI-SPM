@@ -35,6 +35,7 @@
  */
 
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { getToken } from '../api.js'
 
 // ── WebSocket base URL ─────────────────────────────────────────────────────────
 // Converts the configured HTTP API base to a WS base.
@@ -115,7 +116,7 @@ export function useSessionSocket() {
 
   // ── Core connect ────────────────────────────────────────────────────────────
 
-  const _doConnect = useCallback((sessionId) => {
+  const _doConnect = useCallback(async (sessionId) => {
     // Tear down any previous socket FIRST — handlers detached so its later
     // onclose cannot interfere with this new connection.
     if (wsRef.current) {
@@ -126,7 +127,8 @@ export function useSessionSocket() {
 
     setConnectionStatus(attemptsRef.current > 0 ? 'reconnecting' : 'connecting')
 
-    const url = `${WS_BASE}/ws/sessions/${sessionId}`
+    const token = await getToken()
+    const url = `${WS_BASE}/ws/sessions/${sessionId}${token ? `?token=${encodeURIComponent(token)}` : ''}`
     let ws
     try {
       ws = new WebSocket(url)

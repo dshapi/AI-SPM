@@ -299,9 +299,20 @@ DEPLOY="$REPO_ROOT/deploy"
 HELM_CHART="$DEPLOY/helm/aispm"
 VALUES_FILE="${VALUES_FILE:-$HELM_CHART/values.dev.yaml}"
 # Optional extra overlay (e.g. values.dev-multinode.yaml). Applied LAST so
-# its values win. Useful for layering cluster-shape overrides on top of
-# values.dev.yaml without forking the whole file. Empty by default.
+# its values win.  Auto-set below when running against a kind cluster, since
+# the dev-multinode overlay contains the `localhost:5001/aispm-*` registry
+# prefixes on every image (without it kind nodes try to pull from Docker
+# Hub, which 401s with "pull access denied" — debugged May 2026).
 VALUES_EXTRA="${VALUES_EXTRA:-}"
+if [ -z "$VALUES_EXTRA" ] && [ -f "$HELM_CHART/values.dev-multinode.yaml" ]; then
+  _CTX_PEEK="$(kubectl config current-context 2>/dev/null || true)"
+  case "$_CTX_PEEK" in
+    kind-*)
+      VALUES_EXTRA="$HELM_CHART/values.dev-multinode.yaml"
+      echo "$(date +%H:%M:%S) [bootstrap] auto-detected kind context — VALUES_EXTRA=$VALUES_EXTRA"
+      ;;
+  esac
+fi
 SKIP_PREFLIGHT=0
 TARGET="all"
 SECRETS_FROM=""      # optional override path; default is $REPO_ROOT/.env
@@ -310,6 +321,14 @@ DRY_RUN=0            # set by --dry-run: lint + render only, no cluster mutation
 # Add entries here when a new platform integration becomes mandatory.
 REQUIRED_SECRETS_DEFAULT="ANTHROPIC_API_KEY"
 REQUIRED_SECRETS="${REQUIRED_SECRETS:-$REQUIRED_SECRETS_DEFAULT}"
+# ── Verbose mode ─────────────────────────────────────────────────────────
+# Streams every kubectl + helm stdout/stderr to the terminal as it
+# happens.  ON BY DEFAULT — every recent debug session has needed live
+# output to figure out what's actually breaking, and silent runs led to
+# "the script went silent" reports that wasted cycles.  Set
+# VERBOSE=0 (or pass --quiet) for the old quiet "→ name / ✓ name" UX.
+VERBOSE="${VERBOSE:-1}"
+
 _next_is_secrets_from=0
 for _arg in "$@"; do
   if [ "$_next_is_secrets_from" = "1" ]; then
@@ -322,24 +341,115 @@ for _arg in "$@"; do
     --dry-run|--validate) DRY_RUN=1 ;;
     --secrets-from)    _next_is_secrets_from=1 ;;
     --secrets-from=*)  SECRETS_FROM="${_arg#--secrets-from=}" ;;
+    -v|--verbose)      VERBOSE=1 ;;
+    -q|--quiet)        VERBOSE=0 ;;
     -*)                echo "[bootstrap] WARNING: unknown flag: $_arg" >&2 ;;
     *)                 TARGET="$_arg" ;;
   esac
 done
+if [ "$VERBOSE" = "1" ]; then
+  echo "$(date +%H:%M:%S) [bootstrap] verbose mode ON (default — pass --quiet / VERBOSE=0 to silence)"
+fi
 
 # ── Cluster reachability ─────────────────────────────────────────────────
 # This script bootstraps a Kubernetes cluster. If kubectl can't reach one,
-# there's nothing to bootstrap. (--dry-run is exempt — it only renders.)
+# the local-dev contract is: bring up a fresh kind cluster automatically
+# via deploy/scripts/kind-cluster.sh init, then continue.
+#
+# Opt out with NO_AUTO_CLUSTER=1 (or --no-auto-cluster) — useful when the
+# operator is targeting a remote cluster and a missing context means the
+# kubeconfig is wrong, not that they want kind spun up. (--dry-run is
+# also exempt; it only renders templates and never touches a cluster.)
+NO_AUTO_CLUSTER="${NO_AUTO_CLUSTER:-0}"
+for _arg in "$@"; do
+  case "$_arg" in
+    --no-auto-cluster) NO_AUTO_CLUSTER=1 ;;
+  esac
+done
+
 if [ "$DRY_RUN" != "1" ]; then
   if ! command -v kubectl >/dev/null 2>&1; then
     echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl not installed" >&2
     exit 1
   fi
+
+  # ── Existing-cluster prompt ────────────────────────────────────────────
+  # If a kind cluster named "aispm" already exists, ask the operator
+  # whether to destroy + recreate it or continue on top of the existing
+  # one. Continuing is the right choice almost always (idempotent helm +
+  # data in PVCs survive); destroy is the right choice when the cluster
+  # is in an unrecoverable state (kind nodes wedged, taints stuck,
+  # leftover Failed Deployments from a half-completed run).
+  #
+  # Skipped when:
+  #   - stdin isn't a TTY (CI / piped input) → default to continue
+  #   - no kind cluster named aispm exists → nothing to ask about
+  #   - kind isn't installed → nothing we can prompt about destroying
+  if command -v kind >/dev/null 2>&1 \
+       && kind get clusters 2>/dev/null | grep -qx aispm \
+       && [ -t 0 ]; then
+    echo
+    echo "  An existing kind cluster named 'aispm' was found."
+    echo
+    echo "    [c] continue with existing cluster   (default — idempotent rerun)"
+    echo "    [d] destroy and recreate it          (wipes all PVC data)"
+    echo "    [a] abort"
+    echo
+    printf "  choice [c/d/a]: "
+    read -r _bs_choice </dev/tty || _bs_choice="c"
+    case "${_bs_choice:-c}" in
+      d|D|destroy)
+        echo "$(date +%H:%M:%S) [bootstrap] destroying kind cluster 'aispm'..."
+        kind delete cluster --name aispm \
+          || { echo "[bootstrap] ERROR: kind delete cluster failed" >&2; exit 1; }
+        echo "$(date +%H:%M:%S) [bootstrap] cluster destroyed — auto-init will create a fresh one below"
+        ;;
+      a|A|abort)
+        echo "$(date +%H:%M:%S) [bootstrap] aborted by operator"
+        exit 0
+        ;;
+      *)
+        echo "$(date +%H:%M:%S) [bootstrap] continuing with existing cluster"
+        ;;
+    esac
+  fi
+
   if ! kubectl cluster-info >/dev/null 2>&1; then
-    echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl cannot reach a cluster" >&2
-    echo "$(date +%H:%M:%S) [bootstrap]   check: kubectl config current-context && kubectl cluster-info" >&2
-    echo "$(date +%H:%M:%S) [bootstrap]   for kind: 'deploy/scripts/kind-cluster.sh init' brings up a fresh 3-node cluster" >&2
-    exit 1
+    if [ "$NO_AUTO_CLUSTER" = "1" ]; then
+      echo "$(date +%H:%M:%S) [bootstrap] ERROR: kubectl cannot reach a cluster" >&2
+      echo "$(date +%H:%M:%S) [bootstrap]   check: kubectl config current-context && kubectl cluster-info" >&2
+      echo "$(date +%H:%M:%S) [bootstrap]   auto-init disabled by NO_AUTO_CLUSTER=1 / --no-auto-cluster" >&2
+      echo "$(date +%H:%M:%S) [bootstrap]   for kind: 'deploy/scripts/kind-cluster.sh init' brings up a fresh 3-node cluster" >&2
+      exit 1
+    fi
+
+    echo "$(date +%H:%M:%S) [bootstrap] kubectl cannot reach a cluster — auto-initializing kind cluster" >&2
+    echo "$(date +%H:%M:%S) [bootstrap]   (set NO_AUTO_CLUSTER=1 to skip this and fail instead)" >&2
+
+    KIND_SCRIPT="$SCRIPT_DIR/kind-cluster.sh"
+    if [ ! -x "$KIND_SCRIPT" ] && [ ! -f "$KIND_SCRIPT" ]; then
+      echo "$(date +%H:%M:%S) [bootstrap] ERROR: $KIND_SCRIPT not found — cannot auto-init" >&2
+      exit 1
+    fi
+    if ! command -v kind >/dev/null 2>&1; then
+      echo "$(date +%H:%M:%S) [bootstrap] ERROR: 'kind' not installed — install from https://kind.sigs.k8s.io/" >&2
+      echo "$(date +%H:%M:%S) [bootstrap]   or set NO_AUTO_CLUSTER=1 and point kubectl at an existing cluster" >&2
+      exit 1
+    fi
+
+    if ! bash "$KIND_SCRIPT" init; then
+      echo "$(date +%H:%M:%S) [bootstrap] ERROR: kind-cluster.sh init failed — see output above" >&2
+      exit 1
+    fi
+
+    # Re-check: kind init should leave kubectl pointed at the new context.
+    # If it still can't reach the apiserver something went wrong inside init.
+    if ! kubectl cluster-info >/dev/null 2>&1; then
+      echo "$(date +%H:%M:%S) [bootstrap] ERROR: kind cluster came up but kubectl still cannot reach it" >&2
+      echo "$(date +%H:%M:%S) [bootstrap]   check: kubectl config current-context && kubectl cluster-info" >&2
+      exit 1
+    fi
+    echo "$(date +%H:%M:%S) [bootstrap] kind cluster ready ($(kubectl config current-context 2>/dev/null)) — continuing" >&2
   fi
 fi
 
@@ -356,57 +466,78 @@ die() {
   exit 1
 }
 
-# ── Parallel-job helpers ─────────────────────────────────────────────────
-# bs_parallel <name> <cmd...> runs the command in the background, with
-# stdout+stderr captured to /tmp/bs-<name>-<ppid>.log. bs_wait_all <label>
-# waits on every tracked PID and exits 1 if any failed, listing the log
-# paths so you can investigate.
+# ── Job helpers (serial execution) ───────────────────────────────────────
+# bs_parallel is a misnomer at this point — kept the function name so
+# every call site keeps working without churn, but the implementation
+# is now SERIAL.  Reason: kind's apiserver + containerd image pulls
+# don't tolerate the parallel helm load (concurrent helm
+# upgrade --installs against an already-loaded apiserver lead to webhook
+# timeouts, leftover Failed Deployments, "Progress deadline exceeded"
+# fast-fails on subsequent runs).  Serial is slower but reliable.
 #
-# Output is intentionally quiet on the happy path: one "✓ <name>" per
-# job. On failure, just the log path — `cat /tmp/bs-<name>-<pid>.log` to
-# see what went wrong. (User explicitly opted for this UX over streaming
-# / on-failure tail; tradeoff: shorter scrollback, less live visibility.)
-#
-# State is held in three PARALLEL INDEXED ARRAYS (not a single
-# associative array) so this script runs on macOS's stock bash 3.2 —
-# `declare -A` was added in bash 4.0 and Apple froze its system bash
-# before that release. Parallel indexed arrays work all the way back to
-# bash 2.0.
+# Each command's stdout+stderr is captured to /tmp/bs-<name>-<pid>.log.
+# On success: one "✓ <name>" line.  On failure: failure recorded and
+# bs_wait_all dies at the end of the batch with the failed log paths.
+# bs_wait_all is now a synchronous "report and die if anything failed"
+# rather than an actual wait.
 _BS_NAMES=()
-_BS_PIDS=()
+_BS_RC=()
 _BS_LOGS=()
 
 bs_parallel() {
   local name="$1"; shift
   local logf="/tmp/bs-${name}-$$.log"
-  ( "$@" ) >"$logf" 2>&1 &
+  log "  → $name"
+  local rc
+  # `set -e` would otherwise abort the script the moment any of these
+  # commands returns non-zero, before we get a chance to record the
+  # failure and print the diagnostic tail.  Disable it just for the
+  # captured run and restore immediately after.
+  set +e
+  if [ "${VERBOSE:-0}" = "1" ]; then
+    # Verbose mode: stream output live AND tee to logfile so failures
+    # still have a file to point at.
+    ( "$@" ) 2>&1 | tee "$logf"
+    rc=${PIPESTATUS[0]}
+  else
+    ( "$@" ) >"$logf" 2>&1
+    rc=$?
+  fi
+  set -e
   _BS_NAMES+=("$name")
-  _BS_PIDS+=("$!")
+  _BS_RC+=("$rc")
   _BS_LOGS+=("$logf")
+  if [ "$rc" -eq 0 ]; then
+    log "  ✓ $name"
+  else
+    err "  ✗ $name FAILED (rc=$rc) — log: $logf"
+    # Always show the tail on failure even in non-verbose mode.  No more
+    # "the script went silent and exited" — operator gets the actual
+    # error inline.
+    if [ "${VERBOSE:-0}" != "1" ] && [ -s "$logf" ]; then
+      err "  ── last 30 lines of $logf ──"
+      tail -30 "$logf" >&2 || true
+      err "  ── end log tail ──"
+    fi
+  fi
 }
 
 bs_wait_all() {
-  local label="${1:-parallel jobs}"
+  local label="${1:-jobs}"
   local fails=0
   local failed_names=()
   local i
-  # ${#_BS_NAMES[@]} works on bash 3.2; iterate by index.
   for i in $(seq 0 $(( ${#_BS_NAMES[@]} - 1 ))); do
     [ "${#_BS_NAMES[@]}" -eq 0 ] && break
     local name="${_BS_NAMES[$i]}"
-    local pid="${_BS_PIDS[$i]}"
-    local logf="${_BS_LOGS[$i]}"
-    if wait "$pid"; then
-      log "  ✓ $name"
-    else
-      err "  ✗ $name FAILED — log: $logf"
+    local rc="${_BS_RC[$i]}"
+    if [ "$rc" -ne 0 ]; then
       failed_names+=("$name")
       fails=$((fails + 1))
     fi
   done
-  # Reset the arrays for the next batch.
   _BS_NAMES=()
-  _BS_PIDS=()
+  _BS_RC=()
   _BS_LOGS=()
   if [ "$fails" -gt 0 ]; then
     die "$fails of the $label failed: ${failed_names[*]}"
@@ -463,9 +594,8 @@ if [ "$DRY_RUN" = "1" ]; then
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
-    --api-versions cilium.io/v1alpha1 \
-    --api-versions kyverno.io/v1 \
-    $( [ "${SKIP_FALCO:-0}" = "1" ] && echo "--set falco.enabled=false" ) \
+    --set falco.enabled=false \
+    --set kyverno.enabled=false \
     > "$RENDERED" \
     || { err "helm template failed"; exit 1; }
   log "    rendered $(wc -l <"$RENDERED" | tr -d ' ') lines"
@@ -694,6 +824,80 @@ case "$NODE_RUNTIME" in
   containerd*) log "  ok — containerd is supported (kind nodes use containerd)";;
   *)           warn "  unrecognized runtime ($NODE_RUNTIME) — proceeding anyway";;
 esac
+
+# ── 1a. Auto-repair: control-plane NoSchedule taint ──────────────────────
+# kind HA mode (3 control-plane nodes, 0 workers) re-applies the
+# `node-role.kubernetes.io/control-plane:NoSchedule` taint by default.
+# kind-cluster.sh removes it on first init, but the taint can come back
+# after Docker Desktop restarts, kind node restarts, or any recreate.
+# Without this defensive untaint here, every Deployment in Step 5 sits
+# Pending forever and the parallel addons group times out at 5m with
+# "context deadline exceeded" on cert-manager / ingress-nginx / kyverno
+# / falcosidekick — debugged May 2026.  Idempotent — the `-` suffix is
+# a no-op if the taint is already gone, and `|| true` swallows the
+# "not found" message kubectl emits in that case.
+log "ensuring control-plane nodes are schedulable (untaint, idempotent)..."
+kubectl taint nodes --all \
+  node-role.kubernetes.io/control-plane:NoSchedule- >/dev/null 2>&1 || true
+if kubectl get nodes -o jsonpath='{.items[*].spec.taints}' 2>/dev/null \
+     | grep -q 'node-role.kubernetes.io/control-plane'; then
+  die "  control-plane taint could not be removed — workloads will Pending forever"
+else
+  log "  ✓ control-plane nodes schedulable"
+fi
+
+# ── 1b. Auto-install external data-tier prereqs ──────────────────────────
+# bootstrap-cluster.sh expects kind-storage.sh + kind-databases-ha.sh to
+# have already been run.  In practice operators forget — and the failure
+# mode is a confusing "spm-db CNPG cluster is not healthy" 5+ minutes
+# into the run.  Instead, detect missing prereqs HERE and run them now.
+# Both scripts are idempotent so re-running is safe.
+#
+# What we check:
+#   - CNPG operator + the spm-db Cluster CR exist  → kind-databases-ha.sh
+#   - MinIO namespace exists                       → kind-storage.sh
+#
+# Skipped when TARGET is anything other than "all" (targeted runs assume
+# the operator knows what they're doing) or DRY_RUN=1.
+if [ "$TARGET" = "all" ] && [ "$DRY_RUN" != "1" ]; then
+  _need_storage=0
+  _need_databases=0
+  if ! kubectl get ns minio >/dev/null 2>&1; then
+    _need_storage=1
+  fi
+  if ! kubectl get ns cnpg-system >/dev/null 2>&1 \
+       || ! kubectl -n aispm get cluster spm-db >/dev/null 2>&1; then
+    _need_databases=1
+  fi
+
+  if [ "$_need_storage" = "1" ]; then
+    _STORAGE_SCRIPT="$SCRIPT_DIR/kind-storage.sh"
+    if [ -f "$_STORAGE_SCRIPT" ]; then
+      log "auto-installing storage prereqs (kind-storage.sh up — Longhorn + MinIO)..."
+      bash "$_STORAGE_SCRIPT" up \
+        || die "  kind-storage.sh up failed — see output above"
+      log "  ✓ storage prereqs installed"
+    else
+      warn "  kind-storage.sh not found at $_STORAGE_SCRIPT — Flink HA may fail"
+    fi
+  fi
+
+  if [ "$_need_databases" = "1" ]; then
+    _DBS_SCRIPT="$SCRIPT_DIR/kind-databases-ha.sh"
+    if [ -f "$_DBS_SCRIPT" ]; then
+      log "auto-installing data-tier prereqs (kind-databases-ha.sh up — CNPG + Redis HA)..."
+      bash "$_DBS_SCRIPT" up \
+        || die "  kind-databases-ha.sh up failed — see output above"
+      log "  ✓ data-tier prereqs installed"
+    else
+      die "  kind-databases-ha.sh not found at $_DBS_SCRIPT — required for HA Postgres + Redis"
+    fi
+  fi
+
+  if [ "$_need_storage" = "0" ] && [ "$_need_databases" = "0" ]; then
+    log "  ✓ external prereqs already installed (MinIO + CNPG + Redis HA)"
+  fi
+fi
 
 # ── 2. Namespaces + RBAC + secrets ───────────────────────────────────────
 section "Step 2: namespaces, RBAC, jwt-keys"
@@ -1016,20 +1220,51 @@ helm_install() {
 # `helm repo` is NOT thread-safe — all `helm repo add` and `helm repo update`
 # happen sequentially up front before any parallel `helm upgrade --install`.
 if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
-  section "Step 5: cluster addons (parallel)"
+  section "Step 5: cluster addons (serial)"
 
-  # ── 5.0  Repo setup (sequential — repos.yaml isn't thread-safe) ─────────
+  # ── 5.0  Auto-recover leftover state from prior failed runs ─────────────
+  # 1. Remove any lingering falco/kyverno namespaces.  We no longer
+  #    install these (May 2026) but a half-installed prior run can leave
+  #    behind Failed Deployments + their namespaces; clean slate is
+  #    cheaper than reasoning about stale state.
+  for ns in falco kyverno tetragon; do
+    if kubectl get ns "$ns" >/dev/null 2>&1; then
+      log "  removing leftover namespace $ns (no longer installed)"
+      # Helm uninstall first so finalizers don't block ns delete.
+      helm uninstall -n "$ns" "$ns" >/dev/null 2>&1 || true
+      kubectl delete ns "$ns" --wait=false >/dev/null 2>&1 || true
+    fi
+  done
+
+  # 2. Clear cert-manager Deployments left in `status: Failed
+  #    (Progress deadline exceeded)` from a prior aborted run.  Helm's
+  #    --wait sees the existing Failed status immediately and fast-fails
+  #    the whole upgrade in <2s without ever reconciling.  A rollout
+  #    restart resets the condition and the next helm run can proceed.
+  if kubectl get ns cert-manager >/dev/null 2>&1; then
+    for d in cert-manager cert-manager-cainjector cert-manager-webhook; do
+      if kubectl -n cert-manager get deploy "$d" >/dev/null 2>&1; then
+        cond="$(kubectl -n cert-manager get deploy "$d" \
+                 -o jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}' 2>/dev/null || true)"
+        if [ "$cond" = "ProgressDeadlineExceeded" ]; then
+          log "  clearing failed Deployment cert-manager/$d (rollout restart)"
+          kubectl -n cert-manager rollout restart deploy/"$d" >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+  fi
+
+  # ── 5.0a  Repo setup (sequential — repos.yaml isn't thread-safe) ────────
   log "  preparing helm repositories..."
   [ "${SKIP_CERT_MANAGER:-0}" != "1" ] && helm repo add jetstack       https://charts.jetstack.io                       >/dev/null 2>&1 || true
   [ "${SKIP_INGRESS:-0}"      != "1" ] && helm repo add ingress-nginx  https://kubernetes.github.io/ingress-nginx       >/dev/null 2>&1 || true
   # istio repo intentionally omitted — istioctl owns istio (Step 5.3).
-  helm repo add falcosecurity  https://falcosecurity.github.io/charts             >/dev/null 2>&1 || true
-  helm repo add cilium         https://helm.cilium.io                             >/dev/null 2>&1 || true
-  helm repo add kyverno        https://kyverno.github.io/kyverno                  >/dev/null 2>&1 || true
+  # falco/kyverno/cilium repos intentionally omitted — those addons no
+  # longer installed (see Step 5.1 comment).
   helm repo update >/dev/null 2>&1 || die "  helm repo update failed"
 
-  # ── 5.1  Group A — independent installs in parallel ────────────────────
-  log "  launching Group A (independent addons) in parallel..."
+  # ── 5.1  Group A — independent installs (serial) ───────────────────────
+  log "  installing Group A addons (serial — kind doesn't tolerate parallel helm)..."
 
   # cert-manager
   if [ "${SKIP_CERT_MANAGER:-0}" != "1" ]; then
@@ -1069,99 +1304,12 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "addons" ]; then
   # ISTIO_VER kept for legacy reference only (no helm install of istio).
   ISTIO_VER="${ISTIO_VERSION:-1.29.2}"
 
-  # falco + falcosidekick (always installed).
-  # Pin to chart 7.2.1 → falco 0.42.1.  The 4.x chart series was removed from
-  # the falcosecurity index (we tried 4.20.5 and got "no chart version
-  # found"); upstream renumbered the chart to 7.x while keeping the falco app
-  # at 0.42.x.  We avoid 8.0.x / falco 0.43.x because of an unrelated
-  # crashloop bug.
-  #
-  # The chart 7.2.1 has a partial-toggle bug around the bundled container
-  # plugin — we disable two related things together to avoid two distinct
-  # crashloops:
-  #   1. collectors.containerEngine.enabled=false → chart skips emitting
-  #      /etc/falco/config.d/falco.container_plugin.yaml.  Without this,
-  #      the container plugin is loaded via the configmap AND falco 0.42's
-  #      built-in support → "found another plugin with name container"
-  #      → aborts.
-  #   2. falco.load_plugins=[]  (passed via --set-json because helm's
-  #      --set can't represent an empty array) → chart still emits
-  #      `load_plugins: [container]` in falco.yaml even when the engine
-  #      flag above is false.  Without this, falco starts and tries to
-  #      load a plugin named `container` whose config block isn't there
-  #      → "Cannot load plugin 'container': plugin config not found".
-  # With both, falco starts cleanly using its built-in container support.
-  FALCO_CHART_VERSION="${FALCO_CHART_VERSION:-7.2.1}"
-  if [ "${SKIP_FALCO:-0}" = "1" ]; then
-    log "    falco SKIPPED (SKIP_FALCO=1) — chart 7.2.1 / falco 0.42.1 has an"
-    log "    upstream bug where modern_ebpf engine auto-loads the container plugin"
-    log "    and expects a config block we don't have. Tracked for follow-up."
-  else
-    # Falco 0.42.1's modern_ebpf engine auto-loads the `container` plugin
-    # internally (for syscall metadata enrichment) regardless of
-    # falco.load_plugins.  When the chart's collectors.containerEngine
-    # is disabled, plugins[] is empty → falco can't find the config block
-    # for the auto-loaded plugin → "Cannot load plugin 'container': plugin
-    # config not found for given name" → CrashLoopBackOff.
-    #
-    # The --set-json below gives falco a minimal plugin entry under that
-    # exact name with empty engines{}, which satisfies the auto-loader's
-    # config lookup without enabling any actual container metadata
-    # collection (which we don't need for dev — we get container info
-    # from k8s metadata anyway).
-    bs_parallel "falco" \
-      helm upgrade --install falco falcosecurity/falco \
-        -n falco --create-namespace \
-        --version "$FALCO_CHART_VERSION" \
-        --set driver.kind=modern_ebpf \
-        --set collectors.containerEngine.enabled=false \
-        --set-json 'falco.load_plugins=[]' \
-        --set-json 'falco.plugins=[{"name":"container","library_path":"libcontainer.so","init_config":{"hooks":["create"],"engines":{}}}]' \
-        --set falcosidekick.enabled=true \
-        --set falco.http_output.enabled=true \
-        --set falco.http_output.url=http://falco-falcosidekick:2801/ \
-        --set falcosidekick.config.kafka.hostport="kafka-broker.aispm.svc.cluster.local:9092" \
-        --set falcosidekick.config.kafka.topic="security.falco.events" \
-        --set falcoctl.artifact.install.enabled=false \
-        --set falcoctl.artifact.follow.enabled=false \
-        --wait --timeout=5m
-  fi
-
-  # tetragon (always installed by default).  SKIP_TETRAGON=1 bypass
-  # for environments where the kernel doesn't expose the required eBPF
-  # mounts (`mount --make-rshared /sys`).  Default behavior unchanged
-  # on real prod kernels.
-  if [ "${SKIP_TETRAGON:-0}" = "1" ]; then
-    log "    tetragon SKIPPED (SKIP_TETRAGON=1) — eBPF mount unavailable"
-  else
-    bs_parallel "tetragon" \
-      helm upgrade --install tetragon cilium/tetragon \
-        -n kube-system \
-        --set tetragon.enabled=true \
-        --set tetragon.bpf.autoMount.enabled=false \
-        --wait --timeout=5m
-  fi
-
-  # kyverno (always installed by default).  SKIP_KYVERNO=1 bypass for
-  # environments where kyverno's chart hooks misbehave — chart 3.3.7
-  # has lifecycle hooks (kyverno-scale-to-zero pre-delete,
-  # kyverno-clean-reports post-upgrade) that can hang when the helper
-  # images don't pull cleanly.  The actual kyverno controllers install
-  # fine; only the hooks misbehave.  Setting SKIP_KYVERNO=1 leaves any
-  # existing kyverno pods running.
-  if [ "${SKIP_KYVERNO:-0}" = "1" ]; then
-    log "    kyverno SKIPPED (SKIP_KYVERNO=1) — chart 3.3.7 lifecycle hooks"
-    log "    can hang on slow registries.  Existing kyverno pods stay running."
-  else
-    bs_parallel "kyverno" \
-      helm upgrade --install kyverno kyverno/kyverno \
-        -n kyverno --create-namespace --version 3.3.7 \
-        --set admissionController.replicas=1 \
-        --set backgroundController.replicas=1 \
-        --set cleanupController.replicas=1 \
-        --set reportsController.replicas=1 \
-        --wait --timeout=5m
-  fi
+  # falco / kyverno / tetragon are intentionally NOT installed.
+  # Removed May 2026 — eBPF-based runtime security (falco, tetragon)
+  # doesn't work on Docker Desktop's Linuxkit kernel anyway, and we don't
+  # depend on kyverno admission policies in dev.  Anything left over from
+  # a prior install gets nuked at the top of Step 5 (see "Auto-recover
+  # leftover state" below).
 
   bs_wait_all "Group A addons"
 
@@ -1278,9 +1426,8 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
-    --api-versions cilium.io/v1alpha1 \
-    --api-versions kyverno.io/v1 \
-    $( [ "${SKIP_FALCO:-0}" = "1" ] && echo "--set falco.enabled=false" ) \
+    --set falco.enabled=false \
+    --set kyverno.enabled=false \
     > "$RENDERED" \
     || die "helm template failed"
   log "    rendered $(wc -l <"$RENDERED" | tr -d ' ') lines"
@@ -1298,8 +1445,76 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       return 0
     fi
     log "    applying tier=$tier..."
-    kubectl apply -f "$file" >/dev/null \
-      || die "tier=$tier apply failed (kubectl apply returned non-zero)"
+
+    # Capture stdout+stderr so we can pattern-match for auto-recovery.
+    # In verbose mode, also stream the captured output to the terminal
+    # immediately so the operator sees what's happening live.
+    #
+    # `set -e` would abort the whole script the instant kubectl fails,
+    # SKIPPING this entire error-handling block (autorecovery, diagnostic
+    # dump, die with a useful message) — operator just sees the
+    # BOOTSTRAP_SUMMARY trap and a silent failure.  Disable -e for the
+    # capture and restore after, so we get the chance to do our job.
+    local out rc
+    set +e
+    # Server-side apply with --force-conflicts ensures the field manager is
+    # always "helm" (matching what `helm upgrade` uses). This prevents the
+    # "conflict with kubectl-client-side-apply" errors that occur when mixing
+    # kubectl apply and helm upgrade across cluster runs.
+    out="$(kubectl apply --server-side --force-conflicts -f "$file" 2>&1)"
+    rc=$?
+    set -e
+    if [ "${VERBOSE:-0}" = "1" ] && [ -n "$out" ]; then
+      printf '%s\n' "$out"
+    fi
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+
+    # ── Auto-recover: PVCs are immutable on storageClass / size shrink.
+    # If the chart was upgraded to a smaller PVC or different
+    # storageClass (common when migrating local-path → standard, or
+    # 5Gi → 1Gi to free disk on dev), kubectl apply rejects with
+    # "spec is immutable after creation".  Identify the offending PVCs
+    # from the error output, delete them, and retry once.  Safe in dev;
+    # caller MUST audit before running in prod.
+    if printf '%s' "$out" | grep -q 'spec is immutable\|storage: Forbidden'; then
+      log "    detected immutable-PVC apply failure — attempting auto-recovery"
+      local pvcs
+      pvcs="$(printf '%s' "$out" \
+        | sed -nE 's/.*PersistentVolumeClaim "([^"]+)" is invalid.*/\1/p' \
+        | sort -u)"
+      if [ -z "$pvcs" ]; then
+        err "    couldn't parse PVC name from kubectl error — full output below"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed (immutable PVC, parse fallback)"
+      fi
+      for pvc in $pvcs; do
+        log "      deleting PVC aispm/$pvc (will be recreated by next apply)"
+        kubectl -n aispm delete pvc "$pvc" \
+          --ignore-not-found --wait=false >/dev/null 2>&1 || true
+      done
+      log "    retrying tier=$tier apply..."
+      set +e
+      out="$(kubectl apply --server-side --force-conflicts -f "$file" 2>&1)"
+      rc=$?
+      set -e
+      if [ "${VERBOSE:-0}" = "1" ] && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+      fi
+      if [ "$rc" -ne 0 ]; then
+        err "    kubectl apply error output:"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed after PVC auto-recovery"
+      fi
+      return 0
+    fi
+
+    # Anything else: ALWAYS print the captured kubectl output before die
+    # (regardless of verbose) so the failure mode is never silent.
+    err "    kubectl apply error output:"
+    printf '%s\n' "$out" >&2
+    die "tier=$tier apply failed (kubectl apply returned non-zero)"
   }
 
   # ── Phase 1: infra ───────────────────────────────────────────────────
@@ -1407,11 +1622,74 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   log "  Phase 3.5: applying platform tier early so OPA comes up while"
   log "             startup-orchestrator is still retrying its OPA probe"
   apply_tier platform
-  log "    waiting for data-init Jobs to Complete (parallel)..."
-  bs_parallel "db-seed" \
-    kubectl -n aispm wait --for=condition=Complete --timeout=300s job/db-seed
-  bs_parallel "startup-orchestrator" \
-    kubectl -n aispm wait --for=condition=Complete --timeout=300s job/startup-orchestrator
+  log "    waiting for data-init Jobs to Complete (with live log tailing)..."
+
+  # ── Helper: wait for a Job AND stream its pod logs + diagnostics ────
+  # `kubectl wait --for=condition=Complete` only tells us pass/fail at
+  # the timeout boundary — useless when we need to know WHY a seed Job
+  # is hung.  This helper:
+  #   1. backgrounds a `kubectl logs -f --all-containers` so init-container
+  #      messages ("Waiting for spm-db-rw…") and the seed's Python output
+  #      stream live to /tmp/bs-<job>-pod.log
+  #   2. waits for the Job's condition (Complete or Failed)
+  #   3. on failure (timeout / Failed), dumps pod events + container logs
+  #      inline so we don't need a follow-up `kubectl describe` round-trip
+  # Args: $1 = job name, $2 = timeout seconds (default 300)
+  wait_job_with_logs() {
+    local job="$1"; local timeout="${2:-300}"
+    local plog="/tmp/bs-${job}-pod.log"
+    : > "$plog"
+
+    # Resolve the pod (Job's first/only pod).  Retries for ~30s — fresh
+    # Jobs can take a moment for the controller to spawn a Pod.
+    local pod="" tries=0
+    while [ -z "$pod" ] && [ "$tries" -lt 15 ]; do
+      pod="$(kubectl -n aispm get pod -l "job-name=$job" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+      [ -n "$pod" ] && break
+      sleep 2
+      tries=$((tries + 1))
+    done
+
+    # Background log-follow (tolerant — pod may not be Ready yet).
+    if [ -n "$pod" ]; then
+      ( kubectl -n aispm logs -f --all-containers --prefix \
+                --ignore-errors=true "$pod" 2>&1 >> "$plog" ) &
+      local logs_pid=$!
+    fi
+
+    set +e
+    kubectl -n aispm wait --for=condition=Complete \
+      --timeout="${timeout}s" "job/$job"
+    local rc=$?
+    set -e
+
+    # Stop the log streamer (best effort).
+    if [ -n "${logs_pid:-}" ]; then
+      kill "$logs_pid" 2>/dev/null || true
+      wait "$logs_pid" 2>/dev/null || true
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+      err "  ── job/$job did not Complete (rc=$rc) — diagnostics ──"
+      err "    Pod events:"
+      kubectl -n aispm describe "job/$job" 2>&1 \
+        | sed -nE '/^Events:/,$p' | head -40 >&2 || true
+      if [ -n "$pod" ]; then
+        err "    Pod describe (last 30 lines):"
+        kubectl -n aispm describe "pod/$pod" 2>&1 | tail -30 >&2 || true
+        err "    Streamed pod log ($plog) — last 80 lines:"
+        tail -80 "$plog" >&2 || true
+      else
+        err "    (no pod was ever created for job/$job — check Job spec / quota / scheduling)"
+      fi
+      err "  ── end diagnostics for job/$job ──"
+    fi
+    return "$rc"
+  }
+
+  bs_parallel "db-seed"              wait_job_with_logs db-seed 300
+  bs_parallel "startup-orchestrator" wait_job_with_logs startup-orchestrator 300
   bs_wait_all "data-init tier"
 
   # ── Phase 4: platform rollout-status wait ────────────────────────────
@@ -1427,12 +1705,79 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   log "  Phase 4.5: applying frontend tier early (UI needs only platform)"
   apply_tier frontend
 
-  log "    waiting for platform tier rollouts (22 Deployments, parallel)..."
+  log "    waiting for platform tier rollouts (20 Deployments, serial — with live log tailing)..."
+
+  # ── Helper: rollout-status a Deployment with pod-log streaming ──────
+  # Same trick as wait_job_with_logs but for Deployments — vanilla
+  # `kubectl rollout status` only reports "N of M updated replicas
+  # available" without saying WHY a pod isn't ready.  This helper:
+  #   1. backgrounds `kubectl logs -f` against any pod for the
+  #      Deployment's selector, written to /tmp/bs-<name>-pod.log so
+  #      the logs survive even after the pod is GC'd
+  #   2. waits for rollout
+  #   3. on timeout/failure dumps Events, describe, and the streamed
+  #      pod logs inline so we don't need a follow-up round-trip
+  # Args: $1 = deployment name, $2 = timeout seconds (default 300)
+  wait_deploy_with_logs() {
+    local dep="$1"; local timeout="${2:-300}"
+    local plog="/tmp/bs-${dep}-pod.log"
+    : > "$plog"
+
+    # Resolve a pod for the Deployment's selector. Retries ~30s — fresh
+    # rollouts take a moment to spawn the new ReplicaSet's pods.
+    local pod="" tries=0
+    while [ -z "$pod" ] && [ "$tries" -lt 15 ]; do
+      pod="$(kubectl -n aispm get pod -l "app=$dep" \
+              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+      [ -n "$pod" ] && break
+      sleep 2
+      tries=$((tries + 1))
+    done
+
+    # Background log-follow (tolerant of not-yet-Ready pods).
+    if [ -n "$pod" ]; then
+      ( kubectl -n aispm logs -f --all-containers --prefix \
+                --ignore-errors=true "$pod" 2>&1 >> "$plog" ) &
+      local logs_pid=$!
+    fi
+
+    set +e
+    kubectl -n aispm rollout status "deploy/$dep" --timeout="${timeout}s"
+    local rc=$?
+    set -e
+
+    if [ -n "${logs_pid:-}" ]; then
+      kill "$logs_pid" 2>/dev/null || true
+      wait "$logs_pid" 2>/dev/null || true
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+      err "  ── deploy/$dep rollout failed (rc=$rc) — diagnostics ──"
+      err "    Deployment events:"
+      kubectl -n aispm describe "deploy/$dep" 2>&1 \
+        | sed -nE '/^Events:/,$p' | head -30 >&2 || true
+      if [ -n "$pod" ]; then
+        err "    Pod describe (last 30 lines):"
+        kubectl -n aispm describe "pod/$pod" 2>&1 | tail -30 >&2 || true
+        err "    Streamed pod log ($plog) — last 80 lines:"
+        tail -80 "$plog" >&2 || true
+      else
+        err "    (no pod ever materialised for app=$dep — check ReplicaSet / scheduling / image-pull / quota)"
+        err "    ReplicaSet events:"
+        kubectl -n aispm describe rs -l "app=$dep" 2>&1 \
+          | sed -nE '/^Events:/,$p' | head -20 >&2 || true
+      fi
+      err "  ── end diagnostics for deploy/$dep ──"
+    fi
+    return "$rc"
+  }
+
+  # grafana + prometheus removed May 2026 — no longer in chart.
   for d in api spm-api opa guard-model agent agent-orchestrator executor \
-           freeze-controller garak-runner grafana memory-service output-guard \
-           policy-decider policy-simulator processor prometheus retrieval-gateway \
+           freeze-controller garak-runner memory-service output-guard \
+           policy-decider policy-simulator processor retrieval-gateway \
            spm-aggregator spm-llm-proxy spm-mcp threat-hunting-agent tool-parser; do
-    bs_parallel "$d" kubectl -n aispm rollout status deploy/"$d" --timeout=5m
+    bs_parallel "$d" wait_deploy_with_logs "$d" 300
   done
   bs_wait_all "platform tier"
 
@@ -1441,11 +1786,53 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   # on Kafka (data tier — already Ready by now).
   log "  Phase 5: compute (flink-jm + flink-tm)"
   apply_tier compute
-  log "    waiting for compute tier rollouts (parallel)..."
-  bs_parallel "flink-jobmanager" \
-    kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=3m
-  bs_parallel "flink-taskmanager" \
-    kubectl -n aispm rollout status deployment/flink-taskmanager --timeout=2m
+  log "    waiting for compute tier rollouts (serial — with live log tailing)..."
+  # Reuse wait_deploy_with_logs for the Deployment, and inline the
+  # equivalent for the StatefulSet (rollout-status syntax differs).
+  bs_parallel "flink-jobmanager" bash -c '
+    plog="/tmp/bs-flink-jobmanager-pod.log"; : > "$plog"
+    # StatefulSet pod selector — try app=, then app.kubernetes.io/name=,
+    # then component=jobmanager.  Different chart conventions land on
+    # different label keys; cover the common ones rather than hardcoding.
+    pod=""; tries=0
+    while [ -z "$pod" ] && [ "$tries" -lt 15 ]; do
+      for sel in "app=flink-jobmanager" "app.kubernetes.io/name=flink-jobmanager" "component=jobmanager" "statefulset.kubernetes.io/pod-name=flink-jobmanager-0"; do
+        pod="$(kubectl -n aispm get pod -l "$sel" -o jsonpath="{.items[0].metadata.name}" 2>/dev/null || true)"
+        [ -n "$pod" ] && break
+      done
+      [ -n "$pod" ] && break
+      # Last resort: grab the first pod whose name starts with flink-jobmanager-.
+      pod="$(kubectl -n aispm get pods --no-headers 2>/dev/null | awk "/^flink-jobmanager-/{print \$1; exit}")"
+      [ -n "$pod" ] && break
+      sleep 2; tries=$((tries+1))
+    done
+    if [ -n "$pod" ]; then
+      ( kubectl -n aispm logs -f --all-containers --prefix --ignore-errors=true "$pod" 2>&1 >> "$plog" ) &
+      logs_pid=$!
+    fi
+    set +e; kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=180s; rc=$?; set -e
+    [ -n "${logs_pid:-}" ] && { kill "$logs_pid" 2>/dev/null || true; wait "$logs_pid" 2>/dev/null || true; }
+    if [ "$rc" -ne 0 ]; then
+      echo "  ── statefulset/flink-jobmanager rollout failed (rc=$rc) ──" >&2
+      echo "  StatefulSet events:" >&2
+      # Use awk instead of sed because the inner bash -c interprets $
+      # in sed expressions like /^Events:/,$p — the $p got eaten and
+      # produced "expected context address" in earlier runs.
+      kubectl -n aispm describe statefulset/flink-jobmanager 2>&1 \
+        | awk "/^Events:/{flag=1} flag" | head -25 >&2 || true
+      if [ -n "$pod" ]; then
+        echo "  Pod describe (last 25 lines):" >&2
+        kubectl -n aispm describe "pod/$pod" 2>&1 | tail -25 >&2 || true
+        echo "  pod log tail (last 60 lines):" >&2
+        tail -60 "$plog" >&2 || true
+      else
+        echo "  (no pod ever appeared — check StatefulSet replicas / PVC binding / scheduling)" >&2
+        kubectl -n aispm get pods 2>&1 | grep -E "flink|^NAME" >&2 || true
+      fi
+    fi
+    exit "$rc"
+  '
+  bs_parallel "flink-taskmanager" wait_deploy_with_logs flink-taskmanager 120
   bs_wait_all "compute tier"
 
   # ── Phase 6: compute-init ────────────────────────────────────────────
@@ -1475,17 +1862,13 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
 fi
 
 # ── 7. Kyverno cluster policies ──────────────────────────────────────────
-# Kyverno is always installed (Step 5), so the policies always apply.
-if [ "$TARGET" = "all" ] || [ "$TARGET" = "policies" ]; then
-  section "Step 7: Kyverno cluster policies"
-  POLICIES_FILE="$DEPLOY/k8s/kyverno/cluster-policies.yaml"
-  if [ -f "$POLICIES_FILE" ]; then
-    kubectl apply -f "$POLICIES_FILE" \
-      || die "policies apply returned non-zero"
-    log "  applied $(grep -c '^kind:' "$POLICIES_FILE") policies"
-  else
-    die "no Kyverno policy file at $POLICIES_FILE — expected to exist"
-  fi
+# REMOVED May 2026 — Kyverno is no longer installed (Step 5), so its
+# ClusterPolicy CRD doesn't exist in the cluster and applying these
+# policies would fail with "no matches for kind ClusterPolicy".  The
+# policy file under deploy/k8s/kyverno/ is left in the tree for
+# reference / future re-introduction but is intentionally not applied.
+if [ "$TARGET" = "policies" ]; then
+  log "  Step 7 skipped — Kyverno not installed (removed May 2026)"
 fi
 
 # ── 8. Final HTTP /health smoke test ────────────────────────────────────
@@ -1494,6 +1877,29 @@ fi
 # actually answer HTTP — `rollout Ready` ≠ `responding on the Service IP`.
 # We probe via a curl pod so we exercise cluster-internal DNS + routing,
 # not just localhost or rollout state.
+
+# ── 7. Re-apply mkcert TLS secret to aispm namespace ────────────────────────
+# The mkcert step in Step 4 runs before the AISPM chart creates the aispm
+# namespace, so the secret apply to aispm fails silently. Re-apply here now
+# that the namespace is guaranteed to exist.
+if [ "$TARGET" = "all" ]; then
+  section "Step 7: re-apply mkcert TLS secret to aispm"
+  _crt="$REPO_ROOT/keys/aispm-tls.crt"
+  _key="$REPO_ROOT/keys/aispm-tls.key"
+  if [ -f "$_crt" ] && [ -f "$_key" ]; then
+    for ns in istio-system aispm; do
+      kubectl -n "$ns" create secret tls aispm-tls \
+        --cert="$_crt" --key="$_key" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+        && log "  aispm-tls upserted in $ns" \
+        || warn "  failed to upsert aispm-tls in $ns"
+    done
+  else
+    warn "  mkcert cert not found at $REPO_ROOT/keys/ — WebSocket TLS may fail"
+    warn "  run: mkcert -cert-file keys/aispm-tls.crt -key-file keys/aispm-tls.key aispm.local localhost 127.0.0.1"
+  fi
+fi
+
 if [ "$TARGET" = "all" ]; then
   section "Step 8: HTTP /health smoke test"
 
@@ -1634,20 +2040,30 @@ if [ "$TARGET" = "all" ]; then
   done
 
   # WebSocket upgrade on /ws — the Simulator + Chat pages stream
-  # results over WS. If this returns 403 the UI shows "Waiting for
-  # probe results" forever while the api side logs spam
+  # results over WS. If Istio's RBAC denies the upgrade, the UI shows
+  # "Waiting for probe results" forever while the api side log spams
   # `ws_buffer_full — dropping oldest`. The api-allow path list must
   # contain `/ws*` (prefix), not just `/ws` + `/ws/*` exact pair.
-  got=$(kubectl -n aispm exec "$_PROBE_POD" -- \
-    curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+  #
+  # Distinguish two flavors of 403 (task #44):
+  #   - Istio RBAC denial — body is the literal text "RBAC: access denied"
+  #     emitted by Envoy's auth filter.  Real misconfig → die.
+  #   - App-level 403 (FastAPI's "Not authenticated" / "Forbidden") —
+  #     route reached the app, app rejected the missing JWT.  That's the
+  #     happy path for an unauthenticated probe; we just want to know
+  #     the upgrade itself wasn't blocked.
+  ws_body=$(kubectl -n aispm exec "$_PROBE_POD" -- \
+    curl -sS --max-time 5 -o - -w '\n__HTTP__%{http_code}' \
     -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
     -H 'Sec-WebSocket-Version: 13' \
     -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
-    'http://api.aispm.svc.cluster.local:8080/ws' 2>/dev/null || echo "ERR")
-  if [ "$got" = "403" ]; then
-    die "api /ws WebSocket upgrade returned 403 — Simulator/Chat result streaming will fail. Ensure api-allow has '/ws*' (prefix) in its path list."
+    'http://api.aispm.svc.cluster.local:8080/ws' 2>/dev/null || echo "__HTTP__ERR")
+  ws_code="${ws_body##*__HTTP__}"
+  ws_body="${ws_body%__HTTP__*}"
+  if [ "$ws_code" = "403" ] && echo "$ws_body" | grep -q 'RBAC: access denied'; then
+    die "api /ws WebSocket upgrade returned RBAC 403 — Simulator/Chat result streaming will fail. Ensure api-allow has '/ws*' (prefix) in its path list."
   fi
-  log "    ✓ api /ws WebSocket → HTTP $got (upgrade not RBAC-blocked)"
+  log "    ✓ api /ws WebSocket → HTTP $ws_code (upgrade not Istio-RBAC-blocked)"
 
   # ── 8e. Guard / Simulator coverage probes (invariants 16, 17) ────
   # The Simulator is only meaningful if the guard chain actually
@@ -1694,23 +2110,61 @@ if [ "$TARGET" = "all" ]; then
       log "    (skipped) /simulate/single returned unexpected shape: ${obf_response:0:120} — endpoint may require auth, regression check skipped" ;;
   esac
 
-  # ── 8d. TLS cert chain (invariant 13) ─────────────────────────────
-  # Browsers refuse WSS connections to selfsigned certs even after
-  # the user clicks through HTTPS warnings. Dev uses mkcert (root CA
-  # added to OS keychain by `mkcert -install`); the istio-system/
-  # aispm-tls secret should be populated with that cert, NOT with
-  # cert-manager's selfsigned one. We don't enforce mkcert here
-  # (could be a fresh laptop without it), but we do warn loudly if
-  # the gateway is serving a cert-manager selfsigned cert AND
-  # certManager is disabled — that's the exact failure mode where
-  # the secret never got populated and WSS will fail.
-  if kubectl -n istio-system get certificate aispm-tls >/dev/null 2>&1; then
-    cm_enabled=$(yq -r '.ingress.certManager' "$VALUES_FILE" 2>/dev/null || echo "true")
-    if [ "$cm_enabled" = "false" ]; then
-      warn "    cert-manager Certificate aispm-tls exists in istio-system but values has certManager=false — cert-manager may overwrite your mkcert-issued secret. Run:"
-      warn "      kubectl -n istio-system delete certificate aispm-tls"
+  # ── 8d. TLS cert chain (invariant 13) — ACTIVE REPAIR ─────────────
+  # Browsers refuse WSS connections to self-signed certs even after the
+  # user clicks through HTTPS warnings.  Dev uses mkcert (root CA added
+  # to the OS keychain by `mkcert -install`); the istio-system/aispm-tls
+  # Secret should be populated with that cert, NOT with cert-manager's
+  # self-signed one.
+  #
+  # Until May 2026 this section only WARNED — and cert-manager kept
+  # overwriting our mkcert Secret on every chart re-apply, so WSS
+  # would break again every bootstrap.  Now this section actively
+  # repairs the chain in place:
+  #   (a) delete any cert-manager Certificate that would re-stamp the
+  #       Secret on the next reconcile,
+  #   (b) re-upsert the mkcert Secret from keys/aispm-tls.{crt,key},
+  #   (c) restart istio-ingressgateway so SDS reloads the new cert,
+  #   (d) verify the wire-issuer is mkcert and warn if not.
+  cm_enabled=$(yq -r '.ingress.certManager' "$VALUES_FILE" 2>/dev/null || echo "true")
+  if [ "$cm_enabled" = "false" ]; then
+    # (a) Delete any stale cert-manager Certificate that would
+    #     overwrite mkcert on its next reconcile.
+    for ns in istio-system aispm; do
+      if kubectl -n "$ns" get certificate aispm-tls >/dev/null 2>&1; then
+        log "    deleting stale cert-manager Certificate $ns/aispm-tls"
+        kubectl -n "$ns" delete certificate aispm-tls --ignore-not-found >/dev/null 2>&1 || true
+        kubectl -n "$ns" delete certificaterequest -l cert-manager.io/certificate-name=aispm-tls \
+          --ignore-not-found >/dev/null 2>&1 || true
+      fi
+    done
+
+    # (b) Re-upsert mkcert Secret from on-disk keys (the same path the
+    #     Step-2 mkcert block writes to).  Tolerant if mkcert was never
+    #     run — operator gets a clear warning at the verify step below.
+    _crt="$REPO_ROOT/keys/aispm-tls.crt"
+    _key="$REPO_ROOT/keys/aispm-tls.key"
+    if [ -f "$_crt" ] && [ -f "$_key" ]; then
+      for ns in istio-system aispm; do
+        kubectl -n "$ns" create secret tls aispm-tls \
+          --cert="$_crt" --key="$_key" \
+          --dry-run=client -o yaml 2>/dev/null \
+          | kubectl apply -f - >/dev/null 2>&1 || true
+      done
+      log "    aispm-tls re-upserted from mkcert (istio-system + aispm)"
+
+      # (c) Force istio-ingressgateway to reload SDS so the wire cert
+      #     matches what we just wrote.  Cheap rolling restart.
+      kubectl -n istio-system rollout restart deploy/istio-ingressgateway \
+        >/dev/null 2>&1 || true
+      kubectl -n istio-system rollout status deploy/istio-ingressgateway \
+        --timeout=60s >/dev/null 2>&1 || warn "    ingressgateway restart status timed out — recheck WSS manually"
+    else
+      warn "    mkcert keys not found at $_crt — Step 2 mkcert block must run first.  WSS will fail."
     fi
   fi
+
+  # (d) Verify wire-issuer.
   if kubectl -n istio-system get secret aispm-tls >/dev/null 2>&1; then
     issuer_org=$(kubectl -n istio-system get secret aispm-tls -o jsonpath='{.data.tls\.crt}' \
                  | base64 -d 2>/dev/null \
@@ -1758,13 +2212,16 @@ fi
 # ── 9. Done ─────────────────────────────────────────────────────────────
 section "DONE"
 INGRESS_HOST="$(yq -r '.ingress.host' "$VALUES_FILE" 2>/dev/null || echo aispm.local)"
+INGRESS_TLS="$(yq -r '.ingress.tls // false' "$VALUES_FILE" 2>/dev/null || echo false)"
+_proto="http"; [ "$INGRESS_TLS" = "true" ] && _proto="https"
 cat <<EOF
 Cluster bootstrap complete.
 
   ┌─────────────────────────────────────────────────────────┐
-  │  Chat            →  http://${INGRESS_HOST}
-  │  Admin panel     →  http://${INGRESS_HOST}/admin
-  │  Grafana         →  http://${INGRESS_HOST}/grafana
+  │  Chat            →  ${_proto}://${INGRESS_HOST}
+  │  Admin panel     →  ${_proto}://${INGRESS_HOST}/admin
+  │  SPM API docs    →  ${_proto}://${INGRESS_HOST}/api/spm/docs
+  │  Platform docs   →  ${_proto}://${INGRESS_HOST}/api/docs
   │  Flink UI        →  kubectl -n aispm port-forward svc/flink-jobmanager 8081:8081
   └─────────────────────────────────────────────────────────┘
 
@@ -1779,8 +2236,6 @@ Re-run this script to upgrade. Idempotent. Data in PVCs persists.
 
 Useful targeted runs:
   bash $0 chart                  — re-render and apply AISPM only
-  bash $0 policies               — re-apply Kyverno policies only
-  bash $0 addons                 — re-install cert-manager / ingress-nginx / kyverno
+  bash $0 addons                 — re-install cert-manager / ingress-nginx
   bash $0 --skip-preflight       — skip preflight checks (CI / known-good cluster)
-  SKIP_GVISOR=1 SKIP_RUNTIME_SECURITY=1 bash $0   — fast minimal install
 EOF

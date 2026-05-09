@@ -163,6 +163,20 @@ _wire_registry_into_nodes() {
   done
 
   for node in $nodes; do
+    # Skip the kind-managed haproxy load-balancer node that appears in
+    # HA-mode clusters.  It runs the kindest/haproxy image (minimal — no
+    # /usr/bin/tee, no /etc/containerd) so `docker exec mkdir
+    # /etc/containerd/...` exhausts retries and exits the script.  It's
+    # not a kubelet/containerd node anyway — registry mirror config is
+    # meaningless here.  Pattern-match instead of an exact name so this
+    # also handles future kind LB naming changes.
+    case "$node" in
+      *external-load-balancer*|*-lb)
+        _log "  skipping non-containerd node: $node (kind haproxy LB)"
+        continue
+        ;;
+    esac
+
     _log "  wiring registry mirror into node: $node"
     local exec_retries=0
     local exec_max_retries=10   # 10 × 2s = 20s per node

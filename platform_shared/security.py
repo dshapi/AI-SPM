@@ -63,7 +63,10 @@ def validate_jwt_token(token: str) -> dict:
                 "verify_iss": True,
                 "verify_exp": True,
                 "verify_iat": True,
-                "require": ["sub", "iss", "exp", "iat", "tenant_id"],
+                # tenant_id is not a standard Keycloak claim; callers default
+                # to "t1" via claims.get("tenant_id", "t1").  Requiring it
+                # here causes a 401 for all Keycloak-issued tokens.
+                "require": ["sub", "iss", "exp", "iat"],
             },
         )
         return claims

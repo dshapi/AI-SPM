@@ -259,6 +259,7 @@ _install_redis_ha() {
   helm upgrade --install redis bitnami/redis \
     --namespace "$REDIS_NAMESPACE" \
     --version "$REDIS_CHART_VERSION" \
+    --set global.defaultFips=false \
     --set architecture=replication \
     --set sentinel.enabled=true \
     --set sentinel.quorum=2 \
@@ -294,6 +295,20 @@ _install_redis_ha() {
     --set master.readinessProbe.timeoutSeconds=5 \
     --set replica.livenessProbe.timeoutSeconds=5 \
     --set replica.readinessProbe.timeoutSeconds=5 \
+    \
+    `# ── Resource limits — prevent node-level OOMKill cascade ────────────` \
+    `# Without limits the kernel silently kills sentinel containers when`   \
+    `# the node runs low on memory, breaking quorum and cascading into`     \
+    `# spm-api / keycloak crashes. Sentinel is a tiny coordinator process` \
+    `# (< 10 MB RSS in practice); 128Mi is a very generous cap.`           \
+    --set sentinel.resources.requests.memory=64Mi \
+    --set sentinel.resources.limits.memory=128Mi \
+    --set sentinel.resources.requests.cpu=10m \
+    --set sentinel.resources.limits.cpu=100m \
+    --set replica.resources.requests.memory=128Mi \
+    --set replica.resources.limits.memory=384Mi \
+    --set replica.resources.requests.cpu=50m \
+    --set replica.resources.limits.cpu=300m \
     --wait --timeout=10m
 
   _log "  ✓ Redis HA Ready (1 master + 3 replicas + 3 sentinels)"

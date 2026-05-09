@@ -17,6 +17,7 @@ aiokafka==0.11.0                # Async Kafka producer/consumer
 
 # ─── HTTP client (for real PolicyClient / JWKS fetch in prod) ────────────────
 httpx==0.27.2
+requests>=2.31.0                # Required by platform_shared.keycloak_auth (JWKS fetch)
 
 # ─── Auth (production JWT verification) ──────────────────────────────────────
 python-jose[cryptography]==3.3.0

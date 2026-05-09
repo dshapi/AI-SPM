@@ -4,6 +4,8 @@ kind: Job
 metadata:
   name: flink-pyjob-submitter
   namespace: {{ .Values.global.namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
   # NB: previously a `helm.sh/hook` post-install/post-upgrade Job. Hooks
   # were inert under `helm template | kubectl apply` and the bootstrap
   # now sequences this Job in the `compute-init` tier (after flink-jm /

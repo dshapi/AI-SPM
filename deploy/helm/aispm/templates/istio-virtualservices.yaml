@@ -21,6 +21,25 @@ spec:
   gateways:
     - aispm-gateway
   http:
+    # /realms/* and /resources/* → Keycloak (token endpoint, JWKS, login assets)
+    # Must come before the /* catch-all so browser auth calls reach Keycloak.
+    - match:
+        - uri:
+            prefix: /realms/
+      route:
+        - destination:
+            host: keycloak
+            port:
+              number: 8080
+    - match:
+        - uri:
+            prefix: /resources/
+      route:
+        - destination:
+            host: keycloak
+            port:
+              number: 8080
+
     # /api/spm/* → spm-api (SPM REST API, port 8092)
     # Match /api/spm/ (trailing slash) so rewrite to / produces /path not //path
     - match:
@@ -59,9 +78,12 @@ spec:
               number: 8080
 
     # /ws/* → CPM api WebSocket — no rewrite, app expects /ws/... path
+    # timeout: 0s is required — Istio's default 15 s HTTP timeout kills
+    # long-lived WebSocket connections mid-stream.
     - match:
         - uri:
             prefix: /ws
+      timeout: 3600s
       route:
         - destination:
             host: api

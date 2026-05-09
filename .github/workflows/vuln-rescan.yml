@@ -1,0 +1,260 @@
+# .github/workflows/vuln-rescan.yml
+#
+# Nightly vulnerability re-scan against the latest signed images.
+#
+# Why this exists:
+#   sbom.yml signs and attests an SBOM at build time. The SBOM is a
+#   fingerprint of the artifact and never changes for a given digest.
+#   But the *CVE database* changes every day — an image that was clean
+#   on Monday can have a fresh High/Critical against it on Tuesday with
+#   no code change. This workflow re-runs Grype against the same images
+#   on a schedule, aggregates the results into one summary issue (instead
+#   of 23 red runs), and fails the workflow on any Critical finding.
+#
+# Trigger:
+#   - schedule: 04:17 UTC daily (off-hour intentionally — GitHub's
+#     scheduler is a thundering herd at HH:00 and on-hour jobs lag).
+#   - workflow_dispatch: run on demand.
+#
+# What it scans:
+#   The image tagged with the SHA of the default-branch HEAD at run
+#   time. sbom.yml builds and pushes ghcr.io/<owner>/<image>:<sha> on
+#   every push to main, so by the time this nightly runs the artifacts
+#   exist. We do NOT rescan every historical tag — that's a much bigger
+#   policy decision and isn't this workflow's job.
+#
+# Output:
+#   - GitHub Step Summary (markdown table, severity counts per image).
+#   - Per-image vuln-<image>.json artifacts (kept 14 days).
+#   - One rolling open issue labeled `vuln-rescan` (updated in place,
+#     not a new issue per night).
+#   - Workflow fails if any image has Critical findings.
+
+name: Nightly vuln rescan
+
+"on":
+  schedule:
+    - cron: "17 4 * * *"   # 04:17 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read       # pull from GHCR
+  issues: write        # open / update the rolling summary issue
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # Per-image rescan. fail-fast: false + we swallow grype's exit code so
+  # all 23 always run; the summary job decides whether the workflow fails.
+  # ───────────────────────────────────────────────────────────────────────────
+  rescan:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Mirrors the matrix in sbom.yml. Keep these in sync — if you add
+        # a service to sbom.yml without adding it here, it stops getting
+        # nightly rescans and you'll find out via a CVE in production.
+        image:
+          - aispm-api
+          - aispm-guard-model
+          - aispm-garak-runner
+          - aispm-retrieval-gw
+          - aispm-processor
+          - aispm-policy-decider
+          - aispm-agent
+          - aispm-memory
+          - aispm-executor
+          - aispm-tool-parser
+          - aispm-output-guard
+          - aispm-freeze-ctrl
+          - aispm-policy-sim
+          - aispm-spm-api
+          - aispm-spm-mcp
+          - aispm-spm-llm-proxy
+          - aispm-spm-aggregator
+          - aispm-agent-orchestrator
+          - aispm-threat-hunter
+          - aispm-ui
+          - aispm-startup-orch
+          - aispm-flink-pyjob
+          - aispm-agent-runtime
+    steps:
+      - name: Compute image ref
+        id: ref
+        run: |
+          OWNER_LC="$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')"
+          echo "image_ref=${REGISTRY}/${OWNER_LC}/${{ matrix.image }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.88.0
+
+      - name: Vulnerability scan
+        id: grype
+        run: |
+          set +e
+          REF='${{ steps.ref.outputs.image_ref }}'
+          OUT='vuln-${{ matrix.image }}.json'
+
+          # Scan registry image directly. Grype picks up docker auth from
+          # the login step above (~/.docker/config.json).
+          grype "$REF" -o json --file "$OUT"
+          ec=$?
+
+          if [[ $ec -ne 0 || ! -s "$OUT" ]]; then
+            # Synthesize an empty-but-valid result so the summary job has
+            # something to parse. We tag it with scan_failed so the
+            # summary can call it out instead of silently showing zeros.
+            echo "::warning::grype exited $ec for $REF — emitting scan_failed stub"
+            printf '{"matches":[],"scan_failed":true,"image":"%s","exit":%d}\n' "$REF" "$ec" > "$OUT"
+          fi
+
+          # Quick severity summary in the log
+          jq -r '.matches | group_by(.vulnerability.severity)
+                 | map("  \(.[0].vulnerability.severity): \(length)")
+                 | .[]?' "$OUT" || true
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuln-${{ matrix.image }}
+          path: vuln-${{ matrix.image }}.json
+          retention-days: 14
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Summary: download all per-image reports, aggregate counts into one
+  # markdown table, post to Step Summary, open/update one rolling issue,
+  # fail the workflow on Critical.
+  # ───────────────────────────────────────────────────────────────────────────
+  summary:
+    name: Aggregate
+    runs-on: ubuntu-latest
+    needs: rescan
+    if: always()           # run even if some matrix legs failed
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+          pattern: vuln-*
+
+      - name: Aggregate
+        id: agg
+        run: |
+          set -euo pipefail
+          TOTAL_CRIT=0
+          TOTAL_HIGH=0
+          FAILED=0
+
+          {
+            echo "# Nightly vuln rescan — $(date -u +%Y-%m-%d)"
+            echo
+            echo "Commit scanned: \`${GITHUB_SHA::12}\`"
+            echo
+            echo "| Image | Critical | High | Medium | Low | Status |"
+            echo "|---|---:|---:|---:|---:|---|"
+          } > summary.md
+
+          # Each artifact downloads to reports/vuln-<image>/vuln-<image>.json
+          for d in reports/vuln-*/; do
+            img="$(basename "$d")"
+            img="${img#vuln-}"
+            f="${d}vuln-${img}.json"
+            if [[ ! -f "$f" ]]; then
+              echo "| ${img} | - | - | - | - | missing |" >> summary.md
+              FAILED=$((FAILED + 1))
+              continue
+            fi
+
+            FAIL_FLAG=$(jq -r '.scan_failed // false' "$f")
+            CRIT=$(jq '[.matches[]? | select(.vulnerability.severity=="Critical")] | length' "$f")
+            HIGH=$(jq '[.matches[]? | select(.vulnerability.severity=="High")]     | length' "$f")
+            MED=$(jq  '[.matches[]? | select(.vulnerability.severity=="Medium")]   | length' "$f")
+            LOW=$(jq  '[.matches[]? | select(.vulnerability.severity=="Low")]      | length' "$f")
+
+            if [[ "$FAIL_FLAG" == "true" ]]; then
+              STATUS="scan failed"
+              FAILED=$((FAILED + 1))
+            else
+              STATUS="ok"
+            fi
+
+            echo "| ${img} | ${CRIT} | ${HIGH} | ${MED} | ${LOW} | ${STATUS} |" >> summary.md
+            TOTAL_CRIT=$((TOTAL_CRIT + CRIT))
+            TOTAL_HIGH=$((TOTAL_HIGH + HIGH))
+          done
+
+          {
+            echo
+            echo "**Totals:** ${TOTAL_CRIT} Critical, ${TOTAL_HIGH} High."
+            if [[ $FAILED -gt 0 ]]; then
+              echo
+              echo "**${FAILED}** image(s) had scan errors — see workflow logs."
+            fi
+            echo
+            echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } >> summary.md
+
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "total_crit=${TOTAL_CRIT}"
+            echo "total_high=${TOTAL_HIGH}"
+            echo "scan_failures=${FAILED}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Ensure label exists
+        if: steps.agg.outputs.total_high != '0' || steps.agg.outputs.total_crit != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # `gh issue create --label X` errors if X doesn't exist. Create
+          # it idempotently so the next step can reference it freely.
+          gh label create vuln-rescan \
+            --color B60205 \
+            --description "Auto-opened by .github/workflows/vuln-rescan.yml" \
+            2>/dev/null || true
+
+      - name: Open or update rolling issue
+        if: steps.agg.outputs.total_high != '0' || steps.agg.outputs.total_crit != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TITLE="Nightly vuln rescan: ${{ steps.agg.outputs.total_crit }} critical / ${{ steps.agg.outputs.total_high }} high"
+          BODY="$(cat summary.md)"
+
+          # One rolling open issue per workflow — edit in place rather
+          # than spamming a new issue every night. If you've closed it
+          # to acknowledge, the next failing run will open a fresh one.
+          EXISTING="$(gh issue list --label vuln-rescan --state open \
+                        --limit 1 --json number --jq '.[0].number' || true)"
+
+          if [[ -n "${EXISTING:-}" ]]; then
+            gh issue edit "$EXISTING" --title "$TITLE" --body "$BODY"
+            gh issue comment "$EXISTING" \
+              --body "Updated $(date -u +%Y-%m-%dT%H:%MZ) — table refreshed in issue body."
+          else
+            gh issue create --title "$TITLE" --body "$BODY" --label vuln-rescan
+          fi
+
+      - name: Fail on Critical
+        if: steps.agg.outputs.total_crit != '0'
+        run: |
+          echo "::error::Nightly rescan found ${{ steps.agg.outputs.total_crit }} Critical vulnerabilities"
+          exit 1

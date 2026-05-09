@@ -49,12 +49,8 @@ redis:
   storageClass: longhorn
   storage: 5Gi
 
-prometheus:
-  storageClass: longhorn
-  storage: 50Gi
-
-grafana:
-  storageClass: longhorn
+# Prometheus + Grafana removed May 2026 — install kube-prometheus-stack
+# out-of-band in prod if you need them; chart no longer ships either.
 
 # ── Ingress ─────────────────────────────────────────────────────────────────
 ingress:

@@ -55,6 +55,15 @@ spec:
                 secretKeyRef:
                   name: platform-secrets
                   key: THREAT_HUNTING_AGENT_LLM_KEY
+            # Service-account credentials used by SessionPoller + FindingsService
+            # to obtain Keycloak tokens for inter-service calls.
+            - name: SERVICE_ACCOUNT_USER
+              value: "admin@aispm.local"
+            - name: SERVICE_ACCOUNT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-admin-password
           readinessProbe:
             httpGet: { path: /health, port: 8095 }
             initialDelaySeconds: 20

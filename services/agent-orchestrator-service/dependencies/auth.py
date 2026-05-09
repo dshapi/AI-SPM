@@ -124,7 +124,8 @@ def _decode_token(raw_token: str) -> dict:
         audience = os.environ.get("JWT_AUDIENCE", "aispm-ui")
         issuer   = os.environ.get("JWT_ISSUER",   "http://keycloak.local:8180/realms/aispm")
         return decode_token(raw_token, audience=audience, issuer=issuer)
-    except Exception:
+    except Exception as exc:
+        logger.warning("auth: JWT decode failed: %s", exc)
         return {}
 
 

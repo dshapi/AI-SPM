@@ -4,7 +4,7 @@
 # (the only supported dev topology since May 2026 — see runbook
 # §"Architecture").
 #
-# Usage: helm upgrade aispm deploy/helm/aispm/ -n aispm \
+# Usage: helm upgrade --install aispm deploy/helm/aispm/ -n aispm \
 #          -f deploy/helm/aispm/values.yaml \
 #          -f deploy/helm/aispm/values.dev.yaml
 #
@@ -17,6 +17,13 @@
 #                 https://aispm.local/admin  (admin panel)
 #                 https://aispm.local/api/spm/docs  (SPM API Swagger)
 #                 https://aispm.local/api/docs      (platform API Swagger)
+
+# ── Always pull from local registry in dev ──────────────────────────────────
+# With IfNotPresent (the global default), kind nodes cache the old image and
+# never pull a freshly-pushed :latest tag on rollout restart.  Always is
+# required so every pod restart gets the image just pushed to localhost:5001.
+global:
+  imagePullPolicy: Always
 
 # ── Local registry image overrides ──────────────────────────────────────────
 # Kind pulls custom images from the local registry (localhost:5001).
@@ -179,3 +186,41 @@ flink:
     replicas: 1
   taskmanager:
     replicas: 1
+  # local-path provisioner only supports ReadWriteOnce — override the default
+  # ReadWriteMany for flink-checkpoints and flink-ha PVCs in dev.
+  # Single jobmanager replica makes RWO sufficient (no multi-JM shared access needed).
+  sharedAccessMode: ReadWriteOnce
+
+# ── Dev resource caps ────────────────────────────────────────────────────────
+# Keycloak uses start-dev mode which is single-threaded for most ops.
+# Dropping the limit from 1 CPU → 500m is safe; it only affects burst.
+keycloak:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+  postgres:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+# Agent runtime quota: prod default is 25 vCPU / 50 Gi. In dev you're
+# unlikely to run more than 1–2 agents simultaneously, so 4 vCPU total
+# is plenty and stops the scheduler from over-committing.
+agentRuntime:
+  runtimeClassName: ""
+  limits:
+    maxCpu: "1"
+    maxMemory: "512Mi"
+  quota:
+    cpuRequests: "4"
+    cpuLimits: "8"
+    memoryRequests: "4Gi"
+    memoryLimits: "8Gi"

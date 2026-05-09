@@ -1,0 +1,351 @@
+# deploy/helm/aispm/templates/keycloak-deployment.yaml
+# Deploys Keycloak 24 backed by PostgreSQL (keycloak-postgres StatefulSet).
+# Data persists across pod restarts — realm config and seeded users survive.
+# Seeds the aispm realm + users via an init Job after Keycloak is healthy.
+{{- $kc := .Values.global.keycloak }}
+---
+# ── Deployment ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak
+  template:
+    metadata:
+      labels:
+        app: keycloak
+      annotations:
+        # Hold Keycloak until the Istio sidecar proxy is ready — without
+        # this, Keycloak starts before iptables rules are in place and
+        # receives a SIGTERM when the proxy restarts to apply them.
+        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+    spec:
+      # ── Wait for Postgres before starting Keycloak ────────────────────────
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for keycloak-postgres to accept connections..."
+              until pg_isready -h keycloak-postgres.{{ .Values.global.namespace }}.svc.cluster.local -p 5432 -U keycloak -d keycloak; do
+                echo "  postgres not ready — retrying in 3s"
+                sleep 3
+              done
+              echo "keycloak-postgres is ready."
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_PASSWORD
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:24.0
+          # start-dev: disables caching + enables debug UI; perfectly fine for
+          # dev.  The key difference from before is KC_DB=postgres — data is
+          # now stored in the keycloak-postgres PVC, not H2 in-memory.
+          args: ["start-dev"]
+          ports:
+            - containerPort: 8080
+              name: http
+          env:
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-user
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-password
+            # ── PostgreSQL backend ──────────────────────────────────────────
+            - name: KC_DB
+              value: "postgres"
+            - name: KC_DB_URL
+              value: "jdbc:postgresql://keycloak-postgres.{{ .Values.global.namespace }}.svc.cluster.local:5432/keycloak"
+            - name: KC_DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_USER
+            - name: KC_DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-postgres-secret
+                  key: POSTGRES_PASSWORD
+            # ── General Keycloak settings ───────────────────────────────────
+            - name: KC_HEALTH_ENABLED
+              value: "true"
+            - name: KC_HTTP_ENABLED
+              value: "true"
+            - name: KC_HOSTNAME_STRICT
+              value: "false"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "false"
+            # Force the public-facing base URL so the JWT `iss` claim is always
+            # https://aispm.local/realms/aispm regardless of whether Keycloak
+            # sees HTTP internally (TLS terminated by Istio gateway).
+            - name: KC_HOSTNAME_URL
+              value: "https://{{ .Values.ingress.host }}"
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 15
+          resources:
+            requests:
+              cpu: {{ (.Values.keycloak.resources).requests.cpu | default "250m" }}
+              memory: {{ (.Values.keycloak.resources).requests.memory | default "768Mi" }}
+            limits:
+              cpu: {{ (.Values.keycloak.resources).limits.cpu | default "1000m" }}
+              memory: {{ (.Values.keycloak.resources).limits.memory | default "1500Mi" }}
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: keycloak
+spec:
+  selector:
+    app: keycloak
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+# ── Secret ────────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-secret
+  namespace: {{ .Values.global.namespace }}
+type: Opaque
+stringData:
+  admin-user: "admin"
+  admin-password: {{ .Values.keycloak.adminPassword | quote }}
+  client-secret: {{ $kc.clientSecret | quote }}
+  seed-admin-password: {{ .Values.keycloak.seedAdminPassword | quote }}
+  seed-auditor-password: {{ .Values.keycloak.seedAuditorPassword | quote }}
+  seed-viewer-password: {{ .Values.keycloak.seedViewerPassword | quote }}
+---
+# ── Bootstrap Job ─────────────────────────────────────────────────────────────
+# Runs setup-realm.sh + seed-users.sh once after Keycloak becomes healthy.
+# The scripts are baked into the Keycloak image via a ConfigMap + initContainer
+# pattern — we mount them as a ConfigMap and exec them from inside the pod.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: keycloak-bootstrap
+  namespace: {{ .Values.global.namespace }}
+  annotations:
+    # Helm hook: run after all resources are deployed
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation
+spec:
+  backoffLimit: 5
+  template:
+    metadata:
+      annotations:
+        # Disable Istio sidecar injection — the sidecar keeps the pod alive
+        # after the bootstrap container exits, which prevents the Job from
+        # ever reaching Completed status. The job talks to in-cluster services
+        # directly and does not need mTLS.
+        sidecar.istio.io/inject: "false"
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: quay.io/keycloak/keycloak:24.0
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              KC_URL="http://keycloak.{{ .Values.global.namespace }}.svc.cluster.local:8080"
+              KCADM="/opt/keycloak/bin/kcadm.sh"
+              REALM="aispm"
+              CLIENT_ID="aispm-ui"
+
+              echo "Waiting for Keycloak..."
+              # curl is not available in the Keycloak UBI Micro image — use
+              # bash /dev/tcp to check port 8080 is accepting connections, then
+              # verify kcadm.sh can actually authenticate before proceeding.
+              RETRIES=0; MAX_RETRIES=60  # 60 × 5s = 5 min
+              until (echo > /dev/tcp/keycloak/8080) 2>/dev/null; do
+                sleep 5; RETRIES=$((RETRIES+1))
+                [ "$RETRIES" -ge "$MAX_RETRIES" ] && { echo "Keycloak not ready after $((MAX_RETRIES*5))s"; exit 1; }
+              done
+              # Port is open — give Keycloak 5 more seconds to finish HTTP init
+              sleep 5
+              echo "Keycloak port open, verifying kcadm auth..."
+              RETRIES=0
+              until "$KCADM" config credentials \
+                  --server "$KC_URL" --realm master \
+                  --user "$KEYCLOAK_ADMIN" --password "$KEYCLOAK_ADMIN_PASSWORD" 2>/dev/null; do
+                sleep 5; RETRIES=$((RETRIES+1))
+                [ "$RETRIES" -ge 12 ] && { echo "kcadm auth failed after 60s"; exit 1; }
+              done
+              echo "Keycloak ready."
+
+              # Realm (idempotent)
+              "$KCADM" get realms/"$REALM" > /dev/null 2>&1 || \
+                "$KCADM" create realms \
+                  -s realm="$REALM" -s enabled=true -s displayName="AISPM"
+
+              # Client (idempotent)
+              CLIENT_EXISTS=$("$KCADM" get clients -r "$REALM" \
+                --fields clientId -q clientId="$CLIENT_ID" 2>/dev/null \
+                | grep -c "\"$CLIENT_ID\"" || true)
+              if [ "$CLIENT_EXISTS" -eq 0 ]; then
+                # publicClient=true: browser SPAs cannot keep a client secret;
+                # directAccessGrantsEnabled allows the username/password login flow.
+                "$KCADM" create clients -r "$REALM" \
+                  -s clientId="$CLIENT_ID" \
+                  -s publicClient=true \
+                  -s directAccessGrantsEnabled=true \
+                  -s 'redirectUris=["*"]' \
+                  -s 'webOrigins=["*"]'
+              else
+                # Idempotent: ensure any pre-existing confidential client is switched
+                # to public so the browser login flow works without a secret.
+                EXISTING_UUID=$("$KCADM" get clients -r "$REALM" \
+                  --fields id,clientId 2>/dev/null \
+                  | grep -B1 "\"$CLIENT_ID\"" | grep '"id"' \
+                  | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+                [ -n "$EXISTING_UUID" ] && \
+                  "$KCADM" update clients/"$EXISTING_UUID" -r "$REALM" \
+                    -s publicClient=true 2>/dev/null || true
+              fi
+
+              # Roles (idempotent)
+              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer"; do
+                "$KCADM" get-roles -r "$REALM" --rolename "$ROLE" > /dev/null 2>&1 || \
+                  "$KCADM" create roles -r "$REALM" -s name="$ROLE"
+              done
+
+              # Audience mapper — adds aispm-ui to the `aud` claim so
+              # backend services can verify audience=aispm-ui (idempotent).
+              CLIENT_UUID=$("$KCADM" get clients -r "$REALM" \
+                --fields id,clientId 2>/dev/null \
+                | grep -B1 "\"$CLIENT_ID\"" | grep '"id"' \
+                | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+              if [ -n "$CLIENT_UUID" ]; then
+                MAPPER_EXISTS=$("$KCADM" get clients/"$CLIENT_UUID"/protocol-mappers/models \
+                  -r "$REALM" 2>/dev/null | grep -c "aispm-ui-audience" || true)
+                if [ "$MAPPER_EXISTS" -eq 0 ]; then
+                  "$KCADM" create clients/"$CLIENT_UUID"/protocol-mappers/models \
+                    -r "$REALM" \
+                    -s name=aispm-ui-audience \
+                    -s protocol=openid-connect \
+                    -s protocolMapper=oidc-audience-mapper \
+                    -s 'config={"included.client.audience":"aispm-ui","access.token.claim":"true","id.token.claim":"false"}' \
+                    && echo "Audience mapper created" || echo "Audience mapper already exists"
+                else
+                  echo "Audience mapper already present"
+                fi
+              fi
+
+              # tenant_id hardcoded claim mapper — adds tenant_id="t1" to
+              # every access token so backend services can read it without
+              # requiring per-user attributes (idempotent).
+              if [ -n "$CLIENT_UUID" ]; then
+                TENANT_MAPPER_EXISTS=$("$KCADM" get clients/"$CLIENT_UUID"/protocol-mappers/models \
+                  -r "$REALM" 2>/dev/null | grep -c "tenant-id-mapper" || true)
+                if [ "$TENANT_MAPPER_EXISTS" -eq 0 ]; then
+                  "$KCADM" create clients/"$CLIENT_UUID"/protocol-mappers/models \
+                    -r "$REALM" \
+                    -s name=tenant-id-mapper \
+                    -s protocol=openid-connect \
+                    -s protocolMapper=oidc-hardcoded-claim-mapper \
+                    -s 'config={"claim.name":"tenant_id","claim.value":"t1","access.token.claim":"true","id.token.claim":"false","userinfo.token.claim":"false"}' \
+                    && echo "tenant_id mapper created" || echo "tenant_id mapper already exists"
+                else
+                  echo "tenant_id mapper already present"
+                fi
+              fi
+
+              # Seed users (idempotent)
+              # firstName + lastName required by Keycloak 24's Declarative User
+              # Profile — omitting them causes "Account is not fully set up" on login.
+              create_user() {
+                local username="$1" password="$2" role="$3" email="$4" firstname="$5" lastname="$6"
+                EXISTS=$("$KCADM" get users -r "$REALM" \
+                  --fields username -q username="$username" 2>/dev/null \
+                  | grep -c "\"$username\"" || true)
+                if [ "$EXISTS" -eq 0 ]; then
+                  "$KCADM" create users -r "$REALM" \
+                    -s username="$username" -s email="$email" \
+                    -s firstName="$firstname" -s lastName="$lastname" \
+                    -s enabled=true -s emailVerified=true \
+                    -s 'requiredActions=[]' \
+                    -s "credentials=[{\"type\":\"password\",\"value\":\"$password\",\"temporary\":false}]"
+                  echo "Created: $username"
+                else
+                  echo "Exists: $username"
+                fi
+                "$KCADM" add-roles -r "$REALM" \
+                  --uusername "$username" --rolename "$role" 2>/dev/null || true
+              }
+
+              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"   "User"
+              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor" "User"
+              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"  "User"
+
+              # Assign prefixed roles so both plain and spm: checks pass
+              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"   2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor" 2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"  2>/dev/null || true
+
+              echo "Bootstrap complete."
+          env:
+            - name: KEYCLOAK_ADMIN
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-user
+            - name: KEYCLOAK_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: admin-password
+            - name: AISPM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: client-secret
+            - name: SEED_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-admin-password
+            - name: SEED_AUDITOR_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-auditor-password
+            - name: SEED_VIEWER_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-viewer-password

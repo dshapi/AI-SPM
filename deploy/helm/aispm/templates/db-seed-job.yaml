@@ -30,6 +30,8 @@ kind: Job
 metadata:
   name: db-seed
   namespace: {{ .Values.global.namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
   # NB: previously a `helm.sh/hook` post-install/post-upgrade Job. Hooks
   # were inert under `helm template | kubectl apply` (which is what the
   # bootstrap uses) and the bootstrap now sequences this Job in the
@@ -42,6 +44,12 @@ spec:
   activeDeadlineSeconds: 300
   template:
     metadata:
+      labels:
+        # Selector label so `kubectl get pods -l app=db-seed` and the
+        # bootstrap's per-Job log-streamer can find this pod.  Was
+        # missing pre-May 2026 — diagnosed when the bootstrap couldn't
+        # tail the seed pod's logs because the selector matched 0 pods.
+        app: db-seed
       annotations:
         # Same reasoning as startup-orchestrator-job.yaml: don't inject
         # the istio sidecar into a one-shot Job. Init containers and
@@ -50,9 +58,15 @@ spec:
     spec:
       restartPolicy: OnFailure
       initContainers:
-        # Wait for spm-db to accept connections before running the seed.
-        # Without this, the first run after a fresh install can race the
-        # postgres StatefulSet's startup probe.
+        # Wait for the CNPG primary (spm-db-rw) to accept connections
+        # before running the seed.  Probe the rw Service DIRECTLY rather
+        # than the `spm-db` ExternalName alias — the alias is a CNAME
+        # whose target is exactly this Service, but in May 2026 we hit
+        # cases where the chart applied the alias before CNPG had
+        # promoted a primary, and the init container's busybox `nc`
+        # would hang for 5+ minutes on the unresolved CNAME.  Probing
+        # the rw Service directly fails fast and is the single source
+        # of truth for "primary is up".
         - name: wait-for-spm-db
           image: busybox:1.36
           command:
@@ -60,21 +74,21 @@ spec:
             - -c
             - |
               set -eu
-              DB_HOST="spm-db.{{ .Values.global.namespace }}.svc.cluster.local"
+              DB_HOST="{{ .Values.spmDb.externalName }}"
               DB_PORT="5432"
               MAX_ATTEMPTS=120
               attempt=0
-              echo "Waiting for spm-db at ${DB_HOST}:${DB_PORT} (max ${MAX_ATTEMPTS} attempts)..."
+              echo "Waiting for CNPG primary at ${DB_HOST}:${DB_PORT} (max ${MAX_ATTEMPTS} attempts)..."
               until nc -z "${DB_HOST}" "${DB_PORT}" 2>/dev/null; do
                 attempt=$(( attempt + 1 ))
                 if [ "${attempt}" -ge "${MAX_ATTEMPTS}" ]; then
-                  echo "ERROR: spm-db not reachable after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS}x2s). Giving up."
+                  echo "ERROR: ${DB_HOST} not reachable after ${MAX_ATTEMPTS} attempts (${MAX_ATTEMPTS}x2s). Giving up."
                   exit 1
                 fi
-                echo "  attempt ${attempt}/${MAX_ATTEMPTS}: spm-db not ready — sleeping 2s..."
+                echo "  attempt ${attempt}/${MAX_ATTEMPTS}: ${DB_HOST} not ready — sleeping 2s..."
                 sleep 2
               done
-              echo "spm-db TCP port open."
+              echo "CNPG primary TCP port open."
           resources:
             requests:
               cpu: "50m"
@@ -85,8 +99,14 @@ spec:
       containers:
         - name: db-seed
           image: {{ include "aispm.image" .Values.images.spmApi }}
-          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
-          command: ["python3", "/app/seed_db.py"]
+          # Always pull on dev (localhost:5001 registry, fast) so a
+          # rebuilt image is picked up without bumping the tag.  Task #37.
+          imagePullPolicy: Always
+          # Single canonical seeder.  /app/seed_all.py is COPYed by the
+          # spm-api Dockerfile from scripts/seed_all.py.  The 'db'
+          # subcommand runs ensure_schema + seed_models +
+          # seed_posture_snapshots + seed_system_agents.
+          command: ["python3", "/app/seed_all.py", "db"]
           envFrom:
             - configMapRef:
                 name: platform-env
@@ -94,11 +114,17 @@ spec:
                 name: platform-secrets
           env:
             - name: SPM_DB_URL
-              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@spm-db.{{ .Values.global.namespace }}.svc.cluster.local:5432/{{ .Values.spmDb.database }}"
+              # Point directly at spm-db-rw, not the spm-db ExternalName
+              # alias — same rationale as the init container.  Alembic
+              # autocommit blocks (migrations 011/012) require a
+              # writable connection to the primary.
+              value: "postgresql+asyncpg://{{ .Values.spmDb.user }}:$(SPM_DB_PASSWORD)@{{ .Values.spmDb.externalName }}:5432/{{ .Values.spmDb.database }}"
           resources:
             requests:
               cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
               memory: "256Mi"
+            limits:
+              # Bumped to 2Gi May 2026 — DEMO_MODELS seed + alembic
+              # upgrade was getting OOMKilled at 256Mi (task #40).
+              cpu: "1"
+              memory: "2Gi"

@@ -41,6 +41,12 @@ COPY --chown=appuser:appgroup platform_shared/ ./platform_shared/
 # Copy application source
 COPY --chown=appuser:appgroup services/agent-orchestrator-service/ .
 
+# Single canonical seeder — scripts/seed_all.py.  Imported by main.py's
+# lifespan via the `seed_demo` shim (services/agent-orchestrator-service/
+# seed_demo.py re-exports `seed_demo_data` from seed_all).  Without this
+# COPY the lifespan import fails and demo data never seeds.
+COPY --chown=appuser:appgroup scripts/seed_all.py .
+
 # Bundle the canonical OPA Rego policies so the policies-store seed can
 # ingest them at startup as the real Policy Library content (replacing the
 # hardcoded mock policies that used to seed the table). Source of truth is

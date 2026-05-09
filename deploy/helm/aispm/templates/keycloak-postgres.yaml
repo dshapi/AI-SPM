@@ -1,0 +1,101 @@
+# deploy/helm/aispm/templates/keycloak-postgres.yaml
+# Dedicated PostgreSQL instance for Keycloak.  Data is persisted in a PVC
+# so realm config and seeded users survive Keycloak pod restarts.
+#
+# This is intentionally a simple single-node StatefulSet — Keycloak is the
+# only client, it runs 1 replica, and dev doesn't need HA here.  The PVC
+# uses the default StorageClass (standard on kind, which is hostPath-backed
+# and survives pod restarts as long as the kind node survives).
+{{- $kc := .Values.keycloak }}
+---
+# ── Credentials Secret ────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-postgres-secret
+  namespace: {{ .Values.global.namespace }}
+type: Opaque
+stringData:
+  POSTGRES_DB:       "keycloak"
+  POSTGRES_USER:     "keycloak"
+  POSTGRES_PASSWORD: {{ $kc.postgres.password | quote }}
+---
+# ── StatefulSet ───────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: keycloak-postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: keycloak-postgres
+spec:
+  serviceName: keycloak-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: keycloak-postgres
+  template:
+    metadata:
+      labels:
+        app: keycloak-postgres
+      annotations:
+        # Postgres manages its own connections; sidecar interception causes
+        # spurious connection resets on startup — disable it.
+        sidecar.istio.io/inject: "false"
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          ports:
+            - containerPort: 5432
+              name: postgres
+          envFrom:
+            - secretRef:
+                name: keycloak-postgres-secret
+          readinessProbe:
+            exec:
+              command: ["pg_isready", "-U", "keycloak", "-d", "keycloak"]
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-U", "keycloak", "-d", "keycloak"]
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: {{ ((.Values.keycloak.postgres).resources).requests.cpu | default "100m" }}
+              memory: {{ ((.Values.keycloak.postgres).resources).requests.memory | default "128Mi" }}
+            limits:
+              cpu: {{ ((.Values.keycloak.postgres).resources).limits.cpu | default "500m" }}
+              memory: {{ ((.Values.keycloak.postgres).resources).limits.memory | default "512Mi" }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+              subPath: pgdata   # subPath avoids the "lost+found" issue with hostPath
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: {{ $kc.postgres.storageSize | default "2Gi" | quote }}
+---
+# ── Service ───────────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak-postgres
+  namespace: {{ .Values.global.namespace }}
+  labels:
+    app: keycloak-postgres
+spec:
+  selector:
+    app: keycloak-postgres
+  clusterIP: None   # headless — StatefulSet pods are addressed by DNS directly
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432

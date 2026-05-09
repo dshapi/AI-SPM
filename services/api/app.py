@@ -619,7 +619,7 @@ app.include_router(ws_router)
 app.include_router(simulation_ws_router)
 
 # Simulation endpoints: /api/simulate/single, /api/simulate/garak
-app.include_router(simulation_router)
+app.include_router(simulation_router, prefix="/api")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

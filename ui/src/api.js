@@ -1,6 +1,6 @@
 const BASE = import.meta.env.VITE_API_URL || '/api'
 
-const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || 'http://keycloak.local:8180'
+const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || ''  // empty = same origin; /realms/* proxied to Keycloak via VirtualService
 const KC_REALM     = import.meta.env.VITE_KC_REALM     || 'aispm'
 const KC_CLIENT_ID = import.meta.env.VITE_KC_CLIENT_ID || 'aispm-ui'
 
@@ -58,8 +58,8 @@ export async function sendMessage(prompt, sessionId) {
   const token = await getToken()
 
   if (!token) {
-    // API unreachable — fall back to mock
-    return mockResponse(prompt)
+    window.location.href = '/login'
+    throw new Error('Not authenticated')
   }
 
   const res = await fetch(`${BASE}/chat`, {
@@ -355,14 +355,13 @@ export async function fetchSessionEvents(sessionId) {
 // ── Logout ────────────────────────────────────────────────────────────────────
 
 /**
- * logout() — clears the in-memory token and redirects to Keycloak's logout
- * endpoint (or /login as a fallback when VITE_KEYCLOAK_URL is not set).
+ * logout() — clears the in-memory token and sends the browser to /login.
+ * The Keycloak server-side session expires naturally; a back-channel logout
+ * can be added later via the end_session_endpoint if needed.
  */
 export function logout() {
   _token = null; _tokenExpiry = 0; _refreshToken = null
-  const redir = encodeURIComponent(window.location.origin)
-  window.location.href =
-    `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/logout?redirect_uri=${redir}`
+  window.location.href = '/login'
 }
 
 // ── Mock responses for offline / no-API mode ─────────────────────────────────

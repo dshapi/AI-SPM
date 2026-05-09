@@ -97,14 +97,17 @@ def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
 
 
 def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
-    if "spm:admin" not in claims.get("roles", []):
+    roles = set(claims.get("roles", []))
+    # Accept both prefixed (spm:admin) and plain Keycloak realm roles (admin)
+    if not (roles & {"spm:admin", "admin"}):
         raise HTTPException(status_code=403, detail="spm:admin role required")
     return claims
 
 
 def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
-    roles = claims.get("roles", [])
-    if "spm:admin" not in roles and "spm:auditor" not in roles:
+    roles = set(claims.get("roles", []))
+    # Accept both prefixed and plain Keycloak realm roles
+    if not (roles & {"spm:admin", "admin", "spm:auditor", "auditor"}):
         raise HTTPException(status_code=403, detail="spm:auditor or spm:admin role required")
     return claims
 

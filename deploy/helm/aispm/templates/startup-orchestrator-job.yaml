@@ -7,6 +7,12 @@ kind: Job
 metadata:
   name: startup-orchestrator
   namespace: {{ .Values.global.namespace }}
+  annotations:
+    # Keep this Job after it completes so bootstrap can gate on its status.
+    # "keep" tells Helm NOT to delete it on upgrade — which also avoids the
+    # "spec.template is immutable" error that Helm hits when it tries to
+    # update an already-completed Job on `helm upgrade`.
+    helm.sh/resource-policy: keep
   # NB: previously a `helm.sh/hook` post-install/post-upgrade Job. Hooks
   # were inert under `helm template | kubectl apply` and the bootstrap
   # now sequences this Job in the `data-init` tier (after kafka+redis are

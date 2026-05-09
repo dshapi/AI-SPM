@@ -40,3 +40,8 @@ data:
   JWT_PRIVATE_KEY_PATH: /keys/private.pem
   JWT_PUBLIC_KEY_PATH: /keys/public.pem
   KEYS_DIR: /keys
+  JWT_ISSUER:          {{ .Values.global.keycloak.issuer | quote }}
+  JWT_AUDIENCE:        {{ .Values.global.keycloak.audience | quote }}
+  KEYCLOAK_JWKS_URL:   {{ .Values.global.keycloak.jwksUrl | quote }}
+  KEYCLOAK_URL:        {{ .Values.global.keycloak.url | quote }}
+  KEYCLOAK_REALM:      {{ .Values.global.keycloak.realm | quote }}

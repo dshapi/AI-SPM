@@ -3,6 +3,8 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom'
 import App                 from './App.jsx'
+import LoginPage           from './LoginPage.jsx'
+import RequireAuth         from './RequireAuth.jsx'
 import { AppShell as DashboardLayout } from './admin/shell/AppShell.jsx'
 import { SimulationContext } from './context/SimulationContext.jsx'
 import { useSimulationState } from './hooks/useSimulationState.js'
@@ -91,15 +93,17 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <BrowserRouter>
       <SimulationRoot>
       <Routes>
-          {/* Chat UI — default LLM */}
-          <Route path="/" element={<App />} />
+          {/* Public — login page */}
+          <Route path="/login" element={<LoginPage />} />
 
-          {/* Chat UI — bound to a specific custom agent. Opened by
-              right-click → "Open Chat in New Tab" on Inventory rows. */}
-          <Route path="/agent/:agentId/chat" element={<AgentChatRoute />} />
+          {/* Chat UI — default LLM (auth-gated) */}
+          <Route path="/" element={<RequireAuth><App /></RequireAuth>} />
 
-          {/* Admin UI */}
-          <Route path="/admin" element={<DashboardLayout />}>
+          {/* Chat UI — bound to a specific custom agent (auth-gated) */}
+          <Route path="/agent/:agentId/chat" element={<RequireAuth><AgentChatRoute /></RequireAuth>} />
+
+          {/* Admin UI (auth-gated) */}
+          <Route path="/admin" element={<RequireAuth><DashboardLayout /></RequireAuth>}>
 
             <Route index element={<Overview />} />
 

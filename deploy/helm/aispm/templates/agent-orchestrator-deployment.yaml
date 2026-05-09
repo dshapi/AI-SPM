@@ -38,14 +38,11 @@ spec:
           envFrom:
             - secretRef:
                 name: platform-secrets
+            - configMapRef:
+                name: platform-env
           env:
             - name: LOG_LEVEL
               value: INFO
-            - name: KAFKA_BOOTSTRAP_SERVERS
-              valueFrom:
-                configMapKeyRef:
-                  name: platform-env
-                  key: KAFKA_BOOTSTRAP_SERVERS
             - name: DB_PATH
               value: /data/agent_orchestrator.db
             - name: POLICY_DB_URL

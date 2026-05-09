@@ -37,23 +37,12 @@ import {
   isValidElement,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react"
 import { createPortal } from "react-dom"
-
-
-// ─── Position helper — keep menu inside the viewport ──────────────────────
-
-function _clamp(x, y, menuWidth = 220, menuHeight = 280) {
-  const vw = typeof window !== "undefined" ? window.innerWidth  : 1024
-  const vh = typeof window !== "undefined" ? window.innerHeight : 768
-  return {
-    x: Math.min(x, Math.max(0, vw - menuWidth  - 8)),
-    y: Math.min(y, Math.max(0, vh - menuHeight - 8)),
-  }
-}
 
 
 // ─── Confirm modal ─────────────────────────────────────────────────────────
@@ -183,12 +172,29 @@ export default function ContextMenu({ items, children, onOpenChange }) {
     }
   }
 
+  // After the menu renders, nudge it into the viewport if it overflows.
+  // We measure the actual rendered size here instead of guessing up-front,
+  // so the menu always opens right at the pointer and only moves if needed.
+  useLayoutEffect(() => {
+    if (!open || !menuRef.current) return
+    const rect = menuRef.current.getBoundingClientRect()
+    const vw = window.innerWidth
+    const vh = window.innerHeight
+    const MARGIN = 8
+    setPos(prev => ({
+      x: Math.min(prev.x, Math.max(0, vw - rect.width  - MARGIN)),
+      y: Math.min(prev.y, Math.max(0, vh - rect.height - MARGIN)),
+    }))
+  }, [open])
+
   // Open the menu on right-click of the wrapped child.
   const onContextMenu = (e) => {
     e.preventDefault()
     e.stopPropagation()
-    const { x, y } = _clamp(e.clientX, e.clientY)
-    setPos({ x, y })
+    // Set position directly from the click — no pre-clamping.
+    // The useLayoutEffect above will nudge it after render if it
+    // would overflow the viewport edge.
+    setPos({ x: e.clientX, y: e.clientY })
     setOpen(true)
     setHl(items.findIndex((it) => it.kind !== "separator" && !it.disabled) || 0)
     if (onOpenChange) onOpenChange(true)

@@ -26,9 +26,13 @@ COPY services/spm_api/agent_chat.py .
 # the UI's Posture screen. Was missing from the image build until now,
 # which is why the Posture page hit 404s in earlier debugging.
 COPY services/spm_api/posture_routes.py .
-# DB seed script — runs as the `db-seed` Job in the data-init phase.
-# Creates the schema (Base.metadata.create_all) and inserts demo
-# ModelRegistry + PostureSnapshot rows. Without this COPY the Job
-# fails immediately with "can't open file '/app/seed_db.py'".
+# Single canonical seeder — scripts/seed_all.py.  Runs as the `db-seed`
+# Job (`python3 /app/seed_all.py db`) in the data-init phase.  Also
+# imported by app.py's lifespan as a self-healing pass on every restart.
+# Without this COPY the Job fails with "can't open file '/app/seed_all.py'".
+COPY scripts/seed_all.py .
+# Thin re-export shim — `from seed_db import seed_models, ...` still
+# works for back-compat (used by app.py's lifespan + tests).  The shim
+# just re-exports from seed_all.  See services/spm_api/seed_db.py docstring.
 COPY services/spm_api/seed_db.py .
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8092"]

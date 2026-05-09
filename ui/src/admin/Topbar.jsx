@@ -70,38 +70,49 @@ function IconButton({ icon: Icon, title }) {
 // ── Avatar menu ───────────────────────────────────────────────────────────
 function AvatarMenu() {
   const [open, setOpen] = useState(false)
-  const ref = useRef(null)
+  const [pos, setPos]   = useState({ top: 0, right: 0 })
+  const btnRef = useRef(null)
 
-  // Close when clicking outside the menu
+  function handleOpen() {
+    if (btnRef.current) {
+      const r = btnRef.current.getBoundingClientRect()
+      setPos({ top: r.bottom + 8, right: window.innerWidth - r.right })
+    }
+    setOpen(v => !v)
+  }
+
+  // Close on outside click
   useEffect(() => {
     if (!open) return
-    function handleClickOutside(e) {
-      if (ref.current && !ref.current.contains(e.target)) {
-        setOpen(false)
-      }
+    function handle(e) {
+      if (btnRef.current && !btnRef.current.contains(e.target)) setOpen(false)
     }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
   }, [open])
 
   return (
-    <div ref={ref} className="relative shrink-0">
+    <div className="relative shrink-0">
       <button
-        onClick={() => setOpen(v => !v)}
+        ref={btnRef}
+        onClick={handleOpen}
         className="flex items-center justify-center w-10 h-10 rounded-full bg-gradient-to-br from-blue-500 to-blue-700 text-[13px] font-bold text-white shrink-0 hover:opacity-90 transition-opacity duration-150"
         title="Account"
         aria-haspopup="true"
         aria-expanded={open}
       >
-        D
+        A
       </button>
 
       {open && (
-        <div className="absolute right-0 top-12 z-50 w-56 bg-white border border-gray-200 rounded-lg shadow-sm py-1">
+        <div
+          style={{ position: 'fixed', top: pos.top, right: pos.right, zIndex: 9999 }}
+          className="w-56 bg-white border border-gray-200 rounded-lg shadow-lg py-1"
+        >
           {/* User info */}
           <div className="px-4 py-3">
-            <p className="text-[13px] font-semibold text-gray-700 leading-tight">Dany Shapiro</p>
-            <p className="text-[12px] text-gray-400 leading-tight mt-0.5">dany.shapiro@gmail.com</p>
+            <p className="text-[13px] font-semibold text-gray-700 leading-tight">Admin</p>
+            <p className="text-[12px] text-gray-400 leading-tight mt-0.5">admin@orbyx.ai</p>
           </div>
 
           {/* Divider */}

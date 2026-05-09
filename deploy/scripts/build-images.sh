@@ -51,12 +51,14 @@ build() {
   local CONTEXT="${3:-$REPO_ROOT}"          # default: repo root
   [[ "$CONTEXT" != /* ]] && CONTEXT="$REPO_ROOT/$CONTEXT"
 
-  if [[ -n "$TARGET" && "$IMAGE" != "$TARGET" ]]; then
+  # Accept target with or without tag (e.g. "aispm-ui" matches "aispm-ui:latest")
+  if [[ -n "$TARGET" && "$IMAGE" != "$TARGET" && "${IMAGE%%:*}" != "$TARGET" ]]; then
     return 0
   fi
 
   log "Building $IMAGE ..."
   if $NERDCTL build \
+      ${NO_CACHE:+--no-cache} \
       --tag "$IMAGE" \
       --file "$DOCKERFILE" \
       "$CONTEXT" \
