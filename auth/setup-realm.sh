@@ -40,9 +40,8 @@ if [ "$CLIENT_EXISTS" -eq 0 ]; then
     -s clientId="$CLIENT_ID" \
     -s secret="$CLIENT_SECRET" \
     -s publicClient=false \
+    # directAccessGrantsEnabled: required for ROPC flow (dev/test login). Set false in prod if using authorization_code only.
     -s directAccessGrantsEnabled=true \
-    # directAccessGrantsEnabled: required for Resource Owner Password flow (dev/test login)
-    # Set to false in production if using authorization_code flow only
     -s 'redirectUris=["http://localhost:5173/*","http://aispm.local/*"]' \
     -s 'webOrigins=["http://localhost:5173","http://aispm.local"]'
 fi
