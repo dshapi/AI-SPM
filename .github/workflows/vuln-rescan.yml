@@ -147,6 +147,11 @@ jobs:
     permissions:
       contents: read
       issues: write
+    env:
+      # gh CLI needs this to identify the repo without a git checkout.
+      # The summary job only downloads artifacts — it never clones the
+      # repo — so there is no .git directory for gh to auto-detect from.
+      GH_REPO: ${{ github.repository }}
     steps:
       - name: Download all reports
         uses: actions/download-artifact@v4
