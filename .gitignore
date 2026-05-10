@@ -135,3 +135,5 @@ keys/*.key
 /deploy/sbom/vuln-aispm-ui.json
 /.beads/
 /.claude/
+/keys/client_secret_741909973661-lui97b2depouplp0g8i9b17bd1f11d93.apps.googleusercontent.com.json
+deploy/helm/aispm/values.local-secrets.yaml

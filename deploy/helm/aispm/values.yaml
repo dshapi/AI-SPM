@@ -7,10 +7,10 @@ global:
     url: "http://keycloak.aispm.svc.cluster.local:8080"
     realm: "aispm"
     jwksUrl: "http://keycloak.aispm.svc.cluster.local:8080/realms/aispm/protocol/openid-connect/certs"
-    issuer: "https://aispm.local/realms/aispm"
+    issuer: "https://aispm.lvh.me/realms/aispm"
     audience: "aispm-ui"
     clientSecret: "aispm-client-secret-changeme"
-  corsOrigins: "https://aispm.local"
+  corsOrigins: "https://aispm.lvh.me"
   internalServiceSecret: "internal-secret-changeme"
 
 # ── Keycloak ─────────────────────────────────────────────────────────────────
@@ -26,6 +26,27 @@ keycloak:
   postgres:
     password: "keycloak-pg-changeme-in-prod"
     storageSize: "2Gi"
+
+  # ── Google identity provider (optional) ─────────────────────────────────────
+  # When BOTH clientId and clientSecret are non-empty, the keycloak-bootstrap
+  # Job auto-creates a "google" Identity Provider in the aispm realm so the
+  # hosted login page renders a "Sign in with Google" button. Idempotent.
+  #
+  # Get these from https://console.cloud.google.com/apis/credentials by creating
+  # an OAuth Client ID (Web application). Authorized redirect URI must be:
+  #   https://<ingress.host>/realms/aispm/broker/google/endpoint
+  #
+  # DO NOT commit real values here. Override via a gitignored values file:
+  #   helm upgrade aispm deploy/helm/aispm -f deploy/helm/aispm/values.dev.yaml \
+  #                                        -f /path/to/secrets.local.yaml
+  # …or via --set keycloak.google.clientId=...,keycloak.google.clientSecret=...
+  google:
+    clientId:     ""
+    clientSecret: ""
+    # `Trust Email = OFF` is the safer default — even when Google says
+    # email_verified=true, leaving it OFF forces a verification email on first
+    # broker login, blocking the cross-IdP email-takeover attack class.
+    trustEmail:   false
 
 # ── Per-service image tags ───────────────────────────────────────────────────
 images:

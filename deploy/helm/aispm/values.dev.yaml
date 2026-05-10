@@ -55,7 +55,12 @@ images:
   agentRuntime:      { repository: localhost:5001/aispm-agent-runtime,      tag: latest }
 
 ingress:
-  host: aispm.local
+  # lvh.me is a wildcard DNS service that resolves any subdomain to 127.0.0.1.
+  # Used here because Google's OAuth client requires a public TLD for redirect
+  # URIs (rejects .local) and we don't have a real domain. .me is on the
+  # public suffix list, so Google accepts https://aispm.lvh.me/...
+  # No /etc/hosts entry needed; resolution works over public DNS.
+  host: aispm.lvh.me
   # ingress-nginx is the only supported dev IngressClass — installed by
   # bootstrap-cluster.sh against the kind cluster.
   className: nginx

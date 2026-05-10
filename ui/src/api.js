@@ -4,35 +4,155 @@ const KEYCLOAK_URL = import.meta.env.VITE_KEYCLOAK_URL || ''  // empty = same or
 const KC_REALM     = import.meta.env.VITE_KC_REALM     || 'aispm'
 const KC_CLIENT_ID = import.meta.env.VITE_KC_CLIENT_ID || 'aispm-ui'
 
+// ── Token state ──────────────────────────────────────────────────────────────
+// Mirrored to sessionStorage so the OAuth Authorization Code redirect round-trip
+// (which causes a full page reload) doesn't lose the tokens. sessionStorage
+// scopes them to the tab — closing the tab signs the user out, which is what we
+// want for a security-sensitive admin app. localStorage would persist longer
+// but is exposed to any XSS on the same origin, so deliberately avoiding it.
 let _token        = null
 let _tokenExpiry  = 0
 let _refreshToken = null
 
-export async function login(username, password) {
-  const url = `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/token`
+// Rehydrate from sessionStorage on module load (handles page navigation/reload)
+;(() => {
+  try {
+    const t   = sessionStorage.getItem('aispm.access_token')
+    const r   = sessionStorage.getItem('aispm.refresh_token')
+    const exp = sessionStorage.getItem('aispm.token_expiry')
+    if (t && exp) {
+      _token        = t
+      _refreshToken = r
+      _tokenExpiry  = parseInt(exp, 10)
+    }
+  } catch { /* sessionStorage may be unavailable in private modes */ }
+})()
+
+function _persistTokens() {
+  try {
+    sessionStorage.setItem('aispm.access_token',  _token  || '')
+    sessionStorage.setItem('aispm.refresh_token', _refreshToken || '')
+    sessionStorage.setItem('aispm.token_expiry',  String(_tokenExpiry))
+  } catch {}
+}
+
+function _clearTokens() {
+  _token = null; _refreshToken = null; _tokenExpiry = 0
+  try {
+    sessionStorage.removeItem('aispm.access_token')
+    sessionStorage.removeItem('aispm.refresh_token')
+    sessionStorage.removeItem('aispm.token_expiry')
+  } catch {}
+}
+
+// ── PKCE helpers (RFC 7636) ─────────────────────────────────────────────────
+// Vanilla Web Crypto — no library dependency. Verifier = 32 random bytes,
+// base64url-encoded; challenge = SHA-256(verifier), base64url-encoded.
+
+function _base64UrlEncode(bytes) {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function _randomBase64Url(byteLen = 32) {
+  return _base64UrlEncode(crypto.getRandomValues(new Uint8Array(byteLen)))
+}
+
+async function _pkceChallenge(verifier) {
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))
+  return _base64UrlEncode(new Uint8Array(hash))
+}
+
+// ── Authorization Code + PKCE flow ──────────────────────────────────────────
+// Replaces the previous Resource Owner Password Credentials grant. Browser is
+// redirected to Keycloak's hosted login page, which renders username/password
+// AND the Google identity-provider button. After the user authenticates, they
+// land back at /auth/callback?code=... where handleAuthCallback() exchanges
+// the code for tokens.
+//
+// The previous `login(username, password)` ROPC export is removed: it was only
+// safe because Keycloak's `aispm-ui` client has directAccessGrantsEnabled=true,
+// which we should also flip off in the helm bootstrap once nothing in the app
+// (or tests) calls ROPC anymore. Leaving the server-side flag enabled today is
+// defense-in-depth, not a backdoor we use.
+
+export async function loginRedirect(returnTo = '/admin/overview') {
+  const verifier  = _randomBase64Url(32)
+  const challenge = await _pkceChallenge(verifier)
+  const state     = _randomBase64Url(16)
+
+  sessionStorage.setItem('aispm.pkce_verifier', verifier)
+  sessionStorage.setItem('aispm.pkce_state',    state)
+  sessionStorage.setItem('aispm.return_to',     returnTo)
+
+  const params = new URLSearchParams({
+    client_id:             KC_CLIENT_ID,
+    response_type:         'code',
+    scope:                 'openid email profile',
+    redirect_uri:          `${window.location.origin}/auth/callback`,
+    code_challenge:        challenge,
+    code_challenge_method: 'S256',
+    state,
+  })
+  window.location.href =
+    `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/auth?${params}`
+}
+
+export async function handleAuthCallback() {
+  const search = new URLSearchParams(window.location.search)
+  const code   = search.get('code')
+  const state  = search.get('state')
+  const error  = search.get('error')
+
+  // Pull and immediately consume the per-flow secrets so a stale tab can't
+  // replay them.
+  const expectedState = sessionStorage.getItem('aispm.pkce_state')
+  const verifier      = sessionStorage.getItem('aispm.pkce_verifier')
+  const returnTo      = sessionStorage.getItem('aispm.return_to') || '/admin/overview'
+  sessionStorage.removeItem('aispm.pkce_state')
+  sessionStorage.removeItem('aispm.pkce_verifier')
+  sessionStorage.removeItem('aispm.return_to')
+
+  if (error) throw new Error(`Authorization error: ${error} ${search.get('error_description') || ''}`.trim())
+  if (!code) throw new Error('No authorization code in callback URL.')
+  if (!state || state !== expectedState) {
+    throw new Error('State mismatch — refusing token exchange (possible CSRF).')
+  }
+  if (!verifier) {
+    throw new Error('PKCE verifier missing — login was not initiated from this tab.')
+  }
+
+  const url  = `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/token`
   const body = new URLSearchParams({
-    grant_type: 'password',
-    client_id: KC_CLIENT_ID,
-    username,
-    password,
+    grant_type:    'authorization_code',
+    client_id:     KC_CLIENT_ID,
+    code,
+    redirect_uri:  `${window.location.origin}/auth/callback`,
+    code_verifier: verifier,
   })
   const resp = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!resp.ok) throw new Error('Login failed')
+  if (!resp.ok) {
+    const detail = await resp.text().catch(() => '')
+    throw new Error(`Token exchange failed (${resp.status}): ${detail}`)
+  }
   const data = await resp.json()
   _token        = data.access_token
   _refreshToken = data.refresh_token
   _tokenExpiry  = Date.now() + (data.expires_in - 30) * 1000
+  _persistTokens()
+  return returnTo
 }
 
 async function _refreshAccessToken() {
   const url = `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/token`
   const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: KC_CLIENT_ID,
+    grant_type:    'refresh_token',
+    client_id:     KC_CLIENT_ID,
     refresh_token: _refreshToken,
   })
   const resp = await fetch(url, {
@@ -40,11 +160,12 @@ async function _refreshAccessToken() {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!resp.ok) { _token = null; _tokenExpiry = 0; _refreshToken = null; return null }
+  if (!resp.ok) { _clearTokens(); return null }
   const data = await resp.json()
   _token        = data.access_token
   _refreshToken = data.refresh_token
   _tokenExpiry  = Date.now() + (data.expires_in - 30) * 1000
+  _persistTokens()
   return _token
 }
 
@@ -355,13 +476,24 @@ export async function fetchSessionEvents(sessionId) {
 // ── Logout ────────────────────────────────────────────────────────────────────
 
 /**
- * logout() — clears the in-memory token and sends the browser to /login.
- * The Keycloak server-side session expires naturally; a back-channel logout
- * can be added later via the end_session_endpoint if needed.
+ * logout() — clears tokens (memory + sessionStorage) and ends the Keycloak
+ * session via OIDC RP-Initiated Logout, so the user can't silently
+ * re-authenticate from a stale Keycloak SSO cookie. After Keycloak processes
+ * the end-session, it redirects back to /login per post_logout_redirect_uri.
  */
 export function logout() {
-  _token = null; _tokenExpiry = 0; _refreshToken = null
-  window.location.href = '/login'
+  const idToken = sessionStorage.getItem('aispm.id_token')  // optional, set if scope=openid returned one
+  _clearTokens()
+  try { sessionStorage.removeItem('aispm.id_token') } catch {}
+
+  const params = new URLSearchParams({
+    post_logout_redirect_uri: `${window.location.origin}/login`,
+    client_id: KC_CLIENT_ID,
+  })
+  if (idToken) params.set('id_token_hint', idToken)
+
+  window.location.href =
+    `${KEYCLOAK_URL}/realms/${KC_REALM}/protocol/openid-connect/logout?${params}`
 }
 
 // ── Mock responses for offline / no-API mode ─────────────────────────────────

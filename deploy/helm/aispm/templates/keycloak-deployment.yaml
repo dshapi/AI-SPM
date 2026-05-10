@@ -148,6 +148,10 @@ stringData:
   seed-admin-password: {{ .Values.keycloak.seedAdminPassword | quote }}
   seed-auditor-password: {{ .Values.keycloak.seedAuditorPassword | quote }}
   seed-viewer-password: {{ .Values.keycloak.seedViewerPassword | quote }}
+  # Google IdP credentials. Empty by default — bootstrap Job skips IdP creation
+  # if either is empty. Override via a gitignored values file or --set.
+  google-client-id:     {{ (.Values.keycloak.google).clientId     | default "" | quote }}
+  google-client-secret: {{ (.Values.keycloak.google).clientSecret | default "" | quote }}
 ---
 # ── Bootstrap Job ─────────────────────────────────────────────────────────────
 # Runs setup-realm.sh + seed-users.sh once after Keycloak becomes healthy.
@@ -207,6 +211,29 @@ spec:
                 [ "$RETRIES" -ge 12 ] && { echo "kcadm auth failed after 60s"; exit 1; }
               done
               echo "Keycloak ready."
+
+              # ── Master realm: security-admin-console redirect URIs ──────────
+              # KC_HOSTNAME_URL above forces all generated URLs to use
+              # https://{ingress.host}, but the security-admin-console client's
+              # default redirectUris ("/admin/master/console/*") are
+              # path-relative and Keycloak rejects them when the request comes
+              # in via a different host (e.g. `kubectl port-forward` on
+              # localhost:8180).  Pin the client to an explicit allow-list of
+              # URLs we actually use in dev so the admin UI loads from either
+              # the Istio ingress or a port-forward without "Invalid parameter:
+              # redirect_uri".  Idempotent — kcadm update is a PUT.
+              SAC_UUID=$("$KCADM" get clients -r master \
+                -q clientId=security-admin-console \
+                --fields id --format csv --noquotes 2>/dev/null \
+                | tail -1 | tr -d '\r')
+              if [ -n "$SAC_UUID" ]; then
+                "$KCADM" update clients/"$SAC_UUID" -r master \
+                  -s 'redirectUris=["/admin/master/console/*","https://{{ .Values.ingress.host }}/admin/master/console/*","http://localhost:8180/admin/master/console/*"]' \
+                  -s 'webOrigins=["+"]' \
+                  && echo "master/security-admin-console redirect URIs pinned"
+              else
+                echo "WARN: master/security-admin-console client not found — skipping redirect URI pin"
+              fi
 
               # Realm (idempotent)
               "$KCADM" get realms/"$REALM" > /dev/null 2>&1 || \
@@ -317,6 +344,51 @@ spec:
               "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor" 2>/dev/null || true
               "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"  2>/dev/null || true
 
+              # ── Google identity provider (idempotent, optional) ──────────────
+              # Creates a "google" social IdP in the aispm realm so the hosted
+              # login page renders a "Sign in with Google" button. Only fires
+              # when both GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are set —
+              # leaves the realm untouched in deployments that don't want SSO.
+              #
+              # Trust Email is forced OFF: even if Google sets email_verified=
+              # true, requiring Keycloak to verify on first broker login blocks
+              # the cross-IdP email-takeover attack class (an attacker with a
+              # Google account matching a victim's email cannot silently link
+              # to the victim's pre-existing local account).
+              if [ -n "${GOOGLE_CLIENT_ID:-}" ] && [ -n "${GOOGLE_CLIENT_SECRET:-}" ]; then
+                GOOGLE_EXISTS=$("$KCADM" get identity-provider/instances -r "$REALM" \
+                  --fields alias 2>/dev/null \
+                  | grep -c '"google"' || true)
+                # Build the config JSON via printf — keeps the manifest YAML
+                # valid (no heredoc, no embedded literal newlines) and keeps
+                # the secrets in env vars rather than templated into the Job
+                # spec where `kubectl describe job` would echo them.
+                GOOGLE_CONFIG=$(printf '{"clientId":"%s","clientSecret":"%s","defaultScope":"openid email profile","syncMode":"IMPORT"}' "$GOOGLE_CLIENT_ID" "$GOOGLE_CLIENT_SECRET")
+                if [ "$GOOGLE_EXISTS" -eq 0 ]; then
+                  "$KCADM" create identity-provider/instances -r "$REALM" \
+                    -s alias=google \
+                    -s providerId=google \
+                    -s enabled=true \
+                    -s trustEmail={{ (.Values.keycloak.google).trustEmail | default false }} \
+                    -s storeToken=false \
+                    -s addReadTokenRoleOnCreate=false \
+                    -s firstBrokerLoginFlowAlias="first broker login" \
+                    -s "config=$GOOGLE_CONFIG" \
+                    && echo "Google identity provider created"
+                else
+                  # Update credentials in place — handles client-secret rotation
+                  # without manual intervention. Other fields (enabled, trust
+                  # email, etc.) are also re-asserted to match values.yaml.
+                  "$KCADM" update identity-provider/instances/google -r "$REALM" \
+                    -s enabled=true \
+                    -s trustEmail={{ (.Values.keycloak.google).trustEmail | default false }} \
+                    -s "config=$GOOGLE_CONFIG" \
+                    && echo "Google identity provider updated"
+                fi
+              else
+                echo "Google IdP credentials not set — skipping (set keycloak.google.{clientId,clientSecret} to enable)"
+              fi
+
               echo "Bootstrap complete."
           env:
             - name: KEYCLOAK_ADMIN
@@ -349,3 +421,15 @@ spec:
                 secretKeyRef:
                   name: keycloak-secret
                   key: seed-viewer-password
+            # Google IdP credentials — empty when not configured. The
+            # bootstrap script branches on these being non-empty.
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: google-client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: google-client-secret

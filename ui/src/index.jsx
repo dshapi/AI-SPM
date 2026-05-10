@@ -4,6 +4,7 @@ import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useSearchParams } from 'react-router-dom'
 import App                 from './App.jsx'
 import LoginPage           from './LoginPage.jsx'
+import AuthCallback        from './AuthCallback.jsx'
 import RequireAuth         from './RequireAuth.jsx'
 import { AppShell as DashboardLayout } from './admin/shell/AppShell.jsx'
 import { SimulationContext } from './context/SimulationContext.jsx'
@@ -93,8 +94,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     <BrowserRouter>
       <SimulationRoot>
       <Routes>
-          {/* Public — login page */}
+          {/* Public — login page (redirects to Keycloak hosted login) */}
           <Route path="/login" element={<LoginPage />} />
+
+          {/* Public — OAuth Authorization Code callback from Keycloak.
+              Exchanges ?code=... for tokens, then navigates to returnTo. */}
+          <Route path="/auth/callback" element={<AuthCallback />} />
 
           {/* Chat UI — default LLM (auth-gated) */}
           <Route path="/" element={<RequireAuth><App /></RequireAuth>} />

@@ -39,13 +39,12 @@
 # ─────────────────────────────────────────────────────────────────────────
 
 # ── Ingress / gateway hostname ──────────────────────────────────────────
-# Multinode kind cluster maps aispm.local → 127.0.0.1 in /etc/hosts and
-# exposes the Istio gateway on NodePort 30443. The base values.yaml
-# default is aispm.example.com (the prod hostname); override here so the
-# dev-multinode chart matches what's already in /etc/hosts and what the
-# kind-multinode-ha runbook documents.
+# Multinode kind cluster exposes the Istio gateway on NodePort 30443.
+# The base values.yaml default is aispm.example.com (the prod hostname);
+# override here to lvh.me (wildcard DNS → 127.0.0.1) so Google OAuth
+# accepts the redirect URI as a public TLD without needing /etc/hosts.
 ingress:
-  host: aispm.local
+  host: aispm.lvh.me
 
 # ── Kafka — only `storageClass` differs from the HA-by-default values.yaml
 # (kind's local-path provisioner is named `standard`, prod uses longhorn).
