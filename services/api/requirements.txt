@@ -4,17 +4,17 @@ pydantic==2.9.2
 kafka-python-ng==2.2.3
 redis==5.2.1
 PyJWT[crypto]==2.9.0
-python-jose[cryptography]==3.3.0  # Required by platform_shared.keycloak_auth
+python-jose[cryptography]==3.4.0  # Required by platform_shared.keycloak_auth
 httpx==0.27.2
-cryptography==43.0.3
-requests==2.32.3
+cryptography==46.0.7
+requests==2.33.0
 anthropic==0.40.0
 tavily-python==0.5.0
 # platform_shared.integration_config hydrates ANTHROPIC_API_KEY / TAVILY_API_KEY
 # etc. from spm-db at boot (direct psycopg2 read — no HTTP to spm-api).
 psycopg2-binary==2.9.9
 beautifulsoup4==4.12.3
-lxml==5.3.0
+lxml==6.1.0
 # WebSocket transport — required by uvicorn for ws:// upgrade handling
 websockets==12.0
 
@@ -24,5 +24,5 @@ websockets==12.0
 # The API talks to it via HTTP using httpx (already listed above).
 
 # ── Test dependencies ─────────────────────────────────────────────────────────
-pytest==8.3.3
+pytest==9.0.3
 pytest-asyncio==0.24.0

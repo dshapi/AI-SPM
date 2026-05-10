@@ -7,4 +7,4 @@ apache-flink==1.18.1
 pydantic==2.9.2
 boto3==1.34.0
 kafka-python-ng==2.2.3
-pytest==8.3.3
+pytest==9.0.3
