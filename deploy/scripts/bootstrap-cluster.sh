@@ -1510,6 +1510,52 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       return 0
     fi
 
+    # ── Auto-recover: Jobs are immutable once created.
+    # The keycloak-bootstrap Job's spec.template (the bash script that
+    # configures the realm) changes any time we add a setup step (Google
+    # IdP, role mapper, etc.). kubectl apply on an existing Job with a
+    # changed pod template fails with "field is immutable" because Jobs
+    # don't allow in-place updates the way Deployments do.
+    #
+    # Helm's `helm.sh/hook-delete-policy: before-hook-creation` annotation
+    # handles this for `helm upgrade`, but server-side apply through
+    # this script bypasses helm hook semantics. Mirror the PVC recovery
+    # pattern: parse the offending Job name(s) from the error, delete
+    # them, retry. Safe in dev — Jobs are stateless workloads; their
+    # output (realm config, seeded users) lives in the Keycloak Postgres
+    # PVC and survives the Job's deletion.
+    if printf '%s' "$out" | grep -q 'Job "[^"]*" is invalid.*field is immutable'; then
+      log "    detected immutable-Job apply failure — attempting auto-recovery"
+      local jobs
+      jobs="$(printf '%s' "$out" \
+        | sed -nE 's/.*Job "([^"]+)" is invalid.*/\1/p' \
+        | sort -u)"
+      if [ -z "$jobs" ]; then
+        err "    couldn't parse Job name from kubectl error — full output below"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed (immutable Job, parse fallback)"
+      fi
+      for job in $jobs; do
+        log "      deleting Job aispm/$job (will be recreated by next apply)"
+        kubectl -n aispm delete job "$job" \
+          --ignore-not-found --wait=true >/dev/null 2>&1 || true
+      done
+      log "    retrying tier=$tier apply..."
+      set +e
+      out="$(kubectl apply --server-side --force-conflicts -f "$file" 2>&1)"
+      rc=$?
+      set -e
+      if [ "${VERBOSE:-0}" = "1" ] && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+      fi
+      if [ "$rc" -ne 0 ]; then
+        err "    kubectl apply error output:"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed after Job auto-recovery"
+      fi
+      return 0
+    fi
+
     # Anything else: ALWAYS print the captured kubectl output before die
     # (regardless of verbose) so the failure mode is never silent.
     err "    kubectl apply error output:"

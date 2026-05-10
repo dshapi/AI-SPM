@@ -47,6 +47,17 @@ keycloak:
     # email_verified=true, leaving it OFF forces a verification email on first
     # broker login, blocking the cross-IdP email-takeover attack class.
     trustEmail:   false
+    # Role granted to every Google-authenticated user. Applied via:
+    #   1. an Identity Provider Mapper that fires on first broker login
+    #      (covers all future Google sign-ups), AND
+    #   2. a one-shot reconciliation pass over existing Google-linked users
+    #      (covers users who logged in before this mapper was added).
+    # Set to "" to disable auto-role grants — users will sign in with no roles
+    # and 403 on every protected endpoint until manually granted via kcadm.
+    # See services/agent-orchestrator-service/dependencies/rbac.py for the
+    # role → permission matrix; "spm:admin" / "admin" grant ALL permissions,
+    # "spm:viewer" / "viewer" grant only session.read.
+    defaultRole:  "spm:admin"
 
 # ── Per-service image tags ───────────────────────────────────────────────────
 images:

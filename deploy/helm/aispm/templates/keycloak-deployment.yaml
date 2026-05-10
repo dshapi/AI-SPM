@@ -385,6 +385,60 @@ spec:
                     -s "config=$GOOGLE_CONFIG" \
                     && echo "Google identity provider updated"
                 fi
+
+                # ── Auto-role for Google users (idempotent) ───────────────────
+                # Two-pronged: (1) IdP mapper fires on every NEW broker login;
+                # (2) reconciliation pass grants the role to ALL existing
+                # google-linked users (so users who logged in before this
+                # mapper was added don't have to be re-created manually).
+                GOOGLE_ROLE='{{ (.Values.keycloak.google).defaultRole | default "" }}'
+                if [ -n "$GOOGLE_ROLE" ]; then
+                  GOOGLE_MAPPER_CONFIG=$(printf '{"role":"%s","syncMode":"INHERIT"}' "$GOOGLE_ROLE")
+
+                  # (1) IdP mapper
+                  MAPPER_EXISTS=$("$KCADM" get identity-provider/instances/google/mappers \
+                    -r "$REALM" --fields name 2>/dev/null \
+                    | grep -c '"default-role-mapper"' || true)
+                  if [ "$MAPPER_EXISTS" -eq 0 ]; then
+                    "$KCADM" create identity-provider/instances/google/mappers -r "$REALM" \
+                      -s name=default-role-mapper \
+                      -s identityProviderAlias=google \
+                      -s identityProviderMapper=oidc-hardcoded-role-idp-mapper \
+                      -s "config=$GOOGLE_MAPPER_CONFIG" \
+                      && echo "Google default-role mapper created (role=$GOOGLE_ROLE)" \
+                      || echo "WARN: failed to create Google default-role mapper"
+                  else
+                    MAPPER_ID=$("$KCADM" get identity-provider/instances/google/mappers \
+                      -r "$REALM" --fields id,name 2>/dev/null \
+                      | grep -B1 '"default-role-mapper"' | grep '"id"' \
+                      | sed 's/.*: "\(.*\)".*/\1/' | tr -d '[:space:]')
+                    [ -n "$MAPPER_ID" ] && \
+                      "$KCADM" update identity-provider/instances/google/mappers/"$MAPPER_ID" \
+                        -r "$REALM" \
+                        -s name=default-role-mapper \
+                        -s identityProviderMapper=oidc-hardcoded-role-idp-mapper \
+                        -s "config=$GOOGLE_MAPPER_CONFIG" \
+                      && echo "Google default-role mapper updated (role=$GOOGLE_ROLE)"
+                  fi
+
+                  # (2) Reconcile existing Google-linked users.
+                  # Inline python parses the user list JSON; for each user we
+                  # check federated-identity for "google" and grant the role.
+                  # Inline (no heredoc) so YAML literal block stays valid.
+                  USER_PAIRS=$("$KCADM" get users -r "$REALM" \
+                    --fields id,username -q max=1000 2>/dev/null \
+                    | python3 -c "import json,sys; [print(u.get('id','')+' '+u.get('username','')) for u in json.load(sys.stdin)]" 2>/dev/null || true)
+                  echo "$USER_PAIRS" | while read -r uid uname; do
+                    [ -z "$uid" ] && continue
+                    HAS_GOOGLE=$("$KCADM" get "users/$uid/federated-identity" -r "$REALM" 2>/dev/null \
+                      | grep -c '"identityProvider" : "google"' || true)
+                    if [ "$HAS_GOOGLE" -gt 0 ]; then
+                      "$KCADM" add-roles -r "$REALM" --uusername "$uname" --rolename "$GOOGLE_ROLE" 2>/dev/null \
+                        && echo "  granted $GOOGLE_ROLE to existing Google user: $uname" \
+                        || true  # no-op if already assigned
+                    fi
+                  done
+                fi
               else
                 echo "Google IdP credentials not set — skipping (set keycloak.google.{clientId,clientSecret} to enable)"
               fi

@@ -47,37 +47,39 @@ def extract_bearer_token(authorization: str | None) -> str:
 
 def validate_jwt_token(token: str) -> dict:
     """
-    Validate an RS256 JWT.
+    Validate an RS256 JWT issued by Keycloak.
     Returns decoded claims dict on success.
     Raises HTTP 401 on any validation failure.
+
+    Implementation: delegates to platform_shared.keycloak_auth.decode_token
+    which fetches Keycloak's JWKS (rotating set of RSA public keys) and
+    verifies signature, audience, issuer, and expiry. The previous
+    implementation used a STATIC local public key file (/keys/public.pem)
+    that didn't match Keycloak's signing key, so every Keycloak-issued
+    token failed signature verification with 401.
+
+    Audience and issuer are read from JWT_AUDIENCE / JWT_ISSUER env vars
+    (set in the platform-env ConfigMap), with the same defaults as the
+    rest of the platform.
     """
-    s = get_settings()
-    public_key = s.load_public_key()
+    import os
+    from platform_shared.keycloak_auth import decode_token
+
+    audience = os.environ.get("JWT_AUDIENCE", "aispm-ui")
+    issuer   = os.environ.get("JWT_ISSUER")
+    if not issuer:
+        # Last-resort fallback if env var is unset — match agent-orchestrator
+        # default so the misconfiguration mode is uniform across services.
+        issuer = "http://keycloak.local:8180/realms/aispm"
+
     try:
-        claims = jwt.decode(
-            token,
-            public_key,
-            algorithms=[s.jwt_algorithm],
-            issuer=s.jwt_issuer,
-            options={
-                "verify_iss": True,
-                "verify_exp": True,
-                "verify_iat": True,
-                # tenant_id is not a standard Keycloak claim; callers default
-                # to "t1" via claims.get("tenant_id", "t1").  Requiring it
-                # here causes a 401 for all Keycloak-issued tokens.
-                "require": ["sub", "iss", "exp", "iat"],
-            },
-        )
-        return claims
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.MissingRequiredClaimError as e:
-        raise HTTPException(status_code=401, detail=f"Token missing required claim: {e}")
-    except jwt.InvalidIssuerError:
-        raise HTTPException(status_code=401, detail="Token issuer is invalid")
-    except jwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+        return decode_token(token, audience=audience, issuer=issuer)
+    except Exception as exc:
+        # decode_token raises a single Exception type (jose.JWTError or its
+        # subclasses, plus network failures from JWKS fetch). Collapse them
+        # all into a 401 with the upstream message — operationally clearer
+        # than guessing whether it was signature/aud/iss/exp/network.
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,9 +87,16 @@ def validate_jwt_token(token: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def require_admin_role(claims: dict) -> None:
-    """Raise HTTP 403 if caller does not hold the spm:admin role."""
-    roles = claims.get("roles", [])
-    if "spm:admin" not in roles:
+    """Raise HTTP 403 if caller does not hold the spm:admin or admin role.
+
+    Reads roles from BOTH locations because Keycloak issues realm roles
+    under `realm_access.roles` (nested), while older self-issued tokens
+    flatten them onto `roles` at the top level. Checking both keeps this
+    helper compatible with both issuance shapes.
+    """
+    roles = list(claims.get("roles") or [])
+    roles += list(claims.get("realm_access", {}).get("roles") or [])
+    if "spm:admin" not in roles and "admin" not in roles:
         raise HTTPException(
             status_code=403,
             detail="Operation requires spm:admin role",
