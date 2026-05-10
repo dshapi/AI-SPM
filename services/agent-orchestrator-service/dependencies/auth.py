@@ -197,6 +197,25 @@ async def get_current_identity(
     claims   = _decode_token(credentials.credentials)
     identity = _build_identity(claims)
 
+    # Reject tokens that decoded to an empty/anonymous identity:
+    # _decode_token() returns {} on signature/audience/issuer/expiry failure,
+    # and _build_identity() then defaults user_id to "anonymous". Without this
+    # check the request would proceed as an unauthenticated caller.
+    if not identity.user_id or identity.user_id == "anonymous":
+        logger.warning(
+            "auth: rejecting anonymous/empty identity trace=%s path=%s",
+            trace_id, request.url.path,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            headers={"WWW-Authenticate": "Bearer"},
+            detail={
+                "code":    "INVALID_TOKEN",
+                "message": "Token is missing, expired, or failed signature validation.",
+                "trace_id": trace_id,
+            },
+        )
+
     if identity.is_suspended():
         logger.warning("auth: suspended account user=%s trace=%s",
                        identity.user_id, trace_id)
