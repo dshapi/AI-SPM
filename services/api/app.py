@@ -887,14 +887,26 @@ async def chat(
             _model = _live_anthropic_model()
 
             # Tool loop — max 3 rounds to prevent runaway calls
+            import anthropic as _anth_mod
             for _round in range(3):
-                message = anthropic_client.messages.create(
-                    model=_model,
-                    max_tokens=1024,
-                    system=system_prompt,
-                    tools=tools,
-                    messages=messages,
-                )
+                _create_delay = 1.0
+                for _create_attempt in range(4):
+                    try:
+                        message = anthropic_client.messages.create(
+                            model=_model,
+                            max_tokens=1024,
+                            system=system_prompt,
+                            tools=tools,
+                            messages=messages,
+                        )
+                        break
+                    except _anth_mod.APIStatusError as _ae:
+                        if _ae.status_code == 529 and _create_attempt < 3:
+                            import time as _time_mod
+                            _time_mod.sleep(_create_delay)
+                            _create_delay *= 2
+                            continue
+                        raise
 
                 # If Claude wants to use a tool, execute it and loop back
                 if message.stop_reason == "tool_use":
@@ -958,6 +970,12 @@ async def chat(
                 _save_history(_redis, tenant_id, user_id, history)
         except Exception as e:
             log.error("Anthropic call failed: %s", e)
+            import anthropic as _anth_mod2
+            if isinstance(e, _anth_mod2.APIStatusError) and e.status_code == 529:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The AI service is temporarily overloaded. Please try again in a moment.",
+                )
             raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
 
     # 5. Output scanning — secrets/PII + OPA output policy
@@ -1679,20 +1697,31 @@ async def chat_stream(
                     "tools":      [t["name"] for t in _TOOLS],
                     "msg_count":  len(current_messages),
                 })
-                async with async_client.messages.stream(
-                    model=_live_anthropic_model(),
-                    max_tokens=1024,
-                    system=system_prompt,
-                    tools=_TOOLS,
-                    messages=current_messages,
-                ) as stream:
-                    # Stream text tokens to browser as they arrive
-                    async for text in stream.text_stream:
-                        full_text += text
-                        yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
+                import anthropic as _anth_stream
+                _stream_delay = 1.0
+                for _stream_attempt in range(4):
+                    try:
+                        async with async_client.messages.stream(
+                            model=_live_anthropic_model(),
+                            max_tokens=1024,
+                            system=system_prompt,
+                            tools=_TOOLS,
+                            messages=current_messages,
+                        ) as stream:
+                            # Stream text tokens to browser as they arrive
+                            async for text in stream.text_stream:
+                                full_text += text
+                                yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
 
-                    # Get completed message to check for tool requests
-                    final_msg = await stream.get_final_message()
+                            # Get completed message to check for tool requests
+                            final_msg = await stream.get_final_message()
+                        break  # success — exit retry loop
+                    except _anth_stream.APIStatusError as _ae:
+                        if _ae.status_code == 529 and _stream_attempt < 3:
+                            await asyncio.sleep(_stream_delay)
+                            _stream_delay *= 2
+                            continue
+                        raise
 
                 if final_msg.stop_reason != "tool_use":
                     break  # no tools — we're done
@@ -1810,7 +1839,12 @@ async def chat_stream(
 
         except Exception as e:
             log.error("Streaming LLM error: %s", e)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            import anthropic as _anth_exc
+            if isinstance(e, _anth_exc.APIStatusError) and e.status_code == 529:
+                _err_msg = "The AI service is temporarily overloaded. Please try again in a moment."
+            else:
+                _err_msg = "An error occurred while generating the response. Please try again."
+            yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
 
     return StreamingResponse(
         generate(),
