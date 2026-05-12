@@ -48,6 +48,9 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: aispm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec: {}   # empty spec = default-deny on every workload in the namespace
 ---
 # ── spm-mcp: agent pods → MCP tool server (port 8500) ────────────────────
@@ -66,6 +69,9 @@ metadata:
   name: spm-mcp-allow-agents
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: spm-mcp }
@@ -118,6 +124,9 @@ metadata:
   name: spm-llm-proxy-allow-agents
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: spm-llm-proxy }
@@ -162,6 +171,9 @@ metadata:
   name: spm-api-allow
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: spm-api }
@@ -228,6 +240,9 @@ metadata:
   name: api-allow
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: api }
@@ -285,6 +300,9 @@ metadata:
   name: ui-allow-ingress
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: ui }
@@ -314,6 +332,9 @@ metadata:
   name: kafka-allow-mesh
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: kafka }
@@ -339,6 +360,9 @@ metadata:
   name: spm-db-allow-platform
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: spm-db }
@@ -355,6 +379,9 @@ metadata:
   name: redis-allow-platform
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: redis }
@@ -381,6 +408,9 @@ metadata:
   name: opa-allow-platform
   namespace: {{ $platformNs }}
   labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     matchLabels: { app: opa }
@@ -395,3 +425,45 @@ spec:
             paths:
               - "/health"
               - "/v1/data/*"
+---
+# ── agent-orchestrator: ingress + intra-platform ──────────────────────────
+# /api/v1/* paths (sessions, policies, alerts, findings, lineage) are
+# routed here by the Istio VirtualService. Without an explicit ALLOW policy
+# for this workload, Istio would deny all inbound traffic once any other
+# workload in the namespace has a policy (the "strict-allowlist side-effect"
+# described in the design rules above).
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: orchestrator-allow
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: { app: agent-orchestrator }
+  action: ALLOW
+  rules:
+    # Intra-platform -- spm-api, api, aggregator, etc.
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+    # Ingress gateway (Istio + ingress-nginx)
+    - from:
+        - source:
+            namespaces: ["istio-system"]
+            principals: [{{ $ingressSa | quote }}]
+        - source:
+            namespaces: ["istio-system"]
+        - source:
+            namespaces: ["ingress-nginx"]
+    # PERMISSIVE-mode fallback for ingress-nginx without mTLS
+    - to:
+        - operation:
+            paths:
+              - "/api/v1*"
+              - "/health*"
+              - "/docs"
+              - "/openapi.json"

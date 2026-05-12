@@ -12,15 +12,16 @@ on (Phase 1, Task 4):
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI, Header
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import integrations_routes as ir  # noqa: E402  — sys.path set in conftest
-from integrations_routes import router, verify_jwt  # noqa: E402
+from integrations_routes import router  # noqa: E402
+from platform_shared.rbac import get_current_identity, IdentityContext
 
 
 # ─── 1. options_provider_filters helper ────────────────────────────────────
@@ -106,14 +107,14 @@ def client_with_vendor_db(vendor_capturing_db):
     async def _override_get_db():
         yield vendor_capturing_db
 
-    def _override_verify_jwt(authorization: Optional[str] = Header(None)):
-        if not authorization:
-            from fastapi import HTTPException
-            raise HTTPException(status_code=401, detail="Missing bearer token")
-        return {"sub": "u1", "roles": ["spm:admin"]}
+    def _override_identity():
+        return IdentityContext(
+            user_id="u1", tenant_id="t1", email=None, roles=["spm:admin"],
+            raw_claims={"sub": "u1", "roles": ["spm:admin"]},
+        )
 
-    app.dependency_overrides[get_db]      = _override_get_db
-    app.dependency_overrides[verify_jwt]  = _override_verify_jwt
+    app.dependency_overrides[get_db]               = _override_get_db
+    app.dependency_overrides[get_current_identity] = _override_identity
 
     return TestClient(app), vendor_capturing_db
 

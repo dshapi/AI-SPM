@@ -19,6 +19,11 @@ kind: Service
 metadata:
   name: spm-db
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   type: ExternalName
   externalName: {{ .Values.spmDb.externalName }}

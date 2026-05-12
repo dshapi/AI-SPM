@@ -50,6 +50,11 @@ kind: Certificate
 metadata:
   name: {{ .Values.ingress.tlsSecretName }}
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   secretName: {{ .Values.ingress.tlsSecretName }}
   # 90 days is the Let's Encrypt default; cert-manager renews at 2/3 of
@@ -71,6 +76,11 @@ kind: Certificate
 metadata:
   name: {{ .Values.ingress.tlsSecretName }}
   namespace: istio-system
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   secretName: {{ .Values.ingress.tlsSecretName }}
   duration: 2160h

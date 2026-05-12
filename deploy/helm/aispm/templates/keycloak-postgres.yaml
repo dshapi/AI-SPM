@@ -14,6 +14,11 @@ kind: Secret
 metadata:
   name: keycloak-postgres-secret
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
   POSTGRES_DB:       "keycloak"
@@ -27,7 +32,11 @@ metadata:
   name: keycloak-postgres
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: keycloak-postgres
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   serviceName: keycloak-postgres
   replicas: 1
@@ -90,7 +99,11 @@ metadata:
   name: keycloak-postgres
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: keycloak-postgres
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     app: keycloak-postgres

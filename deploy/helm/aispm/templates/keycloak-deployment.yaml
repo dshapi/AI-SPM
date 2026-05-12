@@ -11,7 +11,11 @@ metadata:
   name: keycloak
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: keycloak
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   replicas: 1
   selector:
@@ -22,10 +26,18 @@ spec:
       labels:
         app: keycloak
       annotations:
-        # Hold Keycloak until the Istio sidecar proxy is ready — without
-        # this, Keycloak starts before iptables rules are in place and
-        # receives a SIGTERM when the proxy restarts to apply them.
-        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+        # Istio sidecar disabled for the same reason as flink-jobmanager:
+        # the sidecar rewrites kubelet probes through pilot-agent's :15020
+        # status port and proxies to the app port (:8080).  During the
+        # 10-15 s JVM cold start the app is not yet bound to :8080, so every
+        # probe returns "connection refused".  If those failures exceed the
+        # liveness threshold the pod is killed before it ever becomes Ready
+        # — observed as a CrashLoopBackOff restart loop on cold clusters.
+        # Keycloak's traffic is fronted by the Istio VirtualService/Gateway
+        # for external access; internal callers (keycloak-bootstrap, spm-api
+        # JWKS fetch) use the ClusterIP service directly and are already
+        # inside the mesh — mTLS on the Keycloak pod itself adds no value.
+        sidecar.istio.io/inject: "false"
     spec:
       # ── Wait for Postgres before starting Keycloak ────────────────────────
       initContainers:
@@ -125,7 +137,11 @@ metadata:
   name: keycloak
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: keycloak
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     app: keycloak
@@ -140,6 +156,11 @@ kind: Secret
 metadata:
   name: keycloak-secret
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 type: Opaque
 stringData:
   admin-user: "admin"
@@ -148,6 +169,7 @@ stringData:
   seed-admin-password: {{ .Values.keycloak.seedAdminPassword | quote }}
   seed-auditor-password: {{ .Values.keycloak.seedAuditorPassword | quote }}
   seed-viewer-password: {{ .Values.keycloak.seedViewerPassword | quote }}
+  seed-analyst-password: {{ .Values.keycloak.seedAnalystPassword | default "analyst" | quote }}
   # Google IdP credentials. Empty by default — bootstrap Job skips IdP creation
   # if either is empty. Override via a gitignored values file or --set.
   google-client-id:     {{ (.Values.keycloak.google).clientId     | default "" | quote }}
@@ -162,7 +184,11 @@ kind: Job
 metadata:
   name: keycloak-bootstrap
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
   annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     # Helm hook: run after all resources are deployed
     "helm.sh/hook": post-install,post-upgrade
     "helm.sh/hook-weight": "10"
@@ -235,10 +261,19 @@ spec:
                 echo "WARN: master/security-admin-console client not found — skipping redirect URI pin"
               fi
 
-              # Realm (idempotent)
+              # Realm (idempotent create + idempotent settings update).
+              # registrationEmailAsUsername=false → users log in with their
+              # username (viewer, auditor…) not their email address.
+              # loginWithEmailAllowed=true keeps "Email" as an alternative.
               "$KCADM" get realms/"$REALM" > /dev/null 2>&1 || \
                 "$KCADM" create realms \
-                  -s realm="$REALM" -s enabled=true -s displayName="AISPM"
+                  -s realm="$REALM" -s enabled=true -s displayName="AISPM" \
+                  -s registrationEmailAsUsername=false \
+                  -s loginWithEmailAllowed=true
+              # Reconcile realm settings on re-runs (realm already exists).
+              "$KCADM" update realms/"$REALM" \
+                -s registrationEmailAsUsername=false \
+                -s loginWithEmailAllowed=true 2>/dev/null || true
 
               # Client (idempotent)
               CLIENT_EXISTS=$("$KCADM" get clients -r "$REALM" \
@@ -266,7 +301,7 @@ spec:
               fi
 
               # Roles (idempotent)
-              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer"; do
+              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer" "spm:security-analyst"; do
                 "$KCADM" get-roles -r "$REALM" --rolename "$ROLE" > /dev/null 2>&1 || \
                   "$KCADM" create roles -r "$REALM" -s name="$ROLE"
               done
@@ -329,20 +364,30 @@ spec:
                     -s "credentials=[{\"type\":\"password\",\"value\":\"$password\",\"temporary\":false}]"
                   echo "Created: $username"
                 else
+                  # Always reconcile the password so re-runs after a values change take effect.
+                  USER_ID=$("$KCADM" get users -r "$REALM" -q username="$username" \
+                    --fields id 2>/dev/null | grep '"id"' | head -1 | sed 's/.*"id" *: *"\([^"]*\)".*/\1/')
+                  if [ -n "$USER_ID" ]; then
+                    "$KCADM" set-password -r "$REALM" --userid "$USER_ID" \
+                      --new-password "$password" 2>/dev/null \
+                      && echo "Password synced: $username" || echo "WARN: password sync failed for $username"
+                  fi
                   echo "Exists: $username"
                 fi
                 "$KCADM" add-roles -r "$REALM" \
                   --uusername "$username" --rolename "$role" 2>/dev/null || true
               }
 
-              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"   "User"
-              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor" "User"
-              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"  "User"
+              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"    "User"
+              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor"  "User"
+              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"   "User"
+              create_user analyst "$SEED_ANALYST_PASSWORD" analyst "analyst@aispm.local" "Analyst"  "User"
 
               # Assign prefixed roles so both plain and spm: checks pass
-              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"   2>/dev/null || true
-              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor" 2>/dev/null || true
-              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"  2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"            2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor"          2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"           2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername analyst --rolename "spm:security-analyst" 2>/dev/null || true
 
               # ── Google identity provider (idempotent, optional) ──────────────
               # Creates a "google" social IdP in the aispm realm so the hosted
@@ -475,6 +520,11 @@ spec:
                 secretKeyRef:
                   name: keycloak-secret
                   key: seed-viewer-password
+            - name: SEED_ANALYST_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-analyst-password
             # Google IdP credentials — empty when not configured. The
             # bootstrap script branches on these being non-empty.
             - name: GOOGLE_CLIENT_ID

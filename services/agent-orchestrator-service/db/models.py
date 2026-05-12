@@ -11,6 +11,8 @@ Both are imported in alembic/env.py so autogenerate picks them up.
 """
 from __future__ import annotations
 
+import uuid as _uuid_mod
+
 from sqlalchemy import (
     Boolean,
     Column,
@@ -21,7 +23,10 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
+    UniqueConstraint,
+    func,
 )
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from db.base import Base
@@ -171,4 +176,32 @@ class ThreatFindingORM(Base):
         Index("ix_threat_findings_severity", "severity",  "status"),
         Index("ix_threat_findings_priority", "priority_score"),
         Index("ix_threat_findings_dedup",    "dedup_key"),
+    )
+
+
+class AuditAlertORM(Base):
+    """
+    Security events routed from Kafka (cpm.<tenant>.audit topic) that meet
+    the severity threshold (warning | critical).  Consumed by
+    audit_alert_consumer.py and exposed via GET /api/v1/alerts so the
+    Alerts page can display them alongside threat_findings.
+    """
+    __tablename__ = "audit_alerts"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=_uuid_mod.uuid4)
+    event_type = Column(String(128), nullable=False)
+    severity   = Column(String(32),  nullable=False)   # "warning" | "critical"
+    component  = Column(String(128))                   # source service
+    principal  = Column(String(255))                   # user_id from JWT
+    session_id = Column(String(255))
+    tenant_id  = Column(String(128), nullable=False)
+    details    = Column(Text, default="{}")            # JSON string
+    status     = Column(String(32), default="new")     # new | acknowledged | suppressed
+    ts         = Column(DateTime(timezone=True))       # event timestamp from payload
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        Index("ix_audit_alerts_tenant",   "tenant_id", "created_at"),
+        Index("ix_audit_alerts_severity", "severity",  "status"),
+        UniqueConstraint("event_type", "session_id", "ts", name="uq_audit_alert_dedup"),
     )

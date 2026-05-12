@@ -116,6 +116,10 @@ export async function fetchPostureSummary({ days = 30, tenantId = 'global', mode
     const qs = new URLSearchParams({ days: String(days), tenant_id: tenantId })
     if (modelId) qs.set('model_id', modelId)
     const res = await fetch(`${SPM_BASE}/posture/summary?${qs}`, { headers: await _authHeaders() })
+    if (res.status === 401 && typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+      window.location.href = '/login'
+      return null
+    }
     if (!res.ok) return null
     return await res.json().catch(() => null)
   } catch {

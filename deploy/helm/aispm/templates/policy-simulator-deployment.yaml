@@ -4,6 +4,11 @@ kind: Deployment
 metadata:
   name: policy-simulator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # 2 replicas + topology spread = no SPOF: 1-pod loss leaves the
   # service serving from the other replica on a different node.

@@ -160,7 +160,16 @@ async function _refreshAccessToken() {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body,
   })
-  if (!resp.ok) { _clearTokens(); return null }
+  if (!resp.ok) {
+    _clearTokens()
+    // Redirect to login when on a protected admin route so the user isn't
+    // left with a silently broken page after Keycloak restarts (which
+    // invalidates all refresh tokens). Public routes are unaffected.
+    if (typeof window !== 'undefined' && window.location.pathname.startsWith('/admin')) {
+      window.location.href = '/login'
+    }
+    return null
+  }
   const data = await resp.json()
   _token        = data.access_token
   _refreshToken = data.refresh_token

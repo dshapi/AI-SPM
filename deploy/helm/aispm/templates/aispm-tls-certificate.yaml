@@ -26,6 +26,11 @@ kind: Certificate
 metadata:
   name: aispm-tls
   namespace: istio-system
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   secretName: aispm-tls
   duration: 8760h  # 1 year — selfsigned doesn't have ACME rate limits

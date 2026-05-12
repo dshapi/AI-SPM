@@ -66,6 +66,12 @@ from platform_shared.security import (
 from platform_shared.kafka_utils import build_producer, safe_send, send_event
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
+from platform_shared.rbac import (
+    IdentityContext,
+    require_model_read,
+    require_session_read,
+    require_agent_manage,
+)
 
 # ── Prompt Security Service ───────────────────────────────────────────────────
 from prompt_security import PromptSecurityService, ScreeningContext
@@ -761,7 +767,7 @@ async def health(request: Request):
 
 
 @app.get("/inventory", response_model=ServiceInventory)
-async def inventory(claims: Dict = Depends(verify_jwt)):
+async def inventory(_identity: IdentityContext = Depends(require_model_read)):
     return ServiceInventory(
         service="cpm-api",
         version="3.0.0",
@@ -881,14 +887,26 @@ async def chat(
             _model = _live_anthropic_model()
 
             # Tool loop — max 3 rounds to prevent runaway calls
+            import anthropic as _anth_mod
             for _round in range(3):
-                message = anthropic_client.messages.create(
-                    model=_model,
-                    max_tokens=1024,
-                    system=system_prompt,
-                    tools=tools,
-                    messages=messages,
-                )
+                _create_delay = 1.0
+                for _create_attempt in range(4):
+                    try:
+                        message = anthropic_client.messages.create(
+                            model=_model,
+                            max_tokens=1024,
+                            system=system_prompt,
+                            tools=tools,
+                            messages=messages,
+                        )
+                        break
+                    except _anth_mod.APIStatusError as _ae:
+                        if _ae.status_code == 529 and _create_attempt < 3:
+                            import time as _time_mod
+                            _time_mod.sleep(_create_delay)
+                            _create_delay *= 2
+                            continue
+                        raise
 
                 # If Claude wants to use a tool, execute it and loop back
                 if message.stop_reason == "tool_use":
@@ -952,6 +970,12 @@ async def chat(
                 _save_history(_redis, tenant_id, user_id, history)
         except Exception as e:
             log.error("Anthropic call failed: %s", e)
+            import anthropic as _anth_mod2
+            if isinstance(e, _anth_mod2.APIStatusError) and e.status_code == 529:
+                raise HTTPException(
+                    status_code=503,
+                    detail="The AI service is temporarily overloaded. Please try again in a moment.",
+                )
             raise HTTPException(status_code=502, detail=f"LLM call failed: {e}")
 
     # 5. Output scanning — secrets/PII + OPA output policy
@@ -1673,20 +1697,31 @@ async def chat_stream(
                     "tools":      [t["name"] for t in _TOOLS],
                     "msg_count":  len(current_messages),
                 })
-                async with async_client.messages.stream(
-                    model=_live_anthropic_model(),
-                    max_tokens=1024,
-                    system=system_prompt,
-                    tools=_TOOLS,
-                    messages=current_messages,
-                ) as stream:
-                    # Stream text tokens to browser as they arrive
-                    async for text in stream.text_stream:
-                        full_text += text
-                        yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
+                import anthropic as _anth_stream
+                _stream_delay = 1.0
+                for _stream_attempt in range(4):
+                    try:
+                        async with async_client.messages.stream(
+                            model=_live_anthropic_model(),
+                            max_tokens=1024,
+                            system=system_prompt,
+                            tools=_TOOLS,
+                            messages=current_messages,
+                        ) as stream:
+                            # Stream text tokens to browser as they arrive
+                            async for text in stream.text_stream:
+                                full_text += text
+                                yield f"data: {json.dumps({'type': 'token', 'text': text})}\n\n"
 
-                    # Get completed message to check for tool requests
-                    final_msg = await stream.get_final_message()
+                            # Get completed message to check for tool requests
+                            final_msg = await stream.get_final_message()
+                        break  # success — exit retry loop
+                    except _anth_stream.APIStatusError as _ae:
+                        if _ae.status_code == 529 and _stream_attempt < 3:
+                            await asyncio.sleep(_stream_delay)
+                            _stream_delay *= 2
+                            continue
+                        raise
 
                 if final_msg.stop_reason != "tool_use":
                     break  # no tools — we're done
@@ -1804,7 +1839,12 @@ async def chat_stream(
 
         except Exception as e:
             log.error("Streaming LLM error: %s", e)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            import anthropic as _anth_exc
+            if isinstance(e, _anth_exc.APIStatusError) and e.status_code == 529:
+                _err_msg = "The AI service is temporarily overloaded. Please try again in a moment."
+            else:
+                _err_msg = "An error occurred while generating the response. Please try again."
+            yield f"data: {json.dumps({'type': 'error', 'message': _err_msg})}\n\n"
 
     return StreamingResponse(
         generate(),
@@ -1914,7 +1954,7 @@ def _merge_session_summaries(
 
 
 @app.get("/sessions")
-async def list_sessions(request: Request, claims: Dict = Depends(verify_jwt)):
+async def list_sessions(request: Request, _identity: IdentityContext = Depends(require_session_read)):
     """
     Return a summary of every session eligible for Lineage replay. Unions the
     api service's hot in-memory log (bounded LRU) with the orchestrator's
@@ -1928,7 +1968,7 @@ async def list_sessions(request: Request, claims: Dict = Depends(verify_jwt)):
 
 
 @app.get("/sessions/{session_id}/events")
-async def get_session_events(session_id: str, request: Request, claims: Dict = Depends(verify_jwt)):
+async def get_session_events(session_id: str, request: Request, _identity: IdentityContext = Depends(require_session_read)):
     """
     Return the full recorded event stream for *session_id* in WS-wire shape.
 
@@ -1983,31 +2023,21 @@ class SimulationScreenResponse(BaseModel):
 @app.post("/api/v1/simulation/screen", response_model=SimulationScreenResponse)
 async def simulation_screen(
     req: SimulationScreenRequest,
-    authorization: str = Header(None),
+    identity: IdentityContext = Depends(require_agent_manage),
 ):
     """
     Admin endpoint: run a prompt through all security layers without forwarding
     to the LLM.  Useful for policy tuning, incident investigation, and red-team
     regression testing.
 
-    Required roles: ``admin`` or ``security-admin``.
+    Required permission: agent.manage (held by spm:auditor, spm:security-analyst, spm:admin).
     """
-    token  = extract_bearer_token(authorization)
-    claims = validate_jwt_token(token)
-    roles  = claims.get("roles", [])
-
-    if not ({"admin", "security-admin"} & set(roles)):
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "forbidden", "required_roles": ["admin", "security-admin"]},
-        )
-
     ctx = ScreeningContext(
-        tenant_id  = req.tenant_id  or claims.get("tenant_id", "default"),
-        user_id    = req.user_id    or claims.get("sub", "unknown"),
+        tenant_id  = req.tenant_id  or identity.tenant_id or "default",
+        user_id    = req.user_id    or identity.user_id,
         session_id = req.session_id or None,
-        roles      = roles,
-        scopes     = claims.get("scopes", []),
+        roles      = identity.roles,
+        scopes     = identity.raw_claims.get("scopes", []),
     )
     result = await _pss.evaluate(req.prompt, ctx)
 

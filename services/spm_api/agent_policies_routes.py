@@ -26,17 +26,11 @@ from sqlalchemy import delete as sa_delete, select
 from spm.db.models  import Agent, AgentPolicy   # type: ignore
 from spm.db.session import get_db               # type: ignore
 
-# Re-use the auth wrappers in agent_routes (same lazy-resolution
-# trick that handles the bare-vs-packaged import for the spm-api
-# Dockerfile's flat layout).
-try:
-    from agent_routes import (                   # type: ignore
-        require_admin, verify_jwt, _app_module,
-    )
-except ModuleNotFoundError:                      # pragma: no cover
-    from services.spm_api.agent_routes import (
-        require_admin, verify_jwt, _app_module,
-    )
+from platform_shared.rbac import (
+    IdentityContext,
+    require_agent_read,
+    require_agent_write,
+)
 
 
 router = APIRouter(prefix="/agents", tags=["agents"])
@@ -89,9 +83,8 @@ async def _commit(db) -> None:
         await res
 
 
-def _actor(claims: Dict[str, Any]) -> str:
-    return (claims.get("sub") or claims.get("email")
-             or claims.get("user") or "system")
+def _actor(identity: IdentityContext) -> str:
+    return identity.user_id or identity.email or "system"
 
 
 # ─── GET — list current attachments ────────────────────────────────────────
@@ -100,7 +93,7 @@ def _actor(claims: Dict[str, Any]) -> str:
 async def list_agent_policies(
     agent_id: str,
     db = Depends(get_db),
-    _claims = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_agent_read),
 ) -> List[Dict[str, Any]]:
     await _get_agent_or_404(db, agent_id)
     rows = await _list_rows(db, agent_id)
@@ -114,7 +107,7 @@ async def replace_agent_policies(
     agent_id: str,
     body: Dict[str, Any],
     db = Depends(get_db),
-    claims = Depends(require_admin),
+    identity: IdentityContext = Depends(require_agent_write),
 ) -> List[Dict[str, Any]]:
     """Replace the agent's policy set atomically.
 
@@ -141,7 +134,7 @@ async def replace_agent_policies(
         for r in await _list_rows(db, agent_uuid):
             db.delete(r)
 
-    actor = _actor(claims)
+    actor = _actor(identity)
     for pid in sorted(desired):
         if not pid:
             continue
@@ -164,7 +157,7 @@ async def attach_policy(
     agent_id: str,
     policy_id: str,
     db = Depends(get_db),
-    claims = Depends(require_admin),
+    identity: IdentityContext = Depends(require_agent_write),
 ) -> Dict[str, Any]:
     agent = await _get_agent_or_404(db, agent_id)
     agent_uuid = agent.id
@@ -187,7 +180,7 @@ async def attach_policy(
         return _row_to_dict(existing)
 
     row = AgentPolicy(agent_id=agent_uuid, policy_id=pid,
-                      attached_by=_actor(claims))
+                      attached_by=_actor(identity))
     db.add(row)
     await _commit(db)
     return _row_to_dict(row)
@@ -204,7 +197,7 @@ async def detach_policy(
     agent_id: str,
     policy_id: str,
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_write),
 ):
     agent = await _get_agent_or_404(db, agent_id)
     agent_uuid = agent.id

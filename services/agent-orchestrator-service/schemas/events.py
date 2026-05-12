@@ -125,7 +125,9 @@ class SessionLifecycleEvent(BaseModel):
     """
     event_id:       UUID           = Field(default_factory=uuid4)
     event_type:     EventType
-    session_id:     UUID
+    # session_id is a free-form string -- the chat sessions use IDs like
+    # "session-1778614829220" and "agent-<uuid>-runtime" which are not UUIDs.
+    session_id:     str
     correlation_id: str            = Field(..., description="Shared trace ID across all steps")
     timestamp:      datetime       = Field(default_factory=_utcnow)
     step:           int            = Field(..., description="Sequence position in the session pipeline (1-based)")
@@ -270,7 +272,7 @@ class SessionCompletedPayload(BaseModel):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class SessionEventListResponse(BaseModel):
-    session_id:     UUID
+    session_id:     str
     correlation_id: str
     event_count:    int
     events:         List[SessionLifecycleEvent]

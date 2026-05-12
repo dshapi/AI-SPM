@@ -12,6 +12,11 @@ kind: Service
 metadata:
   name: opa
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: opa }
   ports:
@@ -29,6 +34,11 @@ kind: Service
 metadata:
   name: guard-model
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: guard-model }
   ports:
@@ -39,6 +49,11 @@ kind: Service
 metadata:
   name: garak-runner
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: garak-runner }
   ports:
@@ -49,6 +64,11 @@ kind: Service
 metadata:
   name: api
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: api }
   # ClientIP sessionAffinity pins each WebSocket connection to one pod,
@@ -69,6 +89,11 @@ kind: Service
 metadata:
   name: retrieval-gateway
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: retrieval-gateway }
   ports:
@@ -80,6 +105,11 @@ kind: Service
 metadata:
   name: processor
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: processor }
   ports:
@@ -91,6 +121,11 @@ kind: Service
 metadata:
   name: policy-decider
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: policy-decider }
   ports:
@@ -102,6 +137,11 @@ kind: Service
 metadata:
   name: agent
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: agent }
   ports:
@@ -113,6 +153,11 @@ kind: Service
 metadata:
   name: memory-service
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: memory-service }
   ports:
@@ -124,6 +169,11 @@ kind: Service
 metadata:
   name: executor
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: executor }
   ports:
@@ -135,6 +185,11 @@ kind: Service
 metadata:
   name: tool-parser
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: tool-parser }
   ports:
@@ -146,6 +201,11 @@ kind: Service
 metadata:
   name: output-guard
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: output-guard }
   ports:
@@ -157,6 +217,11 @@ kind: Service
 metadata:
   name: freeze-controller
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: freeze-controller }
   ports:
@@ -167,6 +232,11 @@ kind: Service
 metadata:
   name: policy-simulator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: policy-simulator }
   ports:
@@ -177,6 +247,11 @@ kind: Service
 metadata:
   name: flink-jobmanager
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: flink-jobmanager }
   # ── HA bootstrap requirement ──────────────────────────────────────────
@@ -220,7 +295,11 @@ metadata:
   name: flink-taskmanager
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: flink-taskmanager
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   clusterIP: None
   selector: { app: flink-taskmanager }
@@ -235,6 +314,11 @@ kind: Service
 metadata:
   name: spm-api
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: spm-api }
   ports:
@@ -245,6 +329,11 @@ kind: Service
 metadata:
   name: spm-mcp
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: spm-mcp }
   ports:
@@ -259,6 +348,11 @@ kind: Service
 metadata:
   name: spm-llm-proxy
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: spm-llm-proxy }
   ports:
@@ -275,6 +369,11 @@ kind: Service
 metadata:
   name: spm-aggregator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: spm-aggregator }
   ports:
@@ -286,6 +385,11 @@ kind: Service
 metadata:
   name: agent-orchestrator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: agent-orchestrator }
   ports:
@@ -296,6 +400,11 @@ kind: Service
 metadata:
   name: threat-hunting-agent
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: threat-hunting-agent }
   ports:
@@ -306,6 +415,11 @@ kind: Service
 metadata:
   name: ui
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector: { app: ui }
   ports:

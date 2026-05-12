@@ -59,44 +59,12 @@ except ModuleNotFoundError:                              # pragma: no cover
 from spm.db.models  import Agent             # type: ignore
 from spm.db.session import get_db            # type: ignore
 
-
-# ─── Auth wrappers ─────────────────────────────────────────────────────────
-#
-# Defined locally (rather than imported from app) for two reasons:
-#   1. Avoid the circular import — app.py imports our router at the
-#      bottom; if we imported from app at module load we'd deadlock.
-#   2. In the monorepo test env both ``services/api/app.py`` and
-#      ``services/spm_api/app.py`` sit on sys.path; ``import app`` can
-#      win whichever way and only one of them defines verify_jwt.
-#      Same lazy-resolution dance integrations_routes.py uses.
-
-def _app_module():
-    """Lazily resolve the spm_api ``app`` module — the only one that
-    defines ``verify_jwt`` / ``require_admin`` / ``_tenant_from_claims``."""
-    try:
-        import app as _m  # type: ignore
-        if hasattr(_m, "verify_jwt"):
-            return _m
-    except ModuleNotFoundError:
-        pass
-    from services.spm_api import app as _m  # type: ignore
-    return _m
-
-
-def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    """Wrapper that delegates to ``app.verify_jwt`` after FastAPI has
-    resolved the Header dependency (we pass the raw value through)."""
-    return _app_module().verify_jwt(authorization=authorization)
-
-
-def require_admin(claims: Dict[str, Any] = Depends(verify_jwt)) -> Dict[str, Any]:
-    if "spm:admin" not in claims.get("roles", []):
-        raise HTTPException(status_code=403, detail="spm:admin role required")
-    return claims
-
-
-def _tenant_from_claims(claims: Dict[str, Any], fallback: str = "t1") -> str:
-    return _app_module()._tenant_from_claims(claims, fallback=fallback)
+from platform_shared.rbac import (
+    IdentityContext,
+    require_agent_read,
+    require_agent_write,
+    require_agent_manage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -209,7 +177,7 @@ async def create_agent(
     deploy_after: bool       = Form(True),
     code:         UploadFile = File(...),
     db = Depends(get_db),
-    claims = Depends(require_admin),
+    identity: IdentityContext = Depends(require_agent_write),
 ):
     """Upload an ``agent.py``, validate it, persist the row, and
     optionally trigger deploy.
@@ -223,7 +191,7 @@ async def create_agent(
         raise HTTPException(status_code=422, detail=res.errors)
 
     agent_id  = uuid.uuid4()
-    tenant_id = _tenant_from_claims(claims, fallback="t1")
+    tenant_id = identity.tenant_id or "t1"
 
     # Write to the container path; remember the host-equivalent so
     # spawn_agent_container can pass it through to the docker daemon.
@@ -303,11 +271,11 @@ async def create_agent(
 @router.get("")
 async def list_agents(
     db = Depends(get_db),
-    claims = Depends(verify_jwt),
+    identity: IdentityContext = Depends(require_agent_read),
 ):
     """List agents in the caller's tenant. V1 falls back to ``"t1"`` if
     the JWT lacks a tenant claim — matches the migration seed."""
-    tenant_id = _tenant_from_claims(claims, fallback="t1")
+    tenant_id = identity.tenant_id or "t1"
     rows = await _list_agents_in_tenant(db, tenant_id)
     return [_to_dict(a) for a in rows]
 
@@ -318,7 +286,7 @@ async def list_agents(
 async def get_agent(
     agent_id: str = PathParam(...),
     db = Depends(get_db),
-    _claims = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_agent_read),
 ):
     a = await _get_agent_or_none(db, agent_id)
     if a is None:
@@ -333,7 +301,7 @@ async def patch_agent(
     agent_id: str,
     body: Dict[str, Any],
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_write),
 ):
     a = await _get_agent_or_none(db, agent_id)
     if a is None:
@@ -359,7 +327,7 @@ async def patch_agent(
 async def start_endpoint(
     agent_id: str,
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_manage),
 ):
     await start_agent(db, agent_id)
     return {"status": "starting"}
@@ -369,7 +337,7 @@ async def start_endpoint(
 async def stop_endpoint(
     agent_id: str,
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_manage),
 ):
     await stop_agent(db, agent_id)
     return {"status": "stopping"}
@@ -381,7 +349,7 @@ async def stop_endpoint(
 async def delete_endpoint(
     agent_id: str,
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_manage),
 ):
     await retire_agent(db, agent_id)
     # 204 — body must be empty.
@@ -617,7 +585,7 @@ async def agent_activity_endpoint(
     agent_id: str,
     limit: int = 50,
     db = Depends(get_db),
-    _claims = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_agent_manage),
 ):
     """Return the most recent activity entries for one agent, newest-first.
 

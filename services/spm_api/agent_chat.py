@@ -70,14 +70,7 @@ from spm.db.models  import (                                # type: ignore
 )
 from spm.db.session import get_db                           # type: ignore
 
-# Auth wrappers — same lazy-resolution trick the other agent_*
-# routes use so the Dockerfile's flat layout works.
-try:
-    from agent_routes import verify_jwt, _tenant_from_claims  # type: ignore
-except ModuleNotFoundError:                                  # pragma: no cover
-    from services.spm_api.agent_routes import (
-        verify_jwt, _tenant_from_claims,
-    )
+from platform_shared.rbac import IdentityContext, require_chat_invoke
 
 log = logging.getLogger(__name__)
 
@@ -448,7 +441,7 @@ async def chat_endpoint(
     body:          Dict[str, Any],
     request:       Request,
     db = Depends(get_db),
-    claims = Depends(verify_jwt),
+    identity: IdentityContext = Depends(require_chat_invoke),
 ) -> StreamingResponse:
     """One-message round-trip with the full security pipeline."""
     text       = (body or {}).get("message")
@@ -460,7 +453,7 @@ async def chat_endpoint(
             status_code=400, detail="`message` (string) is required",
         )
 
-    tenant_id = _tenant_from_claims(claims, fallback="t1")
+    tenant_id = identity.tenant_id or "t1"
     agent = await _get_agent(db, agent_id)
     if agent is None or agent.tenant_id != tenant_id:
         raise HTTPException(status_code=404, detail="agent not found")

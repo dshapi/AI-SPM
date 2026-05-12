@@ -4,6 +4,11 @@ kind: Deployment
 metadata:
   name: flink-taskmanager
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # Default 2 TMs so slot capacity survives a 1-node loss (the JM still
   # has slots from the surviving TM and can re-issue tasks).  Single-TM

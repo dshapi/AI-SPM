@@ -24,6 +24,11 @@ kind: PeerAuthentication
 metadata:
   name: default
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   mtls:
     mode: {{ .Values.agentRuntime.mtlsMode | default "PERMISSIVE" }}

@@ -11,6 +11,11 @@ kind: TracingPolicy
 metadata:
   name: agent-no-exec
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:
@@ -35,6 +40,11 @@ kind: TracingPolicy
 metadata:
   name: agent-no-raw-socket
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:
@@ -59,6 +69,11 @@ kind: TracingPolicy
 metadata:
   name: agent-no-proc-write
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:

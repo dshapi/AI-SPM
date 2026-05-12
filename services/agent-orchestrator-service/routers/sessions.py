@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import logging
 from typing import Optional
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
@@ -213,7 +212,7 @@ async def create_session(
     },
 )
 async def get_session(
-    session_id: UUID,
+    session_id: str,
     request: Request,
     response: Response,
     identity: IdentityContext = Depends(require_session_read),
@@ -294,7 +293,7 @@ async def get_session(
     },
 )
 async def get_session_events(
-    session_id: UUID,
+    session_id: str,
     request: Request,
     response: Response,
     identity: IdentityContext = Depends(require_session_read),

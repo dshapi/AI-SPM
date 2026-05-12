@@ -31,21 +31,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from spm.db.models import PostureSnapshot
 from spm.db.session import get_db
 
-# verify_jwt is exposed by app.py — same lazy-import dance as
-# integrations_routes.py so this module is importable in tests where
-# only the route module is loaded without spinning up the full app.
-import importlib
+from platform_shared.rbac import IdentityContext, require_posture_read
 
 log = logging.getLogger(__name__)
-
-
-def _app_module():
-    return importlib.import_module("app")
-
-
-def verify_jwt(authorization=None):
-    return _app_module().verify_jwt(authorization=authorization)
-
 
 router = APIRouter(prefix="/posture", tags=["posture"])
 
@@ -107,7 +95,7 @@ async def list_snapshots(
     tenant_id: str = Query("global"),
     model_id: Optional[UUID] = Query(None, description="omit for platform aggregate"),
     db: AsyncSession = Depends(get_db),
-    _claims: Dict[str, Any] = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_posture_read),
 ):
     """Daily snapshots ordered by `snapshot_at` ASC.
 
@@ -143,7 +131,7 @@ async def summary(
     tenant_id: str = Query("global"),
     model_id: Optional[UUID] = Query(None),
     db: AsyncSession = Depends(get_db),
-    _claims: Dict[str, Any] = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_posture_read),
 ):
     """KPI rollup over the requested window.
 

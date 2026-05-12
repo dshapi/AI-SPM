@@ -30,8 +30,9 @@ create_user() {
   "$KCADM" add-roles -r "$REALM" --uusername "$username" --rolename "$role" 2>/dev/null || true
 }
 
-create_user "admin@aispm.local"   "${SEED_ADMIN_PASSWORD}"   "spm:admin"   "admin@aispm.local"
-create_user "auditor@aispm.local" "${SEED_AUDITOR_PASSWORD}" "spm:auditor" "auditor@aispm.local"
-create_user "viewer@aispm.local"  "${SEED_VIEWER_PASSWORD}"  "spm:viewer"  "viewer@aispm.local"
+create_user "admin@aispm.local"    "${SEED_ADMIN_PASSWORD}"            "spm:admin"            "admin@aispm.local"
+create_user "auditor@aispm.local"  "${SEED_AUDITOR_PASSWORD}"          "spm:auditor"          "auditor@aispm.local"
+create_user "viewer@aispm.local"   "${SEED_VIEWER_PASSWORD}"           "spm:viewer"           "viewer@aispm.local"
+create_user "analyst@aispm.local"  "${SEED_ANALYST_PASSWORD:-analyst}" "spm:security-analyst" "analyst@aispm.local"
 
 echo "Keycloak user seeding complete."

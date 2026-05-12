@@ -1162,6 +1162,28 @@ async def ensure_schema() -> None:
                   file=_sys.stderr, flush=True)
             raise
         log.info("✓ schema at head")
+
+        # Belt-and-suspenders: create_all picks up any ORM models added after
+        # the last committed migration without requiring a new migration file.
+        # Idempotent — skips tables that already exist.  Use print() not log
+        # because alembic's fileConfig may have just disabled our logger
+        # (see the asyncpg-vs-sync comment above for the same class of bug).
+        import sys as _sys
+        try:
+            from sqlalchemy import create_engine as _create_engine
+            from spm.db.models import Base as _Base  # type: ignore
+            _engine = _create_engine(sync_url or raw_url)
+            with _engine.begin() as _conn:
+                _Base.metadata.create_all(_conn)
+            _engine.dispose()
+            print("[seed_all] ✓ create_all safety pass complete",
+                  file=_sys.stderr, flush=True)
+        except Exception as _exc:
+            import traceback as _tb
+            print(f"[seed_all] ✗ create_all safety pass failed: {type(_exc).__name__}: {_exc}",
+                  file=_sys.stderr, flush=True)
+            print(f"[seed_all] traceback:\n{_tb.format_exc()}",
+                  file=_sys.stderr, flush=True)
     finally:
         # Re-enable our logger in case fileConfig disabled it (defense in
         # depth alongside the env.py patch).
@@ -1170,6 +1192,70 @@ async def ensure_schema() -> None:
             os.environ["SPM_DB_URL"] = saved_url
         elif "SPM_DB_URL" in os.environ:
             del os.environ["SPM_DB_URL"]
+
+
+async def seed_rbac_matrix(db) -> int:
+    """Seed the default RBAC permission matrix into rbac_role_permissions.
+
+    Idempotent — uses INSERT ... ON CONFLICT DO NOTHING so existing overrides
+    made via the Settings UI are preserved.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from spm.db.models import RbacRolePermission  # type: ignore[import-not-found]
+
+    _MATRIX = {
+        "spm:viewer": [
+            "session.read", "agent.read", "model.read",
+            "integration.read", "compliance.read", "posture.read",
+            "chat.invoke", "audit.read",
+        ],
+        "spm:auditor": [
+            "session.read", "agent.read", "model.read",
+            "integration.read", "compliance.read", "posture.read",
+            "chat.invoke", "audit.read",
+            "agent.invoke", "agent.write", "agent.manage",
+            "model.write", "model.delete",
+            "compliance.write", "posture.write", "audit.write",
+        ],
+        "spm:security-analyst": [
+            "session.read", "agent.read", "model.read",
+            "integration.read", "compliance.read", "posture.read",
+            "chat.invoke", "audit.read",
+            "session.write", "session.override",
+            "agent.invoke", "agent.write", "agent.manage",
+        ],
+        "spm:admin": [
+            "session.read", "session.write", "session.override",
+            "agent.invoke", "agent.read", "agent.write", "agent.manage",
+            "model.read", "model.write", "model.delete",
+            "integration.read", "integration.write",
+            "compliance.read", "compliance.write",
+            "posture.read", "posture.write",
+            "chat.invoke",
+            "audit.read", "audit.write",
+        ],
+    }
+
+    inserted = 0
+    for role, permissions in _MATRIX.items():
+        all_perms = set(_MATRIX["spm:admin"])
+        for perm in all_perms:
+            granted = perm in permissions
+            stmt = (
+                pg_insert(RbacRolePermission)
+                .values(
+                    id=uuid.uuid4(),
+                    role=role,
+                    permission=perm,
+                    granted=granted,
+                    updated_by="seed",
+                )
+                .on_conflict_do_nothing(index_elements=["role", "permission"])
+            )
+            result = await db.execute(stmt)
+            inserted += result.rowcount
+    await db.commit()
+    return inserted
 
 
 async def seed_models(db) -> int:
@@ -1410,6 +1496,14 @@ async def seed_spm_db() -> int:
             log.error("✗ seed_system_agents failed: %s", e, exc_info=True)
             errors += 1
 
+    async with factory() as db:
+        try:
+            n = await seed_rbac_matrix(db)
+            log.info("✓ rbac_role_permissions: seeded %d rows", n)
+        except Exception as e:
+            log.error("✗ seed_rbac_matrix failed: %s", e, exc_info=True)
+            errors += 1
+
     if errors:
         log.error("✗ spm-db seed completed with %d error(s)", errors)
         return 1
@@ -1501,6 +1595,64 @@ async def seed_orchestrator_db(session_factory) -> None:
                 ))
             await db.commit()
             log.info("seed_demo: committed %d demo findings", len(missing_findings))
+
+
+    # Audit alerts
+    async with session_factory() as db:
+        await _seed_audit_alerts(db)
+
+
+async def _seed_audit_alerts(db) -> None:
+    """Seed ~15 demo audit alert rows across the last 7 days. Idempotent."""
+    from sqlalchemy import select, func as sqlfunc
+    from db.models import AuditAlertORM  # type: ignore[import-not-found]
+
+    count = (await db.execute(select(sqlfunc.count()).select_from(AuditAlertORM))).scalar()
+    if count and count > 0:
+        log.info("seed_demo: %d audit_alerts already present — skipping", count)
+        return
+
+    import json as _json
+
+    _ALERTS = [
+        # Prompt Security
+        {"event_type": "guard_model_block",      "severity": "critical", "component": "guard-model",        "hours_ago": 2,   "details": {"rule": "pii-leak-prevention", "prompt_snippet": "my SSN is"}},
+        {"event_type": "lexical_block",          "severity": "warning",  "component": "guard-model",        "hours_ago": 12,  "details": {"pattern": "ignore_previous_instructions"}},
+        {"event_type": "obfuscation_block",      "severity": "warning",  "component": "guard-model",        "hours_ago": 36,  "details": {"technique": "base64_injection"}},
+        {"event_type": "model_gate_block",       "severity": "critical", "component": "spm-api",            "hours_ago": 5,   "details": {"model": "gpt-4-turbo", "reason": "not in approved registry"}},
+        # Output Security
+        {"event_type": "output_blocked",         "severity": "critical", "component": "guard-model",        "hours_ago": 1,   "details": {"policy": "pii-output-guard", "redacted_fields": ["ssn", "dob"]}},
+        {"event_type": "secret_in_output",       "severity": "critical", "component": "cpm-api",            "hours_ago": 8,   "details": {"secret_type": "aws_access_key_id"}},
+        {"event_type": "output_redacted",        "severity": "warning",  "component": "guard-model",        "hours_ago": 48,  "details": {"fields_redacted": 3}},
+        # Memory & Retrieval
+        {"event_type": "memory_injection_attempt","severity":"critical", "component": "cpm-api",            "hours_ago": 3,   "details": {"vector_store": "rag-prod", "technique": "adversarial_query"}},
+        {"event_type": "context_tampering_detected","severity":"critical","component": "cpm-api",           "hours_ago": 18,  "details": {"session_id": "sess-tamper-001"}},
+        {"event_type": "memory_integrity_violation","severity":"warning", "component": "cpm-api",           "hours_ago": 72,  "details": {"store": "episodic-cache", "anomaly": "unexpected_entry"}},
+        # Tool & Agent
+        {"event_type": "tool_blocked",           "severity": "critical", "component": "cpm-api",            "hours_ago": 4,   "details": {"tool": "exec_shell", "policy": "no-shell-exec"}},
+        {"event_type": "tool_approval_requested","severity": "warning",  "component": "cpm-api",            "hours_ago": 24,  "details": {"tool": "database_query", "waiting_for": "admin"}},
+        # Behavioral
+        {"event_type": "cep_critical",           "severity": "critical", "component": "flink-cep-job",      "hours_ago": 6,   "details": {"pattern": "rapid_escalation", "score": 0.94}},
+        {"event_type": "cep_high",               "severity": "warning",  "component": "flink-cep-job",      "hours_ago": 30,  "details": {"pattern": "data_exfil_probe", "score": 0.77}},
+        {"event_type": "cep_medium",             "severity": "warning",  "component": "flink-cep-job",      "hours_ago": 120, "details": {"pattern": "unusual_token_volume", "score": 0.61}},
+    ]
+
+    for a in _ALERTS:
+        ts = _ago(hours=a["hours_ago"])
+        db.add(AuditAlertORM(
+            id=uuid.uuid4(),
+            event_type=a["event_type"],
+            severity=a["severity"],
+            component=a["component"],
+            principal="demo-user@aispm.local",
+            session_id=f"sess-demo-{a['event_type'][:12]}",
+            tenant_id="t1",
+            details=_json.dumps(a.get("details", {})),
+            status="new",
+            ts=ts,
+        ))
+    await db.commit()
+    log.info("seed_demo: committed %d demo audit_alerts", len(_ALERTS))
 
 
 # ── Public re-export for orchestrator main.py / tests
