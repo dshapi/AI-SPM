@@ -1590,6 +1590,45 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       return 0
     fi
 
+    # ── Auto-recover: StatefulSet immutable-field changes.
+    # Fields like volumeClaimTemplates and selector are immutable after
+    # creation. The safe recovery is to delete with --cascade=orphan so
+    # the pods (and their PVCs / data) remain intact, then re-apply the
+    # new spec. The new StatefulSet controller re-adopts the live pods.
+    # This is safe in dev; data is NOT wiped. If you want a clean slate
+    # (e.g. Kafka cluster-ID rotation), use RESET_KAFKA=1 instead.
+    if printf '%s' "$out" | grep -q 'StatefulSet "[^"]*" is invalid.*Forbidden\|StatefulSet "[^"]*".*spec.*immutable'; then
+      log "    detected immutable-StatefulSet apply failure — attempting auto-recovery (orphan delete)"
+      local stss
+      stss="$(printf '%s' "$out" \
+        | sed -nE 's/.*StatefulSet "([^"]+)" is invalid.*/\1/p' \
+        | sort -u)"
+      if [ -z "$stss" ]; then
+        err "    couldn't parse StatefulSet name from kubectl error — full output below"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed (immutable StatefulSet, parse fallback)"
+      fi
+      for sts in $stss; do
+        log "      deleting StatefulSet aispm/$sts with --cascade=orphan (pods + PVCs survive)"
+        kubectl -n aispm delete statefulset "$sts" \
+          --cascade=orphan --ignore-not-found --wait=true >/dev/null 2>&1 || true
+      done
+      log "    retrying tier=$tier apply..."
+      set +e
+      out="$(kubectl apply --server-side --force-conflicts -f "$file" 2>&1)"
+      rc=$?
+      set -e
+      if [ "${VERBOSE:-0}" = "1" ] && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+      fi
+      if [ "$rc" -ne 0 ]; then
+        err "    kubectl apply error output:"
+        printf '%s\n' "$out" >&2
+        die "tier=$tier apply failed after StatefulSet auto-recovery"
+      fi
+      return 0
+    fi
+
     # Anything else: ALWAYS print the captured kubectl output before die
     # (regardless of verbose) so the failure mode is never silent.
     err "    kubectl apply error output:"
