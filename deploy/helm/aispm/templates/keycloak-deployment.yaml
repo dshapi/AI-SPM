@@ -26,10 +26,18 @@ spec:
       labels:
         app: keycloak
       annotations:
-        # Hold Keycloak until the Istio sidecar proxy is ready — without
-        # this, Keycloak starts before iptables rules are in place and
-        # receives a SIGTERM when the proxy restarts to apply them.
-        proxy.istio.io/config: '{"holdApplicationUntilProxyStarts": true}'
+        # Istio sidecar disabled for the same reason as flink-jobmanager:
+        # the sidecar rewrites kubelet probes through pilot-agent's :15020
+        # status port and proxies to the app port (:8080).  During the
+        # 10-15 s JVM cold start the app is not yet bound to :8080, so every
+        # probe returns "connection refused".  If those failures exceed the
+        # liveness threshold the pod is killed before it ever becomes Ready
+        # — observed as a CrashLoopBackOff restart loop on cold clusters.
+        # Keycloak's traffic is fronted by the Istio VirtualService/Gateway
+        # for external access; internal callers (keycloak-bootstrap, spm-api
+        # JWKS fetch) use the ClusterIP service directly and are already
+        # inside the mesh — mTLS on the Keycloak pod itself adds no value.
+        sidecar.istio.io/inject: "false"
     spec:
       # ── Wait for Postgres before starting Keycloak ────────────────────────
       initContainers:
