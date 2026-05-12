@@ -425,3 +425,45 @@ spec:
             paths:
               - "/health"
               - "/v1/data/*"
+---
+# ── agent-orchestrator: ingress + intra-platform ──────────────────────────
+# /api/v1/* paths (sessions, policies, alerts, findings, lineage) are
+# routed here by the Istio VirtualService. Without an explicit ALLOW policy
+# for this workload, Istio would deny all inbound traffic once any other
+# workload in the namespace has a policy (the "strict-allowlist side-effect"
+# described in the design rules above).
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: orchestrator-allow
+  namespace: {{ $platformNs }}
+  labels: { app.kubernetes.io/managed-by: Helm, app.kubernetes.io/part-of: aispm }
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels: { app: agent-orchestrator }
+  action: ALLOW
+  rules:
+    # Intra-platform -- spm-api, api, aggregator, etc.
+    - from:
+        - source:
+            namespaces: [{{ $platformNs | quote }}]
+    # Ingress gateway (Istio + ingress-nginx)
+    - from:
+        - source:
+            namespaces: ["istio-system"]
+            principals: [{{ $ingressSa | quote }}]
+        - source:
+            namespaces: ["istio-system"]
+        - source:
+            namespaces: ["ingress-nginx"]
+    # PERMISSIVE-mode fallback for ingress-nginx without mTLS
+    - to:
+        - operation:
+            paths:
+              - "/api/v1*"
+              - "/health*"
+              - "/docs"
+              - "/openapi.json"
