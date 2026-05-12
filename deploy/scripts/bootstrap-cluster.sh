@@ -318,10 +318,15 @@ fi
 # clientSecret (Google IdP) and any other values that must not be committed.
 # Applied last so it wins over all other overlays.
 VALUES_LOCAL="${VALUES_LOCAL:-}"
-if [ -z "$VALUES_LOCAL" ] && [ -f "$HELM_CHART/values.local-secrets.yaml" ]; then
-  VALUES_LOCAL="$HELM_CHART/values.local-secrets.yaml"
-  echo "$(date +%H:%M:%S) [bootstrap] auto-detected local secrets overlay — VALUES_LOCAL=$VALUES_LOCAL"
-fi
+# Check both deploy/helm/aispm/ and deploy/helm/ (one level up) so the file
+# can live next to the chart directory or inside it — both are gitignored.
+for _lsearch in "$HELM_CHART/values.local-secrets.yaml" "$DEPLOY/helm/values.local-secrets.yaml"; do
+  if [ -z "$VALUES_LOCAL" ] && [ -f "$_lsearch" ]; then
+    VALUES_LOCAL="$_lsearch"
+    echo "$(date +%H:%M:%S) [bootstrap] auto-detected local secrets overlay — VALUES_LOCAL=$VALUES_LOCAL"
+  fi
+done
+unset _lsearch
 SKIP_PREFLIGHT=0
 TARGET="all"
 SECRETS_FROM=""      # optional override path; default is $REPO_ROOT/.env
