@@ -17,8 +17,8 @@ global:
 keycloak:
   adminPassword: "admin"
   seedAdminPassword: "admin"
-  seedAuditorPassword: "admin"
-  seedViewerPassword: "admin"
+  seedAuditorPassword: "auditor"
+  seedViewerPassword: "viewer"
   seedAnalystPassword: "analyst"
   # PostgreSQL backend — data persists across Keycloak pod restarts.
   # The StatefulSet uses the default StorageClass (kind: hostPath-backed `standard`).

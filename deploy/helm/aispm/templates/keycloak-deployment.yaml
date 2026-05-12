@@ -347,6 +347,14 @@ spec:
                     -s "credentials=[{\"type\":\"password\",\"value\":\"$password\",\"temporary\":false}]"
                   echo "Created: $username"
                 else
+                  # Always reconcile the password so re-runs after a values change take effect.
+                  USER_ID=$("$KCADM" get users -r "$REALM" -q username="$username" \
+                    --fields id 2>/dev/null | grep '"id"' | head -1 | sed 's/.*"id" *: *"\([^"]*\)".*/\1/')
+                  if [ -n "$USER_ID" ]; then
+                    "$KCADM" set-password -r "$REALM" --userid "$USER_ID" \
+                      --new-password "$password" 2>/dev/null \
+                      && echo "Password synced: $username" || echo "WARN: password sync failed for $username"
+                  fi
                   echo "Exists: $username"
                 fi
                 "$KCADM" add-roles -r "$REALM" \
