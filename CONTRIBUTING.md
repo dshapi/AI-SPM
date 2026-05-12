@@ -11,15 +11,9 @@ This project focuses on **runtime security for AI systems (LLMs, agents, tools, 
 git clone https://github.com/dshapi/AI-SPM.git
 cd AI-SPM
 
-## 2. Run locally (Docker)
-docker compose up --build
-
 ## 3. Access services
 - Chat UI → http://localhost:3001
 - Admin UI → http://localhost:3001/admin/
-- API → http://localhost:8000  
-- Grafana → http://localhost:3000  
-- Prometheus → http://localhost:9090  
 
 ---
 
