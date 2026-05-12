@@ -244,13 +244,15 @@ function RbacMatrix({ isAdmin }) {
         </div>
       )}
 
-      {/* Tooltip */}
-      {tooltip && (
-        <div className="mb-3 px-3 py-2 bg-gray-800 text-white rounded-lg text-xs max-w-xs">
-          <span className="font-mono font-semibold">{tooltip.key}</span>
-          <span className="text-gray-300 ml-2">— {tooltip.desc}</span>
-        </div>
-      )}
+      {/* Tooltip — fixed-height slot prevents layout shift on hover */}
+      <div className="mb-3 h-8 flex items-center">
+        {tooltip && (
+          <div className="px-3 py-1.5 bg-gray-800 text-white rounded-lg text-xs max-w-xs">
+            <span className="font-mono font-semibold">{tooltip.key}</span>
+            <span className="text-gray-300 ml-2">— {tooltip.desc}</span>
+          </div>
+        )}
+      </div>
 
       {/* Matrix table */}
       <div className="overflow-x-auto rounded-xl border border-gray-200">
@@ -313,10 +315,10 @@ function RbacMatrix({ isAdmin }) {
                             className={cn(
                               'w-6 h-6 rounded border-2 flex items-center justify-center mx-auto transition-all',
                               role.admin
-                                ? 'bg-gray-100 border-gray-200 cursor-not-allowed'
+                                ? 'bg-gray-100 border-gray-400 cursor-not-allowed'
                                 : granted
                                   ? cn('bg-blue-600 border-blue-600', changed && 'ring-2 ring-amber-400 ring-offset-1')
-                                  : cn('bg-white border-gray-300', isAdmin && 'hover:border-blue-400 cursor-pointer', changed && 'ring-2 ring-amber-400 ring-offset-1'),
+                                  : cn('bg-gray-100 border-gray-400', isAdmin && 'hover:border-blue-500 hover:bg-white cursor-pointer', changed && 'ring-2 ring-amber-400 ring-offset-1'),
                             )}
                           >
                             {role.admin
@@ -371,19 +373,24 @@ export default function Settings() {
   // Determine if the current user has admin role to show/hide save controls.
   // The RBAC matrix GET endpoint requires audit.read (all roles); the PUT
   // endpoint enforces admin server-side — we just hide the controls here
-  // for a better UX. We use a simple heuristic: try to parse the JWT from
-  // localStorage.
+  // for a better UX.  We decode the JWT obtained via getToken() (which
+  // reads sessionStorage with the correct key).
   const [isAdmin, setIsAdmin] = useState(false)
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('kc_token') || localStorage.getItem('aispm_token') || ''
-      if (raw) {
+    (async () => {
+      try {
+        const raw = await getToken()
+        if (!raw) return
         const payload = JSON.parse(atob(raw.split('.')[1]))
-        const roles = payload?.realm_access?.roles || payload?.roles || []
+        const roles = [
+          ...(payload?.realm_access?.roles || []),
+          ...(payload?.roles || []),
+          ...(payload?.resource_access?.['aispm-ui']?.roles || []),
+        ]
         setIsAdmin(roles.some(r => r === 'spm:admin' || r === 'admin'))
-      }
-    } catch (_) { /* token absent or malformed — stay non-admin */ }
+      } catch (_) { /* token absent or malformed — stay non-admin */ }
+    })()
   }, [])
 
   return (

@@ -234,7 +234,6 @@ spmDb:
 platformEnv:
   OPA_URL: http://opa.aispm.svc.cluster.local:8181
   JWT_ALGORITHM: RS256
-  JWT_ISSUER: cpm-platform
   GUARD_MODEL_URL: http://guard-model.aispm.svc.cluster.local:8200
   GUARD_MODEL_ENABLED: "true"
   # Raised from 60 → 180 s: guard-model warms up lazily in a background
@@ -376,7 +375,7 @@ secrets:
   groqApiKey: "local"          # placeholder; set to real Groq key in prod
   anthropicApiKey: ""
   tavilyApiKey: ""
-  garakInternalSecret: ""
+  garakInternalSecret: "garak-dev-secret-changeme-in-prod"
   spmInternalBootstrapSecret: ""
   # Bearer token the threat-hunting-agent system service sends in its
   # Authorization header when calling spm-llm-proxy.

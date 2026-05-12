@@ -35,13 +35,14 @@ export function AppShell() {
   const mainRef                     = useRef(null)
   const { pathname }                = useLocation()
 
-  // Scroll the main content area back to the top on every route change.
-  // Without this, navigating from a scrolled page (e.g. Overview scrolled
-  // to the Launch tiles) retains the old scrollTop, showing blank space
-  // at the bottom of shorter destination pages.
+  // Scroll the main content area back to the top when navigating to a
+  // different page.  Compare only the first segment after /admin/ so
+  // within-page deep links (e.g. /admin/alerts/<id> when picking a row)
+  // do NOT yank the scroll position back up.
+  const pageKey = pathname.split('/').slice(0, 3).join('/')   // /admin/<page>
   useEffect(() => {
     if (mainRef.current) mainRef.current.scrollTop = 0
-  }, [pathname])
+  }, [pageKey])
 
   // NOTE: SimulationContext.Provider was moved UP to index.jsx so it wraps
   // BOTH the chat route (/) and the admin routes (/admin/*).  This lets
