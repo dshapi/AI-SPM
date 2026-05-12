@@ -1165,17 +1165,25 @@ async def ensure_schema() -> None:
 
         # Belt-and-suspenders: create_all picks up any ORM models added after
         # the last committed migration without requiring a new migration file.
-        # Idempotent — skips tables that already exist.
+        # Idempotent — skips tables that already exist.  Use print() not log
+        # because alembic's fileConfig may have just disabled our logger
+        # (see the asyncpg-vs-sync comment above for the same class of bug).
+        import sys as _sys
         try:
             from sqlalchemy import create_engine as _create_engine
-            from db.models import Base as _Base  # type: ignore
+            from spm.db.models import Base as _Base  # type: ignore
             _engine = _create_engine(sync_url or raw_url)
             with _engine.begin() as _conn:
                 _Base.metadata.create_all(_conn)
             _engine.dispose()
-            log.info("✓ create_all safety pass complete")
+            print("[seed_all] ✓ create_all safety pass complete",
+                  file=_sys.stderr, flush=True)
         except Exception as _exc:
-            log.warning("create_all safety pass failed (non-fatal): %s", _exc)
+            import traceback as _tb
+            print(f"[seed_all] ✗ create_all safety pass failed: {type(_exc).__name__}: {_exc}",
+                  file=_sys.stderr, flush=True)
+            print(f"[seed_all] traceback:\n{_tb.format_exc()}",
+                  file=_sys.stderr, flush=True)
     finally:
         # Re-enable our logger in case fileConfig disabled it (defense in
         # depth alongside the env.py patch).
