@@ -506,6 +506,10 @@ def init_db(db_url: str, create_tables: bool = True) -> None:
                     parent, e,
                 )
 
+    # pool_pre_ping reconnects stale connections automatically (important for
+    # long-lived processes where the DB server closes idle connections).
+    if not is_sqlite_memory:
+        engine_kwargs["pool_pre_ping"] = True
     engine = create_engine(db_url, **engine_kwargs)
     if create_tables:
         Base.metadata.create_all(engine, checkfirst=True)

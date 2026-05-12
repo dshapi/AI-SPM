@@ -12,7 +12,6 @@ consumers/audit_alert_consumer.py.
 """
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from typing import List, Optional
@@ -50,7 +49,7 @@ def _row_to_dict(row: AuditAlertORM) -> dict:
         "principal":  row.principal or "",
         "session_id": row.session_id or "",
         "tenant_id":  row.tenant_id,
-        "details":    json.loads(row.details or "{}"),
+        "details":    row.details if isinstance(row.details, dict) else {},
         "status":     row.status or "new",
         "ts":         row.ts.isoformat() if row.ts else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,

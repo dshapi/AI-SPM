@@ -1026,7 +1026,24 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "namespaces" ]; then
         _certdir="$REPO_ROOT/keys"
         _crt="$_certdir/aispm-tls.crt"
         _key="$_certdir/aispm-tls.key"
+        # Regenerate if missing OR if the cert issuer no longer matches the
+        # current mkcert CA root (happens after mkcert reinstall / CA rotation).
+        _need_cert=0
         if [ ! -f "$_crt" ] || [ ! -f "$_key" ]; then
+          _need_cert=1
+        else
+          _ca_root="$(mkcert -CAROOT 2>/dev/null)/rootCA.pem"
+          if [ -f "$_ca_root" ]; then
+            _ca_subj="$(openssl x509 -noout -subject -in "$_ca_root" 2>/dev/null)"
+            _cert_issuer="$(openssl x509 -noout -issuer -in "$_crt" 2>/dev/null)"
+            # issuer of cert should match subject of CA; if not, cert is stale
+            if [ "$_ca_subj" != "${_cert_issuer/issuer=/subject=}" ]; then
+              log "  mkcert: cert issuer mismatch — CA was rotated, regenerating cert"
+              _need_cert=1
+            fi
+          fi
+        fi
+        if [ "$_need_cert" = "1" ]; then
           mkdir -p "$_certdir"
           log "  mkcert: minting cert for $INGRESS_HOST_VAL → $_crt"
           (cd "$_certdir" && mkcert -cert-file "$_crt" -key-file "$_key" \
@@ -2267,7 +2284,50 @@ if [ "$TARGET" = "all" ]; then
   done
 fi
 
-# ── 9. Done ─────────────────────────────────────────────────────────────
+# ── 9. TLS certificate freshness check ──────────────────────────────────────
+# If mkcert was re-installed (CA rotated) since the cert was last generated,
+# the browser rejects WSS connections because the cert is signed by an old CA
+# that is no longer trusted. Re-generate and re-apply automatically.
+if command -v mkcert >/dev/null 2>&1 && [ "${INGRESS_CERTMANAGER:-false}" != "true" ]; then
+  _certdir="$REPO_ROOT/keys"
+  _crt="$_certdir/aispm-tls.crt"
+  _key="$_certdir/aispm-tls.key"
+  _stale=0
+  if [ ! -f "$_crt" ] || [ ! -f "$_key" ]; then
+    _stale=1
+  else
+    _ca_root="$(mkcert -CAROOT 2>/dev/null)/rootCA.pem"
+    if [ -f "$_ca_root" ]; then
+      _ca_subj="$(openssl x509 -noout -subject -in "$_ca_root" 2>/dev/null)"
+      _cert_issuer="$(openssl x509 -noout -issuer -in "$_crt" 2>/dev/null)"
+      [ "$_ca_subj" != "${_cert_issuer/issuer=/subject=}" ] && _stale=1
+    fi
+  fi
+  if [ "$_stale" = "1" ]; then
+    section "Step 9: TLS cert refresh (mkcert CA rotated)"
+    log "  mkcert CA mismatch — regenerating aispm-tls cert"
+    mkdir -p "$_certdir"
+    mkcert -install >/dev/null 2>&1 || true
+    INGRESS_HOST_VAL="$(yq -r '.ingress.host' "$VALUES_FILE" 2>/dev/null || echo aispm.lvh.me)"
+    (cd "$_certdir" && mkcert -cert-file "$_crt" -key-file "$_key" \
+      "$INGRESS_HOST_VAL" "*.${INGRESS_HOST_VAL}" localhost 127.0.0.1 ::1 >/dev/null) \
+      && log "  new cert minted → $_crt" \
+      || warn "  mkcert mint failed — WSS may be broken"
+    for ns in istio-system aispm; do
+      kubectl create namespace "$ns" --dry-run=client -o yaml \
+        | kubectl apply -f - >/dev/null 2>&1 || true
+      kubectl -n "$ns" create secret tls aispm-tls \
+        --cert="$_crt" --key="$_key" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null \
+        && log "  aispm-tls secret refreshed in $ns" \
+        || warn "  failed to refresh aispm-tls in $ns"
+    done
+  else
+    log "Step 9: TLS cert OK (signed by current mkcert CA)"
+  fi
+fi
+
+# ── 10. Done ─────────────────────────────────────────────────────────────
 section "DONE"
 INGRESS_HOST="$(yq -r '.ingress.host' "$VALUES_FILE" 2>/dev/null || echo aispm.local)"
 INGRESS_TLS="$(yq -r '.ingress.tls // false' "$VALUES_FILE" 2>/dev/null || echo false)"
