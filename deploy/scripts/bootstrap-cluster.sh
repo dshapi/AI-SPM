@@ -1937,7 +1937,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       ( kubectl -n aispm logs -f --all-containers --prefix --ignore-errors=true "$pod" 2>&1 >> "$plog" ) &
       logs_pid=$!
     fi
-    set +e; kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=180s; rc=$?; set -e
+    set +e; kubectl -n aispm rollout status statefulset/flink-jobmanager --timeout=300s; rc=$?; set -e
     [ -n "${logs_pid:-}" ] && { kill "$logs_pid" 2>/dev/null || true; wait "$logs_pid" 2>/dev/null || true; }
     if [ "$rc" -ne 0 ]; then
       echo "  ── statefulset/flink-jobmanager rollout failed (rc=$rc) ──" >&2
@@ -1950,32 +1950,51 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
       if [ -n "$pod" ]; then
         echo "  Pod describe (last 25 lines):" >&2
         kubectl -n aispm describe "pod/$pod" 2>&1 | tail -25 >&2 || true
-        echo "  pod log tail (last 60 lines):" >&2
-        tail -60 "$plog" >&2 || true
+        echo "  --- crash log (previous container restart) ---" >&2
+        kubectl -n aispm logs "$pod" --previous --container=flink-jobmanager \
+          2>/dev/null | tail -40 >&2 || true
       else
         echo "  (no pod ever appeared — check StatefulSet replicas / PVC binding / scheduling)" >&2
         kubectl -n aispm get pods 2>&1 | grep -E "flink|^NAME" >&2 || true
       fi
     fi
-    exit "$rc"
+    # Non-fatal: flink-jobmanager rollout failure is a WARNING.
+    # The CEP pipeline won't run until Flink recovers, but all other
+    # platform services (auth, API, UI, Kafka, alerts, RBAC) remain
+    # functional. Operator can diagnose with:
+    #   kubectl -n aispm logs flink-jobmanager-0 --previous -c flink-jobmanager
+    #   kubectl -n aispm delete configmap -l app.kubernetes.io/part-of=flink (clears HA state)
+    exit 0
   '
   bs_parallel "flink-taskmanager" wait_deploy_with_logs flink-taskmanager 120
   bs_wait_all "compute tier"
 
   # ── Phase 6: compute-init ────────────────────────────────────────────
   # flink-pyjob-submitter — submits the CEP PyFlink job to the now-
-  # running JobManager. Same pre-clean as Phase 3 — stale Failed jobs
-  # from prior runs would block the apply with "field is immutable".
-  log "  Phase 6: compute-init (flink-pyjob-submitter)"
-  if kubectl -n aispm get job flink-pyjob-submitter >/dev/null 2>&1; then
-    log "    pre-cleaning stale job/flink-pyjob-submitter"
-    kubectl -n aispm delete job flink-pyjob-submitter --ignore-not-found --wait=true >/dev/null
+  # running JobManager. Skip if jobmanager is not Ready (BackOff / crash).
+  _flink_jm_ready=0
+  if kubectl -n aispm get pod flink-jobmanager-0 \
+       -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null \
+       | grep -q "true"; then
+    _flink_jm_ready=1
   fi
-  apply_tier compute-init
-  log "    waiting for flink-pyjob-submitter Job to Complete..."
-  kubectl -n aispm wait --for=condition=Complete --timeout=300s \
-    job/flink-pyjob-submitter \
-    || die "flink-pyjob-submitter Job did not complete — check: kubectl -n aispm logs job/flink-pyjob-submitter"
+  log "  Phase 6: compute-init (flink-pyjob-submitter)"
+  if [ "$_flink_jm_ready" = "1" ]; then
+    if kubectl -n aispm get job flink-pyjob-submitter >/dev/null 2>&1; then
+      log "    pre-cleaning stale job/flink-pyjob-submitter"
+      kubectl -n aispm delete job flink-pyjob-submitter --ignore-not-found --wait=true >/dev/null
+    fi
+    apply_tier compute-init
+    log "    waiting for flink-pyjob-submitter Job to Complete..."
+    kubectl -n aispm wait --for=condition=Complete --timeout=300s \
+      job/flink-pyjob-submitter \
+      || warn "flink-pyjob-submitter Job did not complete — CEP pipeline won't run until Flink recovers"
+  else
+    warn "Phase 6 skipped — flink-jobmanager-0 is not Ready (see diagnostics above)."
+    warn "  To fix: kubectl -n aispm logs flink-jobmanager-0 --previous -c flink-jobmanager"
+    warn "  HA reset: kubectl -n aispm delete configmap -l app.kubernetes.io/part-of=flink"
+    warn "  Re-run bootstrap after Flink is healthy to submit the CEP job."
+  fi
 
   # ── Phase 7: frontend (already applied early in Phase 4.5) ──────────
   # We applied the frontend tier at Phase 4.5 (right after platform) so
