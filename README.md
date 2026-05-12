@@ -74,7 +74,7 @@ only re-deploy the AISPM chart take about 5 minutes.
 Once the bootstrap completes, navigate to:
 
 
-Click **Sign In** on either page — a demo JWT is minted automatically, no account needed.
+Click **Sign In** on either page —  demo account: admin / admin.
 
 **That's it!** You're up and running.
 
