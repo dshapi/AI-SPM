@@ -373,19 +373,24 @@ export default function Settings() {
   // Determine if the current user has admin role to show/hide save controls.
   // The RBAC matrix GET endpoint requires audit.read (all roles); the PUT
   // endpoint enforces admin server-side — we just hide the controls here
-  // for a better UX. We use a simple heuristic: try to parse the JWT from
-  // localStorage.
+  // for a better UX.  We decode the JWT obtained via getToken() (which
+  // reads sessionStorage with the correct key).
   const [isAdmin, setIsAdmin] = useState(false)
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem('kc_token') || localStorage.getItem('aispm_token') || ''
-      if (raw) {
+    (async () => {
+      try {
+        const raw = await getToken()
+        if (!raw) return
         const payload = JSON.parse(atob(raw.split('.')[1]))
-        const roles = payload?.realm_access?.roles || payload?.roles || []
+        const roles = [
+          ...(payload?.realm_access?.roles || []),
+          ...(payload?.roles || []),
+          ...(payload?.resource_access?.['aispm-ui']?.roles || []),
+        ]
         setIsAdmin(roles.some(r => r === 'spm:admin' || r === 'admin'))
-      }
-    } catch (_) { /* token absent or malformed — stay non-admin */ }
+      } catch (_) { /* token absent or malformed — stay non-admin */ }
+    })()
   }, [])
 
   return (
