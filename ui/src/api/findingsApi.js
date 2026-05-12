@@ -211,3 +211,72 @@ export async function linkFindingCase(id, case_id) {
     body: JSON.stringify({ case_id }),
   })
 }
+
+// ── Audit Alerts ─────────────────────────────────────────────────────────────
+
+const ALERT_CATEGORY = {
+  guard_model_block:           'Prompt Security',
+  lexical_block:               'Prompt Security',
+  obfuscation_block:           'Prompt Security',
+  opa_prompt_block:            'Prompt Security',
+  model_gate_block:            'Model Registry',
+  output_blocked:              'Output Security',
+  output_redacted:             'Output Security',
+  secret_in_output:            'Output Security',
+  memory_injection_attempt:    'Memory & Retrieval',
+  memory_integrity_violation:  'Memory & Retrieval',
+  context_tampering_detected:  'Memory & Retrieval',
+  tool_blocked:                'Tool & Agent',
+  tool_approval_requested:     'Tool & Agent',
+  agent_frozen_skip:           'Tool & Agent',
+  cep_critical:                'Behavioral',
+  cep_high:                    'Behavioral',
+  cep_medium:                  'Behavioral',
+  cep_low:                     'Behavioral',
+}
+
+function normalizeAlert(a) {
+  const category = ALERT_CATEGORY[a.event_type] || 'Security Event'
+  return {
+    id:          a.id,
+    source:      'audit',
+    category,
+    event_type:  a.event_type,
+    severity:    a.severity,
+    component:   a.component || '',
+    session_id:  a.session_id || '',
+    tenant_id:   a.tenant_id,
+    details:     a.details || {},
+    status:      a.status || 'new',
+    created_at:  a.created_at,
+    ts:          a.ts,
+    title:       `${category}: ${a.event_type.replace(/_/g, ' ')}`,
+    description: a.component ? `Detected by ${a.component}` : 'Security event detected',
+    time_ago:    timeAgo(a.created_at),
+    time_full:   formatFull(a.created_at),
+  }
+}
+
+/**
+ * Fetch audit alerts from /api/v1/alerts.
+ * @param {Object} params  - optional filters: severity, event_type, status, tenant_id, limit, offset
+ */
+export async function listAlerts(params = {}) {
+  const qs = new URLSearchParams(
+    Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+  ).toString()
+  const data = await apiFetch(`/alerts${qs ? `?${qs}` : ''}`)
+  return (data.items || []).map(normalizeAlert)
+}
+
+/**
+ * Update an alert's status (acknowledge / suppress).
+ * @param {string} id
+ * @param {'new'|'acknowledged'|'suppressed'} status
+ */
+export async function updateAlertStatus(id, status) {
+  return apiFetch(`/alerts/${id}/status`, {
+    method: 'PATCH',
+    body: JSON.stringify({ status }),
+  })
+}

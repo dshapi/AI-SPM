@@ -36,6 +36,17 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from platform_shared.rbac import (
+    IdentityContext,
+    get_current_identity,
+    require_model_read,
+    require_model_write,
+    require_compliance_read,
+    require_audit_read,
+    require_integration_read,
+    require_integration_write,
+)
+
 from spm.db.models import (
     ComplianceEvidence, ModelRegistry,
     ModelStatus, ModelProvider, ModelRiskTier, ModelType, PolicyCoverage,
@@ -82,7 +93,8 @@ def _load_public_key() -> str:
 
 
 def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
-    """Validate Keycloak JWT for all protected routes."""
+    """Thin shim kept for backward compat — route files still reference this
+    via the lazy _app_module() pattern until they migrate to RBAC deps."""
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing Bearer token")
     token = authorization.removeprefix("Bearer ")
@@ -98,7 +110,6 @@ def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict:
 
 def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
     roles = set(claims.get("roles", []))
-    # Accept both prefixed (spm:admin) and plain Keycloak realm roles (admin)
     if not (roles & {"spm:admin", "admin"}):
         raise HTTPException(status_code=403, detail="spm:admin role required")
     return claims
@@ -106,7 +117,6 @@ def require_admin(claims: Dict = Depends(verify_jwt)) -> Dict:
 
 def require_auditor(claims: Dict = Depends(verify_jwt)) -> Dict:
     roles = set(claims.get("roles", []))
-    # Accept both prefixed and plain Keycloak realm roles
     if not (roles & {"spm:admin", "admin", "spm:auditor", "auditor"}):
         raise HTTPException(status_code=403, detail="spm:auditor or spm:admin role required")
     return claims
@@ -505,11 +515,11 @@ async def _insert_model_row(
 async def register_model(
     body: ModelCreate,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_model_write),
 ) -> ModelResponse:
     """Register a new model. Returns 409 on (name, version, tenant) collision."""
-    await set_app_user(db, claims.get("sub", "unknown"))
-    tenant_id = body.tenant_id or _tenant_from_claims(claims)
+    await set_app_user(db, identity.user_id)
+    tenant_id = body.tenant_id or identity.tenant_id or "global"
     # Initial risk is derived from alerts_count; ignore anything the caller
     # sent so there's one source of truth.
     initial_risk = _risk_tier_from_alerts(body.alerts_count or 0)
@@ -623,7 +633,7 @@ async def register_model_with_file(
     ai_sbom:       Optional[str] = Form(None),       # JSON string; optional extra metadata
     file:          Optional[UploadFile] = File(None),
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_model_write),
 ) -> ModelResponse:
     """
     Register a model via multipart/form-data, with an optional model file.
@@ -632,8 +642,8 @@ async def register_model_with_file(
     <service-dir>/models), sha256'd, and its metadata is embedded in
     the row's ai_sbom under the "artifact" key.  Returns 409 on duplicate.
     """
-    await set_app_user(db, claims.get("sub", "unknown"))
-    effective_tenant = tenant_id or _tenant_from_claims(claims)
+    await set_app_user(db, identity.user_id)
+    effective_tenant = tenant_id or identity.tenant_id or "global"
 
     # Parse optional ai_sbom JSON blob
     sbom: Dict[str, Any] = {}
@@ -684,7 +694,7 @@ async def register_model_with_file(
 async def list_models(
     tenant_id: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_model_read),
 ) -> List[ModelResponse]:
     stmt = select(ModelRegistry)
     if tenant_id:
@@ -697,7 +707,7 @@ async def list_models(
 async def get_model(
     model_id: str,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_model_read),
 ) -> ModelResponse:
     result = await db.get(ModelRegistry, uuid.UUID(model_id))
     if not result:
@@ -715,10 +725,10 @@ async def transition_status(
     model_id: str,
     body: StatusTransition,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_model_write),
 ) -> ModelResponse:
     """Transition model lifecycle status. Validates state machine."""
-    await set_app_user(db, claims.get("sub", "unknown"))
+    await set_app_user(db, identity.user_id)
     model = await db.get(ModelRegistry, uuid.UUID(model_id))
     if not model:
         raise HTTPException(status_code=404, detail="Model not found")
@@ -732,7 +742,7 @@ async def transition_status(
 
     model.status = new_status
     if new_status == ModelStatus.approved:
-        model.approved_by = body.approved_by or claims.get("sub")
+        model.approved_by = body.approved_by or identity.user_id
         model.approved_at = datetime.now(tz=timezone.utc)
 
     await db.commit()
@@ -896,7 +906,7 @@ async def seed_compliance_evidence():
 async def compliance_report(
     format: str = "json",
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(require_auditor),
+    _identity: IdentityContext = Depends(require_compliance_read),
 ):
     """Generate NIST AI RMF compliance report."""
     from spm.compliance.evaluator import evaluate_all_controls
@@ -960,7 +970,7 @@ CPM_INVENTORY_ENDPOINTS = [
 @app.get("/sbom/refresh")
 async def refresh_sbom(
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_model_read),
 ) -> Dict:
     """Aggregate AI-SBOM from all CPM service /inventory endpoints."""
     components = []
@@ -983,6 +993,84 @@ async def refresh_sbom(
         "unavailable_services": unavailable,
     }
     return sbom
+
+
+# ── RBAC matrix endpoints ────────────────────────────────────────────────────────
+
+from platform_shared.rbac import Permission as _Permission, _ROLE_PERMISSIONS as _HARDCODED_MATRIX  # noqa: E402
+from spm.db.models import RbacRolePermission as _RbacRow  # noqa: E402
+
+_MANAGED_ROLES = ["spm:viewer", "spm:auditor", "spm:security-analyst", "spm:admin"]
+_ALL_PERMISSIONS = [p.value for p in _Permission]
+
+
+def _build_matrix_from_db(rows: List) -> Dict[str, Dict[str, bool]]:
+    """Overlay DB rows on top of hardcoded defaults."""
+    # Start from defaults
+    matrix: Dict[str, Dict[str, bool]] = {}
+    for role in _MANAGED_ROLES:
+        role_perms = _HARDCODED_MATRIX.get(role, frozenset())
+        matrix[role] = {p: (p in {x.value for x in role_perms}) for p in _ALL_PERMISSIONS}
+    # Apply DB overrides
+    for row in rows:
+        if row.role in matrix and row.permission in matrix[row.role]:
+            matrix[row.role][row.permission] = row.granted
+    return matrix
+
+
+@app.get("/rbac/matrix")
+async def get_rbac_matrix(
+    db: AsyncSession = Depends(get_db),
+    _identity: IdentityContext = Depends(require_audit_read),
+) -> Dict:
+    """Return the full RBAC permission matrix. Any authenticated user with audit.read may view."""
+    result = await db.execute(select(_RbacRow))
+    rows = result.scalars().all()
+    return _build_matrix_from_db(rows)
+
+
+class RbacMatrixUpdate(BaseModel):
+    matrix: Dict[str, Dict[str, bool]]
+
+
+@app.put("/rbac/matrix")
+async def put_rbac_matrix(
+    body: RbacMatrixUpdate,
+    db: AsyncSession = Depends(get_db),
+    identity: IdentityContext = Depends(require_model_write),
+) -> Dict:
+    """Upsert RBAC matrix overrides. Only spm:admin may call this.
+
+    Accepts the same shape returned by GET /rbac/matrix:
+      { "spm:viewer": { "session.read": true, ... }, ... }
+    """
+    if not identity.is_admin():
+        raise HTTPException(status_code=403, detail="Only spm:admin may update the RBAC matrix")
+
+    from sqlalchemy.dialects.postgresql import insert as pg_insert  # noqa: E402
+
+    for role, perms in body.matrix.items():
+        if role not in _MANAGED_ROLES:
+            continue
+        for perm, granted in perms.items():
+            if perm not in _ALL_PERMISSIONS:
+                continue
+            stmt = pg_insert(_RbacRow).values(
+                id=uuid.uuid4(),
+                role=role,
+                permission=perm,
+                granted=bool(granted),
+                updated_by=identity.user_id,
+            ).on_conflict_do_update(
+                index_elements=["role", "permission"],
+                set_={"granted": bool(granted), "updated_by": identity.user_id},
+            )
+            await db.execute(stmt)
+
+    await db.commit()
+    result = await db.execute(select(_RbacRow))
+    rows = result.scalars().all()
+    return _build_matrix_from_db(rows)
 
 
 # ── Prometheus metrics ─────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ import Integrations  from './admin/pages/Integrations.jsx'
 import Identity      from './admin/pages/Identity.jsx'
 import Data          from './admin/pages/Data.jsx'
 import Placeholder   from './admin/pages/Placeholder.jsx'
+import Settings      from './admin/pages/Settings.jsx'
 import './index.css'
 
 /**
@@ -143,7 +144,7 @@ ReactDOM.createRoot(document.getElementById('root')).render(
 
             {/* ── Platform ── */}
             <Route path="integrations" element={<Integrations />} />
-            <Route path="settings"     element={<Placeholder title="Settings" description="Configuration, thresholds, and notifications." />} />
+            <Route path="settings"     element={<Settings />} />
           </Route>
 
           {/* Any unknown path → Overview */}

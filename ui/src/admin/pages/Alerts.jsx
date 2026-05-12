@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { ActionPanel }         from '../../findings/actions/ActionPanel.jsx'
 import { getActionsForFinding } from '../../findings/actions/actionRegistry.js'
@@ -6,6 +6,7 @@ import { useFilterParams }  from '../../hooks/useFilterParams.js'
 import { useFindings, useFinding } from '../../hooks/useFindings.js'
 import { alertsFromEvents } from '../../lib/alertsFromEvents.js'
 import { useSimulationContext } from '../../context/SimulationContext.jsx'
+import { listAlerts, updateAlertStatus } from '../../api/findingsApi.js'
 import {
   Search, SlidersHorizontal, Plus, Download,
   ChevronRight, X, AlertTriangle,
@@ -395,11 +396,16 @@ function FindingsTable({ findings, selectedId, onSelect, loading }) {
                     <p className="text-[12.5px] font-semibold text-gray-800 leading-snug whitespace-nowrap">
                       {finding.title}
                     </p>
-                    <p className="text-[11px] text-gray-400 mt-0.5 font-medium">{finding.type || finding.detail}</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5 font-medium">{finding.type || finding.detail || finding.description}</p>
                   </div>
                   {finding.source === 'simulation' && (
                     <Badge variant="neutral" className="gap-1 pl-1.5 pr-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap bg-blue-50 text-blue-600 border-blue-200">
                       Simulation
+                    </Badge>
+                  )}
+                  {finding.source === 'audit' && (
+                    <Badge variant="neutral" className="gap-1 pl-1.5 pr-1.5 py-0.5 text-[10px] font-semibold whitespace-nowrap bg-amber-50 text-amber-700 border-amber-200">
+                      {finding.category || 'Security Event'}
                     </Badge>
                   )}
                 </div>
@@ -1030,10 +1036,50 @@ export default function Alerts() {
   const { simEvents } = useSimulationContext()
   const simAlerts = alertsFromEvents(simEvents)
 
+  // ── Audit alerts (polled every 30s from /api/v1/alerts) ───────────────────
+  const [auditAlerts, setAuditAlerts] = useState([])
+  const [typeFilter, setTypeFilter] = useState('All')
+
+  useEffect(() => {
+    let cancelled = false
+    async function fetchAlerts() {
+      try {
+        const items = await listAlerts({ limit: 200 })
+        if (!cancelled) setAuditAlerts(items)
+      } catch (_) { /* non-fatal — findings still shown */ }
+    }
+    fetchAlerts()
+    const timer = setInterval(fetchAlerts, 30_000)
+    return () => { cancelled = true; clearInterval(timer) }
+  }, [])
+
+  const handleAuditStatus = useCallback(async (id, newStatus) => {
+    await updateAlertStatus(id, newStatus)
+    setAuditAlerts(prev => prev.map(a => a.id === id ? { ...a, status: newStatus } : a))
+  }, [])
+
+  // ── Type filter options ────────────────────────────────────────────────────
+  const TYPE_OPTIONS = [
+    'All', 'Threat Finding',
+    'Prompt Security', 'Output Security',
+    'Memory & Retrieval', 'Tool & Agent',
+    'Behavioral', 'Model Registry',
+  ]
+
   // ── Client-side secondary filter (search, highRiskOnly) ───────────────────
-  // Merge sim alerts with findings for display (sim alerts prepended)
-  const allItems = [...simAlerts, ...findings]
+  // Merge sim alerts + findings + audit alerts for display
+  const allItems = [
+    ...simAlerts,
+    ...findings.map(f => ({ ...f, source: f.source || 'finding' })),
+    ...auditAlerts,
+  ]
   const filtered = allItems.filter(f => {
+    // Type filter
+    if (typeFilter !== 'All') {
+      if (typeFilter === 'Threat Finding' && f.source === 'audit') return false
+      if (typeFilter !== 'Threat Finding' && f.source !== 'audit') return false
+      if (typeFilter !== 'Threat Finding' && f.category !== typeFilter) return false
+    }
     if (search) {
       const q = search.toLowerCase()
       const titleMatch = f.title.toLowerCase().includes(q)
@@ -1091,6 +1137,24 @@ export default function Alerts() {
 
       {/* Main panel */}
       <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+
+        {/* Type filter chips */}
+        <div className="px-5 pt-3 pb-1 border-b border-gray-100 flex items-center gap-2 flex-wrap">
+          {TYPE_OPTIONS.map(t => (
+            <button
+              key={t}
+              onClick={() => setTypeFilter(t)}
+              className={cn(
+                'px-3 py-1 rounded-full text-xs font-medium border transition-colors',
+                typeFilter === t
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'bg-white text-gray-600 border-gray-200 hover:bg-gray-50',
+              )}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
 
         {/* Filter bar */}
         <div className="px-5 py-2.5 border-b border-gray-100 bg-gray-50/30">

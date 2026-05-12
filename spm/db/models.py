@@ -521,6 +521,31 @@ class AgentChatMessage(Base):
     session    = relationship("AgentChatSession", back_populates="messages")
 
 
+class RbacRolePermission(Base):
+    """
+    Persisted overrides for the RBAC permission matrix.
+
+    One row per (role, permission) pair.  The RBAC engine reads this
+    table on startup (cached in Redis with ~30s TTL) and falls back to
+    the hardcoded defaults in platform_shared.rbac when the table is
+    empty.  Only users with the spm:admin role may write here.
+    """
+    __tablename__ = "rbac_role_permissions"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    role       = Column(String(64), nullable=False)
+    permission = Column(String(64), nullable=False)
+    granted    = Column(Boolean, nullable=False, default=True)
+    updated_by = Column(String(255))
+    updated_at = Column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (UniqueConstraint("role", "permission", name="uq_rbac_role_permission"),)
+
+
 class AgentPolicy(Base):
     """
     Join table: which CPM policies are attached to which agent.

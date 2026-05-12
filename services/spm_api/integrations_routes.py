@@ -44,7 +44,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -669,59 +669,16 @@ async def _append_activity(
 
 # ─── Auth ────────────────────────────────────────────────────────────────────────
 
-# Thin wrappers around the app-level auth dependencies so the router stays
-# self-contained.  The bare `app` name matches the flattened Dockerfile
-# layout; when imported from the repo root during tests, we fall back to the
-# packaged path.
-
-def _app_module():
-    # Prefer the bare `app` name (matches the flattened Dockerfile layout
-    # used at runtime), but fall through to the packaged path if either
-    # (a) `app` isn't importable, or (b) `app` IS importable but resolves
-    # to a DIFFERENT service's app.py — for example in the monorepo test
-    # environment, `services/api/app.py` and `services/spm_api/app.py`
-    # both sit on sys.path, and which one `import app` wins depends on
-    # the order in tests/conftest.py.  Detect the wrong module by the
-    # absence of `verify_jwt` (only spm-api's app.py exposes it) and fall
-    # through to the explicit path.
-    try:
-        import app as _m  # type: ignore
-        if hasattr(_m, "verify_jwt"):
-            return _m
-    except ModuleNotFoundError:
-        pass
-    from services.spm_api import app as _m  # type: ignore
-    return _m
+from platform_shared.rbac import (  # noqa: E402
+    IdentityContext,
+    require_integration_read,
+    require_integration_write,
+    require_audit_read,
+)
 
 
-# NOTE: these wrappers must expose a FastAPI-introspectable signature.
-# Using (*args, **kwargs) breaks FastAPI's dependency injection — the DI
-# layer reads the wrapper's signature via inspect.signature() and cannot
-# see the Header/Depends markers that live on the real impl in app.py.
-# We mirror the real signatures here and call the underlying functions
-# directly (bypassing their Depends markers since the values are already
-# resolved by the time the wrapper runs).
-def verify_jwt(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
-    return _app_module().verify_jwt(authorization=authorization)
-
-
-def require_admin(claims: Dict[str, Any] = Depends(verify_jwt)) -> Dict[str, Any]:
-    if "spm:admin" not in claims.get("roles", []):
-        raise HTTPException(status_code=403, detail="spm:admin role required")
-    return claims
-
-
-def require_auditor(claims: Dict[str, Any] = Depends(verify_jwt)) -> Dict[str, Any]:
-    roles = claims.get("roles", [])
-    if "spm:admin" not in roles and "spm:auditor" not in roles:
-        raise HTTPException(
-            status_code=403, detail="spm:auditor or spm:admin role required"
-        )
-    return claims
-
-
-def _actor(claims: Dict[str, Any]) -> str:
-    return claims.get("sub") or claims.get("email") or "system"
+def _actor(identity: IdentityContext) -> str:
+    return identity.user_id or identity.email or "system"
 
 
 # ─── List / metrics ─────────────────────────────────────────────────────────────
@@ -741,7 +698,7 @@ async def list_integrations(
     status_: Optional[str] = Query(None, alias="status"),
     q: Optional[str] = Query(None, description="Case-insensitive name/description search"),
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_integration_read),
 ):
     stmt = select(Integration)
     if category:
@@ -764,7 +721,7 @@ async def list_integrations(
 @router.get("/metrics", response_model=MetricsOut)
 async def integrations_metrics(
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_integration_read),
 ):
     """Top-of-page KPIs for the Integrations dashboard."""
     total_q    = await db.execute(select(func.count()).select_from(Integration))
@@ -809,7 +766,7 @@ async def integrations_metrics(
 
 @router.get("/connector-types", response_model=List[Dict[str, Any]])
 async def get_connector_types(
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_integration_read),
 ):
     """Return the connector catalog — every vendor schema the platform
     knows how to render and probe.  Used by the Add Integration vendor
@@ -829,7 +786,7 @@ async def get_connector_types(
 async def create_integration(
     body: IntegrationCreate,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     try:
         status_enum = IntegrationStatus(body.status)
@@ -909,7 +866,7 @@ async def create_integration(
     if split_creds and row.status == IntegrationStatus.NotConfigured:
         row.status = IntegrationStatus.Healthy
 
-    await _write_log(db, row.id, "create", _actor(claims), "Success",
+    await _write_log(db, row.id, "create", _actor(identity), "Success",
                      message=f"Integration {row.name!r} created")
     await db.commit()
     await db.refresh(row)
@@ -920,7 +877,7 @@ async def create_integration(
 async def get_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_integration_read),
 ):
     row = await _get_integration_or_404(db, integration_id)
     return _detail(row)
@@ -931,7 +888,7 @@ async def update_integration(
     integration_id: str,
     body: IntegrationUpdate,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     row = await _get_integration_or_404(db, integration_id)
     changed: Dict[str, Any] = {}
@@ -950,7 +907,7 @@ async def update_integration(
             changed["status"] = body.status
         except ValueError:
             raise HTTPException(status_code=400, detail=f"Invalid status: {body.status!r}")
-    await _write_log(db, row.id, "update", _actor(claims), "Info",
+    await _write_log(db, row.id, "update", _actor(identity), "Info",
                      message=f"Updated {', '.join(changed.keys()) or 'no fields'}", detail=changed)
     await db.commit()
     await db.refresh(row)
@@ -961,7 +918,7 @@ async def update_integration(
 async def delete_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(require_admin),
+    _identity: IdentityContext = Depends(require_integration_write),
 ):
     row = await _get_integration_or_404(db, integration_id)
     await db.execute(delete(Integration).where(Integration.id == row.id))
@@ -974,13 +931,13 @@ async def delete_integration(
 
 @router.get("/{integration_id}/overview", response_model=IntegrationDetail)
 async def tab_overview(integration_id: str, db: AsyncSession = Depends(get_db),
-                       _claims: Dict = Depends(verify_jwt)):
+                       _identity: IdentityContext = Depends(require_integration_read)):
     return _detail(await _get_integration_or_404(db, integration_id))
 
 
 @router.get("/{integration_id}/connection", response_model=ConnectionOut)
 async def tab_connection(integration_id: str, db: AsyncSession = Depends(get_db),
-                         _claims: Dict = Depends(verify_jwt)):
+                         _identity: IdentityContext = Depends(require_integration_read)):
     row = await _get_integration_or_404(db, integration_id)
     c = row.connection
     return ConnectionOut(
@@ -995,7 +952,7 @@ async def tab_connection(integration_id: str, db: AsyncSession = Depends(get_db)
 
 @router.get("/{integration_id}/auth", response_model=AuthOut)
 async def tab_auth(integration_id: str, db: AsyncSession = Depends(get_db),
-                   _claims: Dict = Depends(verify_jwt)):
+                   _identity: IdentityContext = Depends(require_integration_read)):
     row = await _get_integration_or_404(db, integration_id)
     a = row.auth
     return AuthOut(
@@ -1008,7 +965,7 @@ async def tab_auth(integration_id: str, db: AsyncSession = Depends(get_db),
 
 @router.get("/{integration_id}/coverage", response_model=List[CoverageItem])
 async def tab_coverage(integration_id: str, db: AsyncSession = Depends(get_db),
-                       _claims: Dict = Depends(verify_jwt)):
+                       _identity: IdentityContext = Depends(require_integration_read)):
     row = await _get_integration_or_404(db, integration_id)
     return [CoverageItem(label=c.label, enabled=bool(c.enabled))
             for c in sorted(row.coverage or [], key=lambda x: x.position)]
@@ -1017,7 +974,7 @@ async def tab_coverage(integration_id: str, db: AsyncSession = Depends(get_db),
 @router.get("/{integration_id}/activity", response_model=List[ActivityItem])
 async def tab_activity(integration_id: str, limit: int = 50,
                        db: AsyncSession = Depends(get_db),
-                       _claims: Dict = Depends(verify_jwt)):
+                       _identity: IdentityContext = Depends(require_integration_read)):
     row = await _get_integration_or_404(db, integration_id)
     items = (row.activity or [])[:limit]
     return [ActivityItem(ts=a.ts_display, event=a.event,
@@ -1028,7 +985,7 @@ async def tab_activity(integration_id: str, limit: int = 50,
 
 @router.get("/{integration_id}/workflows", response_model=WorkflowsOut)
 async def tab_workflows(integration_id: str, db: AsyncSession = Depends(get_db),
-                        _claims: Dict = Depends(verify_jwt)):
+                        _identity: IdentityContext = Depends(require_integration_read)):
     row = await _get_integration_or_404(db, integration_id)
     w = row.workflows
     return WorkflowsOut(
@@ -1042,7 +999,7 @@ async def tab_workflows(integration_id: str, db: AsyncSession = Depends(get_db),
 @router.get("/{integration_id}/logs", response_model=List[LogItem])
 async def tab_logs(integration_id: str, limit: int = 200,
                    db: AsyncSession = Depends(get_db),
-                   _claims: Dict = Depends(require_auditor)):
+                   _identity: IdentityContext = Depends(require_audit_read)):
     row = await _get_integration_or_404(db, integration_id)
     items = (row.logs or [])[:limit]
     return [LogItem(
@@ -1064,7 +1021,7 @@ async def configure_integration(
     integration_id: str,
     body: ConfigureRequest,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     """
     Write/update credentials and/or config knobs.  Marks the integration
@@ -1137,7 +1094,7 @@ async def configure_integration(
                 cred.rotated_at = datetime.now(tz=timezone.utc)
                 await _append_activity(
                     db, row.id, f"{key.replace('_', ' ').title()} configured",
-                    "Success", actor=_actor(claims),
+                    "Success", actor=_actor(identity),
                 )
 
     # Config knobs (legacy explicit "config" dict) — merged into existing
@@ -1173,12 +1130,12 @@ async def configure_integration(
     if body.api_key is not None and body.api_key.strip():
         _upsert_secret("api_key", "Primary API key", body.api_key.strip())
         await _append_activity(db, row.id, "API key configured", "Success",
-                               actor=_actor(claims))
+                               actor=_actor(identity))
 
     if body.password is not None and body.password.strip():
         _upsert_secret("password", "Primary password", body.password.strip())
         await _append_activity(db, row.id, "Password configured", "Success",
-                               actor=_actor(claims))
+                               actor=_actor(identity))
 
     # Cert archetype: persist service_account_json alongside the other
     # secret-kinds.  The display name mirrors what Kafka/Vertex seeds
@@ -1190,7 +1147,7 @@ async def configure_integration(
             body.service_account_json.strip(),
         )
         await _append_activity(db, row.id, "Service account cert configured",
-                               "Success", actor=_actor(claims))
+                               "Success", actor=_actor(identity))
 
     # bootstrap_servers is the one config knob we promote to a first-class
     # request field so the Kafka form can send it without building a dict.
@@ -1204,7 +1161,7 @@ async def configure_integration(
         row.status = IntegrationStatus.Healthy
 
     await _write_log(
-        db, row.id, "configure", _actor(claims), "Success",
+        db, row.id, "configure", _actor(identity), "Success",
         message="Integration configured",
         detail={
             "config_keys":      list((body.config or {}).keys()),
@@ -1243,7 +1200,7 @@ async def configure_integration(
 async def test_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     """
     Live vendor health check.  Dispatches to a provider-specific probe that
@@ -1301,8 +1258,8 @@ async def test_integration(
 
     result = "Success" if ok else "Error"
     await _append_activity(db, row.id, f"Test connection — {result.lower()}", result,
-                           actor=_actor(claims))
-    await _write_log(db, row.id, "test", _actor(claims), result, message=msg)
+                           actor=_actor(identity))
+    await _write_log(db, row.id, "test", _actor(identity), result, message=msg)
     await db.commit()
     return {"ok": ok, "message": msg, "latency_ms": latency}
 
@@ -1311,14 +1268,14 @@ async def test_integration(
 async def disable_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     row = await _get_integration_or_404(db, integration_id)
     row.enabled = False
     row.status = IntegrationStatus.Disabled
     await _append_activity(db, row.id, "Integration disabled", "Info",
-                           actor=_actor(claims))
-    await _write_log(db, row.id, "disable", _actor(claims), "Info",
+                           actor=_actor(identity))
+    await _write_log(db, row.id, "disable", _actor(identity), "Info",
                      message="Integration disabled")
     await db.commit()
     await db.refresh(row)
@@ -1329,7 +1286,7 @@ async def disable_integration(
 async def enable_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     row = await _get_integration_or_404(db, integration_id)
     row.enabled = True
@@ -1339,8 +1296,8 @@ async def enable_integration(
         has_cred = any(c.is_configured for c in (row.credentials or []))
         row.status = IntegrationStatus.Healthy if has_cred else IntegrationStatus.NotConfigured
     await _append_activity(db, row.id, "Integration enabled", "Success",
-                           actor=_actor(claims))
-    await _write_log(db, row.id, "enable", _actor(claims), "Success",
+                           actor=_actor(identity))
+    await _write_log(db, row.id, "enable", _actor(identity), "Success",
                      message="Integration enabled")
     await db.commit()
     await db.refresh(row)
@@ -1352,7 +1309,7 @@ async def rotate_credentials(
     integration_id: str,
     body: ConfigureRequest,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     """
     Rotate the primary api_key.  body.api_key MUST be supplied — this endpoint
@@ -1375,8 +1332,8 @@ async def rotate_credentials(
     cred.is_configured = True
     cred.rotated_at = datetime.now(tz=timezone.utc)
     await _append_activity(db, row.id, "Credential rotated", "Success",
-                           actor=_actor(claims))
-    await _write_log(db, row.id, "rotate", _actor(claims), "Success",
+                           actor=_actor(identity))
+    await _write_log(db, row.id, "rotate", _actor(identity), "Success",
                      message="Primary credential rotated")
     await db.commit()
     await db.refresh(row)
@@ -1387,7 +1344,7 @@ async def rotate_credentials(
 async def sync_integration(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     """
     Manual sync trigger.  Bumps the connection's last_sync fields.
@@ -1401,8 +1358,8 @@ async def sync_integration(
     conn.last_sync = "just now"
     conn.last_sync_full = now.strftime("%b %-d · %H:%M UTC")
     await _append_activity(db, row.id, "Manual sync triggered", "Success",
-                           actor=_actor(claims))
-    await _write_log(db, row.id, "sync", _actor(claims), "Success",
+                           actor=_actor(identity))
+    await _write_log(db, row.id, "sync", _actor(identity), "Success",
                      message="Manual sync triggered")
     await db.commit()
     return {"ok": True, "last_sync_full": conn.last_sync_full}
@@ -1432,7 +1389,7 @@ _DOCS_URLS = {
 async def integration_docs(
     integration_id: str,
     db: AsyncSession = Depends(get_db),
-    _claims: Dict = Depends(verify_jwt),
+    _identity: IdentityContext = Depends(require_integration_read),
 ):
     row = await _get_integration_or_404(db, integration_id)
     return {"url": _DOCS_URLS.get(row.name), "name": row.name}
@@ -1602,7 +1559,7 @@ class BootstrapResult(BaseModel):
 @router.post("/bootstrap", response_model=BootstrapResult)
 async def bootstrap_integrations(
     db: AsyncSession = Depends(get_db),
-    claims: Dict = Depends(require_admin),
+    identity: IdentityContext = Depends(require_integration_write),
 ):
     """Seed the integrations tables from the in-process seed data module.
 
@@ -1623,7 +1580,7 @@ async def bootstrap_integrations(
 
     seed_data = build_seed()
     ids: List[str] = []
-    actor = _actor(claims)
+    actor = _actor(identity)
     # Track external_id → row.id so the post-pass can resolve cross-row
     # references (e.g. int-022's default_llm_integration_id_external →
     # int-017's actual UUID) without a second SELECT.

@@ -48,7 +48,7 @@ fi
 
 # Create realm roles (idempotent)
 echo "Creating realm roles (if not exists) ..."
-for ROLE in "spm:admin" "spm:auditor" "spm:viewer"; do
+for ROLE in "spm:admin" "spm:auditor" "spm:viewer" "spm:security-analyst"; do
   "$KCADM" get roles -r "$REALM" --fields name \
     | grep -q "\"$ROLE\"" || \
     "$KCADM" create roles -r "$REALM" -s name="$ROLE"

@@ -66,6 +66,12 @@ from platform_shared.security import (
 from platform_shared.kafka_utils import build_producer, safe_send, send_event
 from platform_shared.topics import topics_for_tenant
 from platform_shared.audit import emit_audit
+from platform_shared.rbac import (
+    IdentityContext,
+    require_model_read,
+    require_session_read,
+    require_agent_manage,
+)
 
 # ── Prompt Security Service ───────────────────────────────────────────────────
 from prompt_security import PromptSecurityService, ScreeningContext
@@ -761,7 +767,7 @@ async def health(request: Request):
 
 
 @app.get("/inventory", response_model=ServiceInventory)
-async def inventory(claims: Dict = Depends(verify_jwt)):
+async def inventory(_identity: IdentityContext = Depends(require_model_read)):
     return ServiceInventory(
         service="cpm-api",
         version="3.0.0",
@@ -1914,7 +1920,7 @@ def _merge_session_summaries(
 
 
 @app.get("/sessions")
-async def list_sessions(request: Request, claims: Dict = Depends(verify_jwt)):
+async def list_sessions(request: Request, _identity: IdentityContext = Depends(require_session_read)):
     """
     Return a summary of every session eligible for Lineage replay. Unions the
     api service's hot in-memory log (bounded LRU) with the orchestrator's
@@ -1928,7 +1934,7 @@ async def list_sessions(request: Request, claims: Dict = Depends(verify_jwt)):
 
 
 @app.get("/sessions/{session_id}/events")
-async def get_session_events(session_id: str, request: Request, claims: Dict = Depends(verify_jwt)):
+async def get_session_events(session_id: str, request: Request, _identity: IdentityContext = Depends(require_session_read)):
     """
     Return the full recorded event stream for *session_id* in WS-wire shape.
 
@@ -1983,31 +1989,21 @@ class SimulationScreenResponse(BaseModel):
 @app.post("/api/v1/simulation/screen", response_model=SimulationScreenResponse)
 async def simulation_screen(
     req: SimulationScreenRequest,
-    authorization: str = Header(None),
+    identity: IdentityContext = Depends(require_agent_manage),
 ):
     """
     Admin endpoint: run a prompt through all security layers without forwarding
     to the LLM.  Useful for policy tuning, incident investigation, and red-team
     regression testing.
 
-    Required roles: ``admin`` or ``security-admin``.
+    Required permission: agent.manage (held by spm:auditor, spm:security-analyst, spm:admin).
     """
-    token  = extract_bearer_token(authorization)
-    claims = validate_jwt_token(token)
-    roles  = claims.get("roles", [])
-
-    if not ({"admin", "security-admin"} & set(roles)):
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "forbidden", "required_roles": ["admin", "security-admin"]},
-        )
-
     ctx = ScreeningContext(
-        tenant_id  = req.tenant_id  or claims.get("tenant_id", "default"),
-        user_id    = req.user_id    or claims.get("sub", "unknown"),
+        tenant_id  = req.tenant_id  or identity.tenant_id or "default",
+        user_id    = req.user_id    or identity.user_id,
         session_id = req.session_id or None,
-        roles      = roles,
-        scopes     = claims.get("scopes", []),
+        roles      = identity.roles,
+        scopes     = identity.raw_claims.get("scopes", []),
     )
     result = await _pss.evaluate(req.prompt, ctx)
 

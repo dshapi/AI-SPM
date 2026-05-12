@@ -54,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from clients.policy_client import PolicyClient
 from consumers.lineage_consumer import LineageEventConsumer
+from consumers.audit_alert_consumer import AuditAlertConsumer
 from db.base import make_engine, make_session_factory, Base
 from events.publisher import EventPublisher
 from events.store import EventStore
@@ -63,6 +64,7 @@ from cases.service import CasesService
 from threat_findings.router import router as threat_findings_router
 from threat_findings.service import ThreatFindingsService
 from api.findings_router import router as findings_api_router
+from api.alerts_router import router as alerts_api_router
 from routers import sessions as sessions_router
 from routers.lineage import router as lineage_router
 from policies.router import router as policies_router
@@ -279,6 +281,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             _consumer_err,
         )
 
+    try:
+        _tenants = os.environ.get("AUDIT_ALERT_TENANTS", "t1").split(",")
+        audit_alert_consumer = AuditAlertConsumer(
+            bootstrap_servers = KAFKA_BOOTSTRAP,
+            tenants           = [t.strip() for t in _tenants if t.strip()],
+            session_factory   = session_factory,
+        )
+        await audit_alert_consumer.start()
+        app.state.audit_alert_consumer = audit_alert_consumer
+    except Exception as _aac_err:
+        app.state.audit_alert_consumer = None
+        logger.warning("Audit alert consumer failed to start: %s", _aac_err)
+
     # -- Stateless services (constructed once, reused across requests) -------
     app.state.risk_engine   = RiskEngine()
     app.state.policy_client = PolicyClient()
@@ -353,6 +368,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await lc.stop()
         except Exception as _lc_err:
             logger.warning("Lineage consumer stop error: %s", _lc_err)
+    aac = getattr(app.state, "audit_alert_consumer", None)
+    if aac is not None:
+        try:
+            await aac.stop()
+        except Exception as _aac_err:
+            logger.warning("Audit alert consumer stop error: %s", _aac_err)
     await publisher.stop()
     await engine.dispose()
     logger.info("=== %s stopped ===", SERVICE_NAME)
@@ -475,6 +496,7 @@ def create_app() -> FastAPI:
     app.include_router(cases_router)
     app.include_router(threat_findings_router)
     app.include_router(findings_api_router)
+    app.include_router(alerts_api_router)
     app.include_router(policies_router)
 
     # ── Health endpoints ────────────────────────────────────────────────────
