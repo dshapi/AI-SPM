@@ -21,7 +21,7 @@ from enum import Enum
 from typing import Any, ClassVar, Dict, FrozenSet, List, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +127,8 @@ class SessionLifecycleEvent(BaseModel):
     event_type:     EventType
     # session_id is a free-form string -- the chat sessions use IDs like
     # "session-1778614829220" and "agent-<uuid>-runtime" which are not UUIDs.
+    # Pydantic v2 rejects UUID for a str field under default strict-ish mode,
+    # but lifecycle event emission upstream passes a UUID, so coerce here.
     session_id:     str
     correlation_id: str            = Field(..., description="Shared trace ID across all steps")
     timestamp:      datetime       = Field(default_factory=_utcnow)
@@ -134,6 +136,11 @@ class SessionLifecycleEvent(BaseModel):
     status:         str            = Field(..., description="Outcome of this step, e.g. ok / blocked / scored")
     summary:        str            = Field(..., description="Human-readable one-liner for timeline display")
     payload:        Dict[str, Any] = Field(default_factory=dict, description="Full step-specific data")
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def _coerce_session_id_to_str(cls, v: Any) -> Any:
+        return str(v) if isinstance(v, UUID) else v
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -276,6 +283,11 @@ class SessionEventListResponse(BaseModel):
     correlation_id: str
     event_count:    int
     events:         List[SessionLifecycleEvent]
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def _coerce_session_id_to_str(cls, v: Any) -> Any:
+        return str(v) if isinstance(v, UUID) else v
 
 
 class SessionTimelineEntry(BaseModel):
