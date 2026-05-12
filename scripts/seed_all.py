@@ -1162,6 +1162,20 @@ async def ensure_schema() -> None:
                   file=_sys.stderr, flush=True)
             raise
         log.info("✓ schema at head")
+
+        # Belt-and-suspenders: create_all picks up any ORM models added after
+        # the last committed migration without requiring a new migration file.
+        # Idempotent — skips tables that already exist.
+        try:
+            from sqlalchemy import create_engine as _create_engine
+            from db.models import Base as _Base  # type: ignore
+            _engine = _create_engine(sync_url or raw_url)
+            with _engine.begin() as _conn:
+                _Base.metadata.create_all(_conn)
+            _engine.dispose()
+            log.info("✓ create_all safety pass complete")
+        except Exception as _exc:
+            log.warning("create_all safety pass failed (non-fatal): %s", _exc)
     finally:
         # Re-enable our logger in case fileConfig disabled it (defense in
         # depth alongside the env.py patch).
