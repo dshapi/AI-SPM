@@ -244,13 +244,15 @@ function RbacMatrix({ isAdmin }) {
         </div>
       )}
 
-      {/* Tooltip */}
-      {tooltip && (
-        <div className="mb-3 px-3 py-2 bg-gray-800 text-white rounded-lg text-xs max-w-xs">
-          <span className="font-mono font-semibold">{tooltip.key}</span>
-          <span className="text-gray-300 ml-2">— {tooltip.desc}</span>
-        </div>
-      )}
+      {/* Tooltip — fixed-height slot prevents layout shift on hover */}
+      <div className="mb-3 h-8 flex items-center">
+        {tooltip && (
+          <div className="px-3 py-1.5 bg-gray-800 text-white rounded-lg text-xs max-w-xs">
+            <span className="font-mono font-semibold">{tooltip.key}</span>
+            <span className="text-gray-300 ml-2">— {tooltip.desc}</span>
+          </div>
+        )}
+      </div>
 
       {/* Matrix table */}
       <div className="overflow-x-auto rounded-xl border border-gray-200">
