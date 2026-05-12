@@ -1701,6 +1701,14 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
   # roughly together a minute or two later.
   log "  Phase 3.5: applying platform tier early so OPA comes up while"
   log "             startup-orchestrator is still retrying its OPA probe"
+  # Pre-clean keycloak-bootstrap so it ALWAYS re-runs with the current
+  # credentials (Google IdP, seed user passwords). Without this, a Job
+  # that Completed on a previous bootstrap silently skips the IdP step
+  # because the Job object is immutable and kubectl apply is a no-op.
+  if kubectl -n aispm get job keycloak-bootstrap >/dev/null 2>&1; then
+    log "    pre-cleaning stale job/keycloak-bootstrap"
+    kubectl -n aispm delete job keycloak-bootstrap --ignore-not-found --wait=true >/dev/null
+  fi
   apply_tier platform
   log "    waiting for data-init Jobs to Complete (with live log tailing)..."
 
