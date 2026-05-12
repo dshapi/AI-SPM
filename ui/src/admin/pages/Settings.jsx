@@ -315,10 +315,10 @@ function RbacMatrix({ isAdmin }) {
                             className={cn(
                               'w-6 h-6 rounded border-2 flex items-center justify-center mx-auto transition-all',
                               role.admin
-                                ? 'bg-gray-100 border-gray-200 cursor-not-allowed'
+                                ? 'bg-gray-50 border-gray-400 cursor-not-allowed'
                                 : granted
                                   ? cn('bg-blue-600 border-blue-600', changed && 'ring-2 ring-amber-400 ring-offset-1')
-                                  : cn('bg-white border-gray-300', isAdmin && 'hover:border-blue-400 cursor-pointer', changed && 'ring-2 ring-amber-400 ring-offset-1'),
+                                  : cn('bg-white border-gray-400', isAdmin && 'hover:border-blue-500 cursor-pointer', changed && 'ring-2 ring-amber-400 ring-offset-1'),
                             )}
                           >
                             {role.admin
