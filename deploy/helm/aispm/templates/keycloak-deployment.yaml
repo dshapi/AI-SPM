@@ -148,6 +148,7 @@ stringData:
   seed-admin-password: {{ .Values.keycloak.seedAdminPassword | quote }}
   seed-auditor-password: {{ .Values.keycloak.seedAuditorPassword | quote }}
   seed-viewer-password: {{ .Values.keycloak.seedViewerPassword | quote }}
+  seed-analyst-password: {{ .Values.keycloak.seedAnalystPassword | default "analyst" | quote }}
   # Google IdP credentials. Empty by default — bootstrap Job skips IdP creation
   # if either is empty. Override via a gitignored values file or --set.
   google-client-id:     {{ (.Values.keycloak.google).clientId     | default "" | quote }}
@@ -266,7 +267,7 @@ spec:
               fi
 
               # Roles (idempotent)
-              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer"; do
+              for ROLE in admin auditor viewer "spm:admin" "spm:auditor" "spm:viewer" "spm:security-analyst"; do
                 "$KCADM" get-roles -r "$REALM" --rolename "$ROLE" > /dev/null 2>&1 || \
                   "$KCADM" create roles -r "$REALM" -s name="$ROLE"
               done
@@ -335,14 +336,16 @@ spec:
                   --uusername "$username" --rolename "$role" 2>/dev/null || true
               }
 
-              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"   "User"
-              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor" "User"
-              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"  "User"
+              create_user admin   "$SEED_ADMIN_PASSWORD"   admin   "admin@aispm.local"   "Admin"    "User"
+              create_user auditor "$SEED_AUDITOR_PASSWORD" auditor "auditor@aispm.local" "Auditor"  "User"
+              create_user viewer  "$SEED_VIEWER_PASSWORD"  viewer  "viewer@aispm.local"  "Viewer"   "User"
+              create_user analyst "$SEED_ANALYST_PASSWORD" analyst "analyst@aispm.local" "Analyst"  "User"
 
               # Assign prefixed roles so both plain and spm: checks pass
-              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"   2>/dev/null || true
-              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor" 2>/dev/null || true
-              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"  2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername admin   --rolename "spm:admin"            2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername auditor --rolename "spm:auditor"          2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername viewer  --rolename "spm:viewer"           2>/dev/null || true
+              "$KCADM" add-roles -r "$REALM" --uusername analyst --rolename "spm:security-analyst" 2>/dev/null || true
 
               # ── Google identity provider (idempotent, optional) ──────────────
               # Creates a "google" social IdP in the aispm realm so the hosted
@@ -475,6 +478,11 @@ spec:
                 secretKeyRef:
                   name: keycloak-secret
                   key: seed-viewer-password
+            - name: SEED_ANALYST_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: keycloak-secret
+                  key: seed-analyst-password
             # Google IdP credentials — empty when not configured. The
             # bootstrap script branches on these being non-empty.
             - name: GOOGLE_CLIENT_ID
