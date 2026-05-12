@@ -313,6 +313,15 @@ if [ -z "$VALUES_EXTRA" ] && [ -f "$HELM_CHART/values.dev-multinode.yaml" ]; the
       ;;
   esac
 fi
+# Auto-include the gitignored local-secrets overlay when present.
+# This carries machine-specific secrets such as keycloak.google.clientId /
+# clientSecret (Google IdP) and any other values that must not be committed.
+# Applied last so it wins over all other overlays.
+VALUES_LOCAL="${VALUES_LOCAL:-}"
+if [ -z "$VALUES_LOCAL" ] && [ -f "$HELM_CHART/values.local-secrets.yaml" ]; then
+  VALUES_LOCAL="$HELM_CHART/values.local-secrets.yaml"
+  echo "$(date +%H:%M:%S) [bootstrap] auto-detected local secrets overlay — VALUES_LOCAL=$VALUES_LOCAL"
+fi
 SKIP_PREFLIGHT=0
 TARGET="all"
 SECRETS_FROM=""      # optional override path; default is $REPO_ROOT/.env
@@ -584,6 +593,7 @@ if [ "$DRY_RUN" = "1" ]; then
   log "  helm lint $HELM_CHART"
   helm lint "$HELM_CHART" -f "$HELM_CHART/values.yaml" -f "$VALUES_FILE" \
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
+    ${VALUES_LOCAL:+-f "$VALUES_LOCAL"} \
     || { err "helm lint failed"; exit 1; }
 
   RENDERED=/tmp/aispm-rendered-dryrun.yaml
@@ -592,6 +602,7 @@ if [ "$DRY_RUN" = "1" ]; then
     -f "$HELM_CHART/values.yaml" \
     -f "$VALUES_FILE" \
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
+    ${VALUES_LOCAL:+-f "$VALUES_LOCAL"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
     --set falco.enabled=false \
@@ -1424,6 +1435,7 @@ if [ "$TARGET" = "all" ] || [ "$TARGET" = "chart" ]; then
     -f "$HELM_CHART/values.yaml" \
     -f "$VALUES_FILE" \
     ${VALUES_EXTRA:+-f "$VALUES_EXTRA"} \
+    ${VALUES_LOCAL:+-f "$VALUES_LOCAL"} \
     --api-versions security.istio.io/v1beta1 \
     --api-versions networking.istio.io/v1beta1 \
     --set falco.enabled=false \
