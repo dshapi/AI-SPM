@@ -148,7 +148,7 @@ async def _ws_emit(
 
 class SinglePromptSimRequest(BaseModel):
     prompt: str
-    session_id: str
+    session_id: str = ""  # auto-generated if omitted (e.g. health probes)
     execution_mode: str = "live"
     attack_type: str = "custom"
 
@@ -571,17 +571,39 @@ async def _run_with_hard_timeout(session_id: str, coro, label: str) -> None:
 @router.post("/simulate/single")
 async def simulate_single(req: SinglePromptSimRequest,
                            background_tasks: BackgroundTasks):
-    """Run a single prompt through the security pipeline and stream events."""
+    """Run a single prompt through the security pipeline and stream events.
+
+    The synchronous lexical screen result (is_blocked / result / label) is
+    included in the immediate HTTP response so that health probes and callers
+    without an active WebSocket can read the outcome without waiting for the
+    async WS event pipeline.
+    """
+    session_id = req.session_id or str(uuid.uuid4())
+
+    # Fast synchronous lexical + obfuscation scan — runs in the request
+    # handler so the result is available in the HTTP response body immediately.
+    try:
+        from prompt_security.rules.lexical_scanner import LexicalScanner as _LS
+        _blocked, _label = _LS().scan(req.prompt)
+    except Exception:
+        _blocked, _label = False, None
+
     coro = _run_single_prompt(
-        session_id=req.session_id,
+        session_id=session_id,
         prompt=req.prompt,
         attack_type=req.attack_type,
         execution_mode=req.execution_mode,
     )
     background_tasks.add_task(
-        _run_with_hard_timeout, req.session_id, coro, "single-prompt"
+        _run_with_hard_timeout, session_id, coro, "single-prompt"
     )
-    return {"session_id": req.session_id, "status": "started"}
+    return {
+        "session_id": session_id,
+        "status": "started",
+        "is_blocked": _blocked,
+        "result":     "blocked" if _blocked else "allowed",
+        "label":      _label,
+    }
 
 
 @router.post("/simulate/garak")
