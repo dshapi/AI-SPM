@@ -44,6 +44,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: flink-checkpoints
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   accessModes:
     - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}
@@ -60,6 +65,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: flink-savepoints
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: local-path
@@ -73,6 +83,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: flink-taskmanager-state
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: local-path
@@ -89,6 +104,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: flink-ha
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   accessModes:
     - {{ .Values.flink.sharedAccessMode | default "ReadWriteMany" }}

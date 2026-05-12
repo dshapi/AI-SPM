@@ -5,6 +5,11 @@ kind: Service
 metadata:
   name: kafka
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   clusterIP: None
   # Publish DNS records for pods even before they pass readiness probes.
@@ -31,6 +36,11 @@ kind: Service
 metadata:
   name: kafka-broker
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   selector:
     app: kafka

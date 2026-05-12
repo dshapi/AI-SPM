@@ -7,6 +7,11 @@ kind: Deployment
 metadata:
   name: spm-api
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # 2 replicas + topology spread = no SPOF.  Both replicas run
   # ensure_schema (alembic upgrade head) on lifespan; alembic's

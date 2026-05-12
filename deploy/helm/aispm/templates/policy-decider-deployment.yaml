@@ -4,6 +4,11 @@ kind: Deployment
 metadata:
   name: policy-decider
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # 2 replicas + topology spread = no SPOF.
   replicas: {{ .Values.policyDecider.replicas | default 2 }}

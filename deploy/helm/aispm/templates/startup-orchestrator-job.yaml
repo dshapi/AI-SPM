@@ -7,7 +7,11 @@ kind: Job
 metadata:
   name: startup-orchestrator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
   annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     # Keep this Job after it completes so bootstrap can gate on its status.
     # "keep" tells Helm NOT to delete it on upgrade — which also avoids the
     # "spec.template is immutable" error that Helm hits when it tries to

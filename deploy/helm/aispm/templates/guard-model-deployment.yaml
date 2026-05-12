@@ -4,6 +4,11 @@ kind: Deployment
 metadata:
   name: guard-model
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # 2 replicas + topology spread = no SPOF.
   replicas: {{ .Values.guardModel.replicas | default 2 }}

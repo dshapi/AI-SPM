@@ -21,7 +21,11 @@ kind: Ingress
 metadata:
   name: aispm-orchestrator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
   annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     {{- if .Values.ingress.certManager }}
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
@@ -60,7 +64,11 @@ kind: Ingress
 metadata:
   name: aispm-api
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
   annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     {{- if .Values.ingress.certManager }}
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}
@@ -109,7 +117,11 @@ kind: Ingress
 metadata:
   name: aispm-ui
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
   annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
     {{- if .Values.ingress.certManager }}
     cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | default "letsencrypt-staging" }}
     {{- end }}

@@ -19,6 +19,11 @@ kind: ResourceQuota
 metadata:
   name: agent-runtime-quota
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   hard:
     pods:                          {{ .Values.agentRuntime.quota.maxPods | quote }}
@@ -40,6 +45,11 @@ kind: LimitRange
 metadata:
   name: agent-runtime-limits
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   limits:
     - type: Container

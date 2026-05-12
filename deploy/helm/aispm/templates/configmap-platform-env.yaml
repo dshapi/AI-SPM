@@ -10,6 +10,11 @@ kind: ConfigMap
 metadata:
   name: platform-env
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 data:
   {{- range $k, $v := .Values.platformEnv }}
   {{ $k }}: {{ $v | quote }}

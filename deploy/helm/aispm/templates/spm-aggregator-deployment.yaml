@@ -4,6 +4,11 @@ kind: Deployment
 metadata:
   name: spm-aggregator
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   # 2 replicas + topology spread = no SPOF.  Reads from Kafka in a
   # consumer-group; partition assignment splits work across replicas.

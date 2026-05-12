@@ -32,6 +32,11 @@ kind: StatefulSet
 metadata:
   name: flink-jobmanager
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   serviceName: flink-jobmanager
   replicas: {{ .Values.flink.jobmanager.replicas | default 2 }}

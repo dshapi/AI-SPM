@@ -11,6 +11,9 @@ metadata:
   labels:
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: aispm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 data:
   agent_rules.yaml: |
     # ── Macros ────────────────────────────────────────────────────────────────

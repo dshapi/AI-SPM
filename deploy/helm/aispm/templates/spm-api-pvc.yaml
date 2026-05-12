@@ -15,6 +15,11 @@ kind: PersistentVolumeClaim
 metadata:
   name: spm-api-models
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   accessModes: [ReadWriteOnce]
   # Independent of kafka.storageClass on purpose — historically this

@@ -8,6 +8,11 @@ kind: NetworkPolicy
 metadata:
   name: default-deny-all
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   podSelector: {}
   policyTypes:
@@ -19,6 +24,11 @@ kind: NetworkPolicy
 metadata:
   name: agent-allow-egress
   namespace: {{ .Values.agentRuntime.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 spec:
   podSelector:
     matchLabels:

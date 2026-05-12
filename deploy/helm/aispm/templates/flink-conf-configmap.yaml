@@ -21,6 +21,11 @@ kind: ConfigMap
 metadata:
   name: flink-conf
   namespace: {{ .Values.global.namespace }}
+  labels:
+    app.kubernetes.io/managed-by: Helm
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 data:
   flink-conf.yaml: |
     # Flink cluster configuration — used by both JobManager and TaskManager.

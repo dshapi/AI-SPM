@@ -35,7 +35,11 @@ metadata:
   name: agent-orchestrator
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: agent-orchestrator
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
@@ -43,7 +47,11 @@ metadata:
   name: agent-orchestrator
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: agent-orchestrator
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 rules:
   # Live OPA policy sync — read + patch the chart-rendered opa-policies
   # ConfigMap when the UI activates a new policy version.
@@ -58,7 +66,11 @@ metadata:
   name: agent-orchestrator
   namespace: {{ .Values.global.namespace }}
   labels:
+    app.kubernetes.io/managed-by: Helm
     app: agent-orchestrator
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
