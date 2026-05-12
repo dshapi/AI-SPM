@@ -37,7 +37,7 @@ from typing import Any, Dict, List, Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import Depends, FastAPI, Header
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
@@ -54,10 +54,13 @@ from integrations_routes import (  # noqa: E402
     _encode_secret,
     _iso,
     _mask,
-    require_admin,
-    require_auditor,
     router,
-    verify_jwt,
+)
+from platform_shared.rbac import (
+    IdentityContext,
+    get_current_identity,
+    require_integration_write,
+    require_audit_read,
 )
 
 
@@ -123,61 +126,70 @@ class TestIsoHelper:
 #
 # FastAPI's dependency injection inspects each callable's signature via
 # ``inspect.signature()``.  If the wrapper's signature is ``(*args, **kwargs)``
-# the DI layer cannot see the ``Authorization`` header parameter, so it
-# treats the header as unrecognised and rejects every request with 422.
-# These tests lock the shape in place.
+# the DI layer cannot see the necessary parameters, so it rejects every
+# request with 422.  These tests lock the shape in place for the RBAC deps.
 # ─────────────────────────────────────────────────────────────────────────────
+def _make_identity(roles=None):
+    return IdentityContext(
+        user_id="u1", tenant_id="t1", email=None,
+        roles=roles or [],
+        raw_claims={"sub": "u1", "roles": roles or []},
+    )
+
+
 class TestAuthWrapperSignatures:
-    def test_verify_jwt_has_authorization_header_param(self):
-        sig = inspect.signature(verify_jwt)
-        assert "authorization" in sig.parameters, (
-            "verify_jwt must expose an 'authorization' parameter so FastAPI's "
-            "DI can resolve the Authorization header — regression of bug #60."
-        )
+    def test_get_current_identity_has_request_param(self):
+        """get_current_identity must expose 'request' so FastAPI DI can inject
+        it — regression of bug #60 where (*args, **kwargs) broke DI."""
+        sig = inspect.signature(get_current_identity)
+        assert "request" in sig.parameters
 
-    def test_verify_jwt_authorization_default_is_header(self):
-        # The default for `authorization` must be a fastapi.Header marker,
-        # otherwise FastAPI will fall back to treating it as a Query param.
-        sig = inspect.signature(verify_jwt)
-        param = sig.parameters["authorization"]
-        # fastapi.params.Header is the underlying class behind fastapi.Header()
-        from fastapi.params import Header as HeaderParam
-        assert isinstance(param.default, HeaderParam)
-
-    def test_require_admin_depends_on_verify_jwt(self):
-        sig = inspect.signature(require_admin)
-        assert "claims" in sig.parameters
+    def test_require_integration_write_has_identity_depends(self):
+        """RBAC dep must wire 'identity' as Depends(get_current_identity) so
+        FastAPI's DI resolves the chain without a 422."""
+        sig = inspect.signature(require_integration_write)
+        assert "identity" in sig.parameters
         from fastapi.params import Depends as DependsParam
-        assert isinstance(sig.parameters["claims"].default, DependsParam)
+        assert isinstance(sig.parameters["identity"].default, DependsParam)
 
-    def test_require_auditor_depends_on_verify_jwt(self):
-        sig = inspect.signature(require_auditor)
-        assert "claims" in sig.parameters
-        from fastapi.params import Depends as DependsParam
-        assert isinstance(sig.parameters["claims"].default, DependsParam)
-
-    def test_require_admin_rejects_non_admin(self):
-        # Call directly — no FastAPI involved, exercising the guard logic.
+    def test_require_integration_write_rejects_auditor(self):
+        """integration.write is not in the auditor role — must raise 403."""
         from fastapi import HTTPException
+        from unittest.mock import MagicMock
+        identity = _make_identity(roles=["spm:auditor"])
         with pytest.raises(HTTPException) as excinfo:
-            require_admin(claims={"sub": "u1", "roles": ["spm:auditor"]})
+            asyncio.get_event_loop().run_until_complete(
+                require_integration_write(request=MagicMock(), identity=identity)
+            )
         assert excinfo.value.status_code == 403
 
-    def test_require_admin_accepts_admin(self):
-        claims = {"sub": "u1", "roles": ["spm:admin"]}
-        # Returns the same claims dict unchanged.
-        assert require_admin(claims=claims) is claims
+    def test_require_integration_write_accepts_admin(self):
+        """Admin super-role passes all permission checks."""
+        from unittest.mock import MagicMock
+        identity = _make_identity(roles=["spm:admin"])
+        result = asyncio.get_event_loop().run_until_complete(
+            require_integration_write(request=MagicMock(), identity=identity)
+        )
+        assert result is identity
 
-    def test_require_auditor_accepts_both_roles(self):
-        admin = {"sub": "u1", "roles": ["spm:admin"]}
-        auditor = {"sub": "u2", "roles": ["spm:auditor"]}
-        assert require_auditor(claims=admin) is admin
-        assert require_auditor(claims=auditor) is auditor
+    def test_require_audit_read_accepts_auditor(self):
+        """audit.read is granted to auditor role."""
+        from unittest.mock import MagicMock
+        identity = _make_identity(roles=["spm:auditor"])
+        result = asyncio.get_event_loop().run_until_complete(
+            require_audit_read(request=MagicMock(), identity=identity)
+        )
+        assert result is identity
 
-    def test_require_auditor_rejects_plain_user(self):
+    def test_require_audit_read_rejects_no_role(self):
+        """Users with no role get 403 on audit.read."""
         from fastapi import HTTPException
+        from unittest.mock import MagicMock
+        identity = _make_identity(roles=[])
         with pytest.raises(HTTPException) as excinfo:
-            require_auditor(claims={"sub": "u1", "roles": []})
+            asyncio.get_event_loop().run_until_complete(
+                require_audit_read(request=MagicMock(), identity=identity)
+            )
         assert excinfo.value.status_code == 403
 
 
@@ -225,18 +237,22 @@ def client_factory():
         app.dependency_overrides[get_db] = _override_get_db
 
         if claims is not None:
-            # Override verify_jwt so any Authorization header is accepted
-            # and the given claims are returned.  We do NOT override
-            # require_admin / require_auditor — those still run against
-            # the claims the override hands out, which is the behaviour we
-            # want to test.
-            def _override_verify_jwt(authorization: Optional[str] = Header(None)):
-                if not authorization:
-                    from fastapi import HTTPException
-                    raise HTTPException(status_code=401, detail="Missing bearer token")
-                return claims
+            # Override get_current_identity so the given roles are visible to
+            # the RBAC dependency chain (require_integration_read/write, etc).
+            # require_* guards still run their authorization logic against the
+            # identity we inject — that's the behaviour under test.
+            identity = IdentityContext(
+                user_id=claims.get("sub", "u1"),
+                tenant_id=claims.get("tenant_id", "t1"),
+                email=claims.get("email"),
+                roles=claims.get("roles", []),
+                raw_claims=claims,
+            )
 
-            app.dependency_overrides[verify_jwt] = _override_verify_jwt
+            def _override_identity():
+                return identity
+
+            app.dependency_overrides[get_current_identity] = _override_identity
 
         return TestClient(app)
 
@@ -261,11 +277,17 @@ class TestAuthGatingList:
         assert resp.status_code == 200, resp.text
         assert resp.json() == []
 
-    def test_list_with_plain_user_is_200(self, client_factory):
-        # verify_jwt only → no role required for listing.
-        client = client_factory(claims={"sub": "u1", "roles": []})
+    def test_list_with_viewer_is_200(self, client_factory):
+        # integration.read is granted to spm:viewer and above.
+        client = client_factory(claims={"sub": "u1", "roles": ["spm:viewer"]})
         resp = client.get("/integrations", headers={"Authorization": "Bearer x"})
         assert resp.status_code == 200, resp.text
+
+    def test_list_with_no_role_is_403(self, client_factory):
+        # A user with no role has no permissions — must be denied.
+        client = client_factory(claims={"sub": "u1", "roles": []})
+        resp = client.get("/integrations", headers={"Authorization": "Bearer x"})
+        assert resp.status_code == 403, resp.text
 
 
 class TestAuthGatingAdminRoutes:
@@ -317,13 +339,11 @@ class TestAuthGatingAuditorRoutes:
         )
         assert resp.status_code == 403, resp.text
 
-    def test_metrics_open_to_any_authenticated(self, client_factory):
-        # /metrics uses verify_jwt only (no role gate), so any authenticated
-        # token should reach the handler.  The DB-backed handler will error
-        # because our mock session doesn't walk the exact query chain, but
-        # we only care that we pass the auth layer — so we accept anything
-        # that is NOT 401/403.
-        client = client_factory(claims={"sub": "u1", "roles": []})
+    def test_metrics_open_to_viewer(self, client_factory):
+        # /metrics uses require_integration_read (Viewer+).  The DB-backed
+        # handler may error on our mock session but we only care that auth
+        # passes — so we accept anything that is NOT 401/403.
+        client = client_factory(claims={"sub": "u1", "roles": ["spm:viewer"]})
         resp = client.get(
             "/integrations/metrics",
             headers={"Authorization": "Bearer x"},

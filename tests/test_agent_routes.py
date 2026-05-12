@@ -17,34 +17,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 import agent_routes
-from agent_routes import require_admin, router, verify_jwt
+from agent_routes import router
+from platform_shared.rbac import get_current_identity, IdentityContext
 from spm.db.session import get_db
 
 
-# The local verify_jwt / require_admin in agent_routes delegate to a
-# lazily-resolved ``app`` module. In the test env we don't have a JWT
-# public key configured, so we install a stub _app_module that returns
-# canned claims. Each test sets the claims it needs.
-
-class _StubAppModule:
-    def __init__(self, claims):
-        self._claims = claims
-    def verify_jwt(self, authorization=None):
-        if not authorization:
-            raise HTTPException(status_code=401, detail="missing")
-        return self._claims
-    def _tenant_from_claims(self, claims, fallback="t1"):
-        return claims.get("tenant_id") or claims.get("tenant") or fallback
-
-
-@pytest.fixture(autouse=True)
-def _stub_app_module(monkeypatch):
-    """Replace agent_routes._app_module with a stub by default; tests
-    can override the claims via the client_factory below."""
-    monkeypatch.setattr(
-        agent_routes, "_app_module", lambda: _StubAppModule(
-            {"sub": "u1", "roles": ["spm:admin"]}
-        )
+def _make_identity(claims):
+    """Convert a canned-claims dict into an IdentityContext for DI override."""
+    return IdentityContext(
+        user_id=claims.get("sub", "u1"),
+        tenant_id=claims.get("tenant_id", "t1"),
+        email=claims.get("email"),
+        roles=claims.get("roles", []),
+        raw_claims=claims,
     )
 
 
@@ -113,26 +98,24 @@ def _make_agent_row(*, id=None, name="x", version="1", agent_type="custom",
 
 
 @pytest.fixture
-def client_factory(monkeypatch):
-    """Build a TestClient with overrides for get_db. The auth
-    wrappers (verify_jwt / require_admin) delegate to
-    ``agent_routes._app_module()`` which we stub per-test so claims
-    can vary."""
+def client_factory():
+    """Build a TestClient with overrides for get_db and get_current_identity."""
     def _factory(*, claims=ADMIN_CLAIMS, rows: Optional[List[Any]] = None):
         rows = rows or []
         db = _make_db_with_rows(rows)
-
-        # Per-test claims via the stub _app_module.
-        monkeypatch.setattr(
-            agent_routes, "_app_module", lambda: _StubAppModule(claims),
-        )
+        identity = _make_identity(claims)
 
         app = FastAPI()
         app.include_router(router)
 
         async def _override_db():
             yield db
-        app.dependency_overrides[get_db] = _override_db
+
+        def _override_identity():
+            return identity
+
+        app.dependency_overrides[get_db]               = _override_db
+        app.dependency_overrides[get_current_identity] = _override_identity
 
         return TestClient(app), db
 
