@@ -178,4 +178,4 @@ Please open a GitHub Issue and include:
 
 ---
 
-
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/E1B71ZPPAM)
