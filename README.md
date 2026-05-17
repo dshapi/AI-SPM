@@ -62,10 +62,10 @@ clone the repo.
 
 ## Bring-up (clean cluster)
 
-Run from `/Users/danyshapiro/PycharmProjects/AISPM`. Each step is idempotent.
+Run from `/<project_root>`. Each step is idempotent.
 
 ```bash
-  ./deploy/scripts/bootstrap-cluster.sh
+  <project_root>/deploy/scripts/bootstrap-cluster.sh
 ```
 
 End-to-end on a fresh machine: about 20 minutes. Subsequent runs that
