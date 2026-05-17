@@ -16,6 +16,7 @@ Identify risks across AI application supply chains/piplines and agents - that ca
 Implement proper governance controls around AI usage.
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) ![Version](https://img.shields.io/badge/version-1.0.0-blue) ![Language](https://img.shields.io/badge/language-python-yellow) [![GitHub](https://img.shields.io/badge/GitHub-%23121011.svg?logo=github&logoColor=white)](https://github.com/dshapi/AI-SPM/) ![OBS package build status](https://img.shields.io/obs/openSUSE%3ATools/osc/Debian_11/x86_64)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/12873/badge)](https://www.bestpractices.dev/projects/12873)
 
 <p align="center"><img src="/ui/public/logo.png" width="50%"></p>
 <div align="center">
@@ -62,10 +63,10 @@ clone the repo.
 
 ## Bring-up (clean cluster)
 
-Run from `/Users/danyshapiro/PycharmProjects/AISPM`. Each step is idempotent.
+Run from `/<project_root>`. Each step is idempotent.
 
 ```bash
-  ./deploy/scripts/bootstrap-cluster.sh
+  <project_root>/deploy/scripts/bootstrap-cluster.sh
 ```
 
 End-to-end on a fresh machine: about 20 minutes. Subsequent runs that
